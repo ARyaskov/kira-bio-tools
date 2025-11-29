@@ -1,99 +1,82 @@
-//! Binary persistence for VcfIndex with mmap support.
+//! Persistence layer for `VcfIndex`.
 //!
-//! File format (.kbi - Kira Bio Index):
-//! ```text
-//! [IndexHeader]           - 64 bytes
-//! [u32 mph_g[]; mph_m]    - MPH displacement table
-//! [u64 keys[]; n]         - Sorted genomic keys
-//! [u64 offsets[]; n]      - VCF byte offsets
-//! ```
+//! - Cross-platform (Linux / macOS / Windows)
+//! - No alignment assumptions for mmap on load
+//! - On save uses BufWriter + bytemuck::cast_slice for fast bulk I/O
+//! - On disk layout is:
+//!   [ IndexHeader ][ MPH.g (u32[m]) ][ keys (u64[n]) ][ offsets (u64[n]) ]
 
-use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-use std::mem;
-use std::path::Path;
-use std::slice;
+use std::{
+    fs::File,
+    io::{BufWriter, Read, Seek, SeekFrom, Write},
+    path::Path,
+};
 
-use bytemuck::{Pod, Zeroable};
 use kira_kv_engine::Mphf;
-use memmap2::{Mmap, MmapOptions};
+use memmap2::MmapOptions;
 
 use crate::vcf_index::{IndexError, Result, VcfIndex};
 
-/// Magic bytes identifying KBI format
-pub const INDEX_MAGIC: [u8; 8] = *b"KBIV0001";
+/// Magic of `.kbi` files: 'KBI1'
+pub const INDEX_MAGIC: u32 = 0x4B_42_49_31;
 
-/// Current format version
+/// Index format version.
 pub const INDEX_VERSION: u32 = 1;
 
-/// Endianness marker
-const ENDIAN_TAG: u32 = 0x01020304;
-
-/// Index file header (64 bytes, cache-line aligned)
+/// Fixed-size on-disk header for `.kbi` files.
 ///
-/// Layout (no padding):
-///   magic      : [u8; 8]   ( 8)
-///   n_entries  : u64       ( 8) = 16
-///   mph_salt   : u64       ( 8) = 24
-///   off_mph_g  : u64       ( 8) = 32
-///   off_keys   : u64       ( 8) = 40
-///   off_offsets: u64       ( 8) = 48
-///   version    : u32       ( 4) = 52
-///   endian     : u32       ( 4) = 56
-///   mph_m      : u32       ( 4) = 60
-///   _reserved  : [u8; 4]   ( 4) = 64
-#[repr(C, align(64))]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+/// Layout (little-endian):
+/// - magic:      u32  (4 bytes)
+/// - version:    u32  (4 bytes)
+/// - n_entries:  u64  (8 bytes)
+/// - mph_n:      u64  (8 bytes)
+/// - mph_m:      u32  (4 bytes)
+/// - mph_salt:   u64  (8 bytes)
+/// - off_mph_g:  u64  (8 bytes)
+/// - off_keys:   u64  (8 bytes)
+/// - off_offsets:u64  (8 bytes)
+/// = 64 bytes total
+#[derive(Clone, Copy, Debug)]
 pub struct IndexHeader {
-    pub magic: [u8; 8],
-
-    /// Number of indexed entries (also used as MPH `n`)
+    pub magic: u32,
+    pub version: u32,
     pub n_entries: u64,
-
-    /// MPH salt
+    pub mph_n: u64,
+    pub mph_m: u32,
     pub mph_salt: u64,
-
-    /// Section offsets from file start
     pub off_mph_g: u64,
     pub off_keys: u64,
     pub off_offsets: u64,
-
-    /// File format version
-    pub version: u32,
-
-    /// Endianness marker
-    pub endian: u32,
-
-    /// MPH `m` parameter (length of displacement table `g`)
-    pub mph_m: u32,
-
-    /// Reserved for future use
-    pub _reserved: [u8; 4],
 }
 
 impl IndexHeader {
-    fn new(n_entries: usize, mph: &Mphf) -> Self {
-        let header_size = mem::size_of::<IndexHeader>() as u64;
-        let mph_g_size = (mph.g.len() * mem::size_of::<u32>()) as u64;
-        let keys_size = (n_entries * mem::size_of::<u64>()) as u64;
+    pub const ENCODED_LEN: usize = 64;
 
+    pub fn new(
+        n_entries: usize,
+        mph_n: u64,
+        mph_m: u32,
+        mph_salt: u64,
+        off_mph_g: usize,
+        off_keys: usize,
+        off_offsets: usize,
+    ) -> Self {
         Self {
             magic: INDEX_MAGIC,
-            n_entries: n_entries as u64,
-            mph_salt: mph.salt,
-            off_mph_g: header_size,
-            off_keys: header_size + mph_g_size,
-            off_offsets: header_size + mph_g_size + keys_size,
             version: INDEX_VERSION,
-            endian: ENDIAN_TAG,
-            mph_m: mph.m,
-            _reserved: [0; 4],
+            n_entries: n_entries as u64,
+            mph_n,
+            mph_m,
+            mph_salt,
+            off_mph_g: off_mph_g as u64,
+            off_keys: off_keys as u64,
+            off_offsets: off_offsets as u64,
         }
     }
 
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if self.magic != INDEX_MAGIC {
-            return Err(IndexError::InvalidFormat("Bad magic bytes".into()));
+            return Err(IndexError::InvalidFormat("Bad magic".to_string()));
         }
         if self.version != INDEX_VERSION {
             return Err(IndexError::VersionMismatch {
@@ -101,146 +84,230 @@ impl IndexHeader {
                 got: self.version,
             });
         }
-        if self.endian != ENDIAN_TAG {
-            return Err(IndexError::InvalidFormat("Endianness mismatch".into()));
-        }
         Ok(())
+    }
+
+    pub fn to_bytes(&self) -> [u8; Self::ENCODED_LEN] {
+        let mut buf = [0u8; Self::ENCODED_LEN];
+        let mut off = 0;
+
+        buf[off..off + 4].copy_from_slice(&self.magic.to_le_bytes());
+        off += 4;
+        buf[off..off + 4].copy_from_slice(&self.version.to_le_bytes());
+        off += 4;
+
+        buf[off..off + 8].copy_from_slice(&self.n_entries.to_le_bytes());
+        off += 8;
+        buf[off..off + 8].copy_from_slice(&self.mph_n.to_le_bytes());
+        off += 8;
+        buf[off..off + 4].copy_from_slice(&self.mph_m.to_le_bytes());
+        off += 4;
+        buf[off..off + 8].copy_from_slice(&self.mph_salt.to_le_bytes());
+        off += 8;
+        buf[off..off + 8].copy_from_slice(&self.off_mph_g.to_le_bytes());
+        off += 8;
+        buf[off..off + 8].copy_from_slice(&self.off_keys.to_le_bytes());
+        off += 8;
+        buf[off..off + 8].copy_from_slice(&self.off_offsets.to_le_bytes());
+
+        buf
+    }
+
+    pub fn from_bytes(buf: &[u8; Self::ENCODED_LEN]) -> Self {
+        let mut off = 0;
+
+        let magic = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
+        off += 4;
+        let version = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
+        off += 4;
+
+        let n_entries = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+        off += 8;
+        let mph_n = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+        off += 8;
+        let mph_m = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
+        off += 4;
+        let mph_salt = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+        off += 8;
+        let off_mph_g = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+        off += 8;
+        let off_keys = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+        off += 8;
+        let off_offsets = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+
+        Self {
+            magic,
+            version,
+            n_entries,
+            mph_n,
+            mph_m,
+            mph_salt,
+            off_mph_g,
+            off_keys,
+            off_offsets,
+        }
     }
 }
 
-/// Save index to file
+/// Save index to `.kbi` file.
+///
+/// Layout:
+/// - header (`IndexHeader`)
+/// - MPH.g: `u32[m]` in little-endian
+/// - keys: `u64[n]` in little-endian
+/// - offsets: `u64[n]` in little-endian
 pub fn save_index(path: &Path, keys: &[u64], offsets: &[u64], mph: &Mphf) -> Result<()> {
+    use bytemuck::cast_slice;
+
+    let n = keys.len();
+    if n != offsets.len() {
+        return Err(IndexError::InvalidFormat(
+            "keys/offsets length mismatch".to_string(),
+        ));
+    }
+
     let file = File::create(path)?;
-    let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, file);
+    let mut writer = BufWriter::new(file);
 
-    let header = IndexHeader::new(keys.len(), mph);
+    let hdr_size = IndexHeader::ENCODED_LEN;
+    let off_mph_g = hdr_size;
+    let off_keys = off_mph_g + (mph.m as usize) * std::mem::size_of::<u32>();
+    let off_offsets = off_keys + n * std::mem::size_of::<u64>();
 
-    // Write header
-    writer.write_all(bytemuck::bytes_of(&header))?;
+    // Header
+    let header = IndexHeader::new(
+        n,
+        mph.n,
+        mph.m,
+        mph.salt,
+        off_mph_g,
+        off_keys,
+        off_offsets,
+    );
+    writer.write_all(&header.to_bytes())?;
 
-    // Write MPH g array
-    let g_bytes = unsafe {
-        slice::from_raw_parts(
-            mph.g.as_ptr() as *const u8,
-            mph.g.len() * mem::size_of::<u32>(),
-        )
-    };
-    writer.write_all(g_bytes)?;
+    // MPH.g (bulk write)
+    writer.write_all(cast_slice::<u32, u8>(&mph.g))?;
 
-    // Write keys
-    let keys_bytes = unsafe {
-        slice::from_raw_parts(
-            keys.as_ptr() as *const u8,
-            keys.len() * mem::size_of::<u64>(),
-        )
-    };
-    writer.write_all(keys_bytes)?;
+    // Keys (bulk write)
+    writer.write_all(cast_slice::<u64, u8>(keys))?;
 
-    // Write offsets
-    let offsets_bytes = unsafe {
-        slice::from_raw_parts(
-            offsets.as_ptr() as *const u8,
-            offsets.len() * mem::size_of::<u64>(),
-        )
-    };
-    writer.write_all(offsets_bytes)?;
+    // Offsets (bulk write)
+    writer.write_all(cast_slice::<u64, u8>(offsets))?;
 
     writer.flush()?;
     Ok(())
 }
 
-/// Load index using mmap (zero-copy, instant load)
+/// Load index using memory-mapped I/O.
+///
+/// Windows does not guarantee 8-byte alignment for mmap base address,
+/// so we treat the mapped region as raw bytes and decode with
+/// `from_le_bytes` instead of `cast_slice`.
 pub fn load_index_mmap(path: &Path) -> Result<VcfIndex> {
     let file = File::open(path)?;
     let mmap = unsafe { MmapOptions::new().map(&file)? };
 
-    if mmap.len() < mem::size_of::<IndexHeader>() {
-        return Err(IndexError::InvalidFormat("File too small".into()));
+    if mmap.len() < IndexHeader::ENCODED_LEN {
+        return Err(IndexError::InvalidFormat("File too small".to_string()));
     }
 
-    // Parse header
-    let header: &IndexHeader = bytemuck::from_bytes(&mmap[..mem::size_of::<IndexHeader>()]);
+    let mut hdr_buf = [0u8; IndexHeader::ENCODED_LEN];
+    hdr_buf.copy_from_slice(&mmap[..IndexHeader::ENCODED_LEN]);
+    let header = IndexHeader::from_bytes(&hdr_buf);
     header.validate()?;
 
     let n = header.n_entries as usize;
     let m = header.mph_m as usize;
 
-    // Extract MPH g array (must copy for Mphf ownership)
+    // MPH.g
     let g_start = header.off_mph_g as usize;
-    let g_end = g_start + m * mem::size_of::<u32>();
-    let g: Vec<u32> = bytemuck::cast_slice(&mmap[g_start..g_end]).to_vec();
+    let g_end = g_start + m * std::mem::size_of::<u32>();
+    if g_end > mmap.len() {
+        return Err(IndexError::InvalidFormat("Truncated MPH.g".to_string()));
+    }
+    let mut g = Vec::with_capacity(m);
+    for chunk in mmap[g_start..g_end].chunks_exact(4) {
+        g.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+    }
 
     let mph = Mphf {
-        n: header.n_entries,
+        n: header.mph_n,
         m: header.mph_m,
         salt: header.mph_salt,
         g,
     };
 
-    // Extract keys (copy)
+    // Keys
     let keys_start = header.off_keys as usize;
-    let keys_end = keys_start + n * mem::size_of::<u64>();
-    let keys: Vec<u64> = bytemuck::cast_slice(&mmap[keys_start..keys_end]).to_vec();
+    let keys_end = keys_start + n * std::mem::size_of::<u64>();
+    if keys_end > mmap.len() {
+        return Err(IndexError::InvalidFormat("Truncated keys".to_string()));
+    }
+    let mut keys = Vec::with_capacity(n);
+    for chunk in mmap[keys_start..keys_end].chunks_exact(8) {
+        keys.push(u64::from_le_bytes(chunk.try_into().unwrap()));
+    }
 
-    // Extract offsets (copy)
-    let offsets_start = header.off_offsets as usize;
-    let offsets_end = offsets_start + n * mem::size_of::<u64>();
-    let offsets: Vec<u64> = bytemuck::cast_slice(&mmap[offsets_start..offsets_end]).to_vec();
+    // Offsets
+    let offs_start = header.off_offsets as usize;
+    let offs_end = offs_start + n * std::mem::size_of::<u64>();
+    if offs_end > mmap.len() {
+        return Err(IndexError::InvalidFormat("Truncated offsets".to_string()));
+    }
+    let mut offsets = Vec::with_capacity(n);
+    for chunk in mmap[offs_start..offs_end].chunks_exact(8) {
+        offsets.push(u64::from_le_bytes(chunk.try_into().unwrap()));
+    }
 
     Ok(VcfIndex::from_parts(mph, keys, offsets))
 }
 
-/// Load index with full read (no mmap)
+/// Load index with regular buffered I/O (без mmap).
 pub fn load_index(path: &Path) -> Result<VcfIndex> {
     let mut file = File::open(path)?;
 
-    // Read header
-    let mut header_bytes = [0u8; mem::size_of::<IndexHeader>()];
-    file.read_exact(&mut header_bytes)?;
-    let header: IndexHeader = *bytemuck::from_bytes(&header_bytes);
+    // Header
+    let mut hdr_buf = [0u8; IndexHeader::ENCODED_LEN];
+    file.read_exact(&mut hdr_buf)?;
+    let header = IndexHeader::from_bytes(&hdr_buf);
     header.validate()?;
 
     let n = header.n_entries as usize;
     let m = header.mph_m as usize;
 
-    // Read MPH g
+    // MPH.g
     file.seek(SeekFrom::Start(header.off_mph_g))?;
-    let mut g = vec![0u32; m];
-    let g_bytes =
-        unsafe { slice::from_raw_parts_mut(g.as_mut_ptr() as *mut u8, m * mem::size_of::<u32>()) };
-    file.read_exact(g_bytes)?;
+    let mut g = Vec::with_capacity(m);
+    let mut buf4 = [0u8; 4];
+    for _ in 0..m {
+        file.read_exact(&mut buf4)?;
+        g.push(u32::from_le_bytes(buf4));
+    }
 
     let mph = Mphf {
-        n: header.n_entries,
+        n: header.mph_n,
         m: header.mph_m,
         salt: header.mph_salt,
         g,
     };
 
-    // Read keys
+    // Keys
     file.seek(SeekFrom::Start(header.off_keys))?;
-    let mut keys = vec![0u64; n];
-    let keys_bytes = unsafe {
-        slice::from_raw_parts_mut(keys.as_mut_ptr() as *mut u8, n * mem::size_of::<u64>())
-    };
-    file.read_exact(keys_bytes)?;
+    let mut keys = Vec::with_capacity(n);
+    let mut buf8 = [0u8; 8];
+    for _ in 0..n {
+        file.read_exact(&mut buf8)?;
+        keys.push(u64::from_le_bytes(buf8));
+    }
 
-    // Read offsets
+    // Offsets
     file.seek(SeekFrom::Start(header.off_offsets))?;
-    let mut offsets = vec![0u64; n];
-    let offsets_bytes = unsafe {
-        slice::from_raw_parts_mut(offsets.as_mut_ptr() as *mut u8, n * mem::size_of::<u64>())
-    };
-    file.read_exact(offsets_bytes)?;
+    let mut offsets = Vec::with_capacity(n);
+    for _ in 0..n {
+        file.read_exact(&mut buf8)?;
+        offsets.push(u64::from_le_bytes(buf8));
+    }
 
     Ok(VcfIndex::from_parts(mph, keys, offsets))
-}
-
-/// Calculate file size for given parameters
-pub fn calculate_file_size(n_entries: usize, mph_m: usize) -> u64 {
-    let header = mem::size_of::<IndexHeader>() as u64;
-    let mph_g = (mph_m * mem::size_of::<u32>()) as u64;
-    let keys = (n_entries * mem::size_of::<u64>()) as u64;
-    let offsets = (n_entries * mem::size_of::<u64>()) as u64;
-    header + mph_g + keys + offsets
 }

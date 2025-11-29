@@ -12,6 +12,7 @@ kira_kv_engine = { version = "0.1", features = ["serde", "parallel", "pgm"] }
 thiserror = "1.0"
 memmap2 = "0.9"
 bytemuck = { version = "1.16", features = ["derive"] }
+pgm_index = "0.3"
 
 # Optional CLI dependencies
 clap = { version = "4", features = ["derive"], optional = true }

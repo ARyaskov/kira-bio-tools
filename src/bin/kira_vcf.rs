@@ -16,6 +16,16 @@ use memmap2::MmapOptions;
 
 use kira_bio_tools::{GenomicKey, VcfIndex, VcfIndexBuilder, chr_name_to_id};
 
+fn print_command_time(label: &str, start: Instant) {
+    let elapsed = start.elapsed();
+    println!(
+        "[time] {}: {:.3} ms ({} ns)",
+        label,
+        elapsed.as_secs_f64() * 1000.0,
+        elapsed.as_nanos()
+    );
+}
+
 /// CLI definition
 #[derive(Parser)]
 #[command(name = "kira-vcf")]
@@ -345,6 +355,7 @@ fn cmd_index(input: &PathBuf, output: &PathBuf, progress: usize) -> anyhow::Resu
 
 fn cmd_query(index_path: &Path, vcf_path: Option<&Path>, positions: &str) -> anyhow::Result<()> {
     eprintln!("Loading index: {}", index_path.display());
+    let cmd_start = Instant::now();
     let index = VcfIndex::load_mmap(index_path)?;
 
     let mut vcf_file = match vcf_path {
@@ -352,8 +363,13 @@ fn cmd_query(index_path: &Path, vcf_path: Option<&Path>, positions: &str) -> any
         None => None,
     };
 
-    for pos_str in positions.split(',') {
-        let pos_str = pos_str.trim();
+    let mut outputs: Vec<String> = Vec::new();
+
+    for raw in positions.split(',') {
+        let pos_str = raw.trim();
+        if pos_str.is_empty() {
+            continue;
+        }
 
         // allow "chr:1234" or just "1234"
         let (chr_id, pos) = if let Some((chr, p)) = pos_str.split_once(':') {
@@ -368,22 +384,34 @@ fn cmd_query(index_path: &Path, vcf_path: Option<&Path>, positions: &str) -> any
         let key = GenomicKey::new(chr_id, pos);
 
         if let Some(offset) = index.get(key) {
-            println!("{} → offset {}", pos_str, offset);
+            outputs.push(format!("{} → offset {}", pos_str, offset));
 
             if let Some(file) = vcf_file.as_mut() {
                 file.seek(SeekFrom::Start(offset))?;
                 let mut reader = BufReader::new(file);
                 let mut line = String::new();
                 reader.read_line(&mut line)?;
-                print!("{}", line);
+
+                while line.ends_with(['\n', '\r']) {
+                    line.pop();
+                }
+
+                outputs.push(line);
             }
         } else {
-            println!("{} not found", pos_str);
+            outputs.push(format!("{} not found", pos_str));
         }
+    }
+
+    print_command_time("query", cmd_start);
+
+    for line in outputs {
+        println!("{}", line);
     }
 
     Ok(())
 }
+
 
 fn cmd_stat(index_path: &PathBuf) -> anyhow::Result<()> {
     let load_start = Instant::now();
@@ -414,12 +442,15 @@ fn cmd_stat(index_path: &PathBuf) -> anyhow::Result<()> {
 }
 
 fn cmd_range(index_path: &PathBuf, chr: &str, start: u32, end: u32) -> anyhow::Result<()> {
+    let cmd_start = Instant::now();
     let index = VcfIndex::load_mmap(index_path)?;
 
     let chr_id =
         chr_name_to_id(chr).ok_or_else(|| anyhow::anyhow!("Unknown chromosome: {}", chr))?;
 
     let results = index.range(chr_id, start, end);
+
+    print_command_time("range", cmd_start);
 
     println!(
         "Found {} positions in {}:{}-{}",
@@ -434,3 +465,4 @@ fn cmd_range(index_path: &PathBuf, chr: &str, start: u32, end: u32) -> anyhow::R
 
     Ok(())
 }
+

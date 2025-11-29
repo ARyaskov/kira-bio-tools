@@ -1,20 +1,15 @@
 [target.x86_64-unknown-linux-gnu]
 rustflags = [
-    "-Z", "dylib-lto",
     "-C", "target-cpu=native",
     "-C", "opt-level=3",
-    "-C", "lto=fat",
     "-C", "codegen-units=1",
-    "-C", "panic=abort",
-    "-C", "embed-bitcode=yes"
+    "-C", "panic=abort"
 ]
 
 [target.x86_64-pc-windows-msvc]
 rustflags = [
-    "-Z", "dylib-lto",
     "-C", "target-cpu=native",
     "-C", "opt-level=3",
-    "-C", "lto=fat",
     "-C", "codegen-units=1",
     "-C", "panic=abort",
 ]
@@ -22,18 +17,9 @@ rustflags = [
 # === Apple Silicon ===
 [target.aarch64-apple-darwin]
 rustflags = [
-    "-Z", "dylib-lto",
     "-C", "target-cpu=apple-m1",
     "-C", "opt-level=3",
-    "-C", "lto=fat",
     "-C", "codegen-units=1",
     "-C", "panic=abort",
-    "-C", "embed-bitcode=yes"
 ]
 
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-overflow-checks = false
