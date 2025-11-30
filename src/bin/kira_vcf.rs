@@ -1,36 +1,20 @@
-//! CLI tool for VCF indexing and querying.
-//!
-//! Commands:
-//! - index: Build index from VCF file
-//! - query: Look up positions in index
-//! - stat: Show index statistics
-//! - range: Query by genomic interval
-
-use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::time::Instant;
 
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use memmap2::MmapOptions;
 
-use kira_bio_tools::{GenomicKey, VcfIndex, VcfIndexBuilder, chr_name_to_id};
+use kira_bio_tools::{
+    build_csi_index, build_kbi_index, chr_id_to_name, chr_name_to_id, detect_format,
+    fetch_line, CsiQuery, KbiIndex, Region, VcfFormat, VcfReader,
+};
 
-fn print_command_time(label: &str, start: Instant) {
-    let elapsed = start.elapsed();
-    println!(
-        "[time] {}: {:.3} ms ({} ns)",
-        label,
-        elapsed.as_secs_f64() * 1000.0,
-        elapsed.as_nanos()
-    );
-}
-
-/// CLI definition
 #[derive(Parser)]
 #[command(name = "kira-vcf")]
-#[command(about = "High-performance VCF indexer using learned indexes")]
-#[command(version)]
+#[command(about = "High-performance VCF indexer with tabix compatibility")]
+#[command(version, author)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -38,431 +22,342 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build index from VCF file
-    Index {
-        /// Input VCF file
-        #[arg(short, long)]
-        input: PathBuf,
+    #[command(
+        about = "Index a VCF file (tabix-compatible for BGZF files)",
+        visible_alias = "idx"
+    )]
+    Index(IndexArgs),
 
-        /// Output index file (.kbi)
-        #[arg(short, long)]
-        output: PathBuf,
+    #[command(about = "Query regions from indexed VCF")]
+    Query(QueryArgs),
 
-        /// Show progress every N records
-        #[arg(long, default_value = "100000")]
-        progress: usize,
-    },
+    #[command(about = "Display index statistics")]
+    Stat(StatArgs),
 
-    /// Query positions in index
-    Query {
-        /// Index file (.kbi)
-        #[arg(short, long)]
-        index: PathBuf,
+    #[command(about = "List chromosome names from index")]
+    List(ListArgs),
 
-        /// VCF file (optional, for retrieving lines)
-        #[arg(short, long)]
-        vcf: Option<PathBuf>,
+    #[command(about = "Print VCF header", visible_alias = "H")]
+    Header(HeaderArgs),
 
-        /// Positions to query (chr[:pos] format, comma-separated)
-        #[arg(short, long)]
-        positions: String,
-    },
-
-    /// Show index statistics
-    Stat {
-        /// Index file (.kbi)
-        #[arg(short, long)]
-        index: PathBuf,
-    },
-
-    /// Query range of positions
-    Range {
-        /// Index file (.kbi)
-        #[arg(short, long)]
-        index: PathBuf,
-
-        /// Chromosome
-        #[arg(short, long)]
-        chr: String,
-
-        /// Start position
-        #[arg(short, long)]
-        start: u32,
-
-        /// End position
-        #[arg(short, long)]
-        end: u32,
-    },
+    #[command(about = "Print indexed regions (like tabix -R)")]
+    Regions(RegionsArgs),
 }
 
-fn main() -> anyhow::Result<()> {
+#[derive(Parser)]
+struct IndexArgs {
+    #[arg(help = "Input VCF file (.vcf, .vcf.gz with BGZF)")]
+    input: PathBuf,
+
+    #[arg(short, long, help = "Output index file")]
+    output: Option<PathBuf>,
+
+    #[arg(short, long, default_value = "vcf", help = "Format preset (vcf, bed, gff, sam)")]
+    preset: String,
+
+    #[arg(short, long, help = "Force overwrite existing index")]
+    force: bool,
+
+    #[arg(short = 's', long, default_value = "14", help = "Minimum bin shift (CSI)")]
+    min_shift: u8,
+
+    #[arg(short = 'd', long, default_value = "5", help = "Bin depth (CSI)")]
+    depth: u8,
+
+    #[arg(short = 'C', long, help = "Generate CSI index (for BGZF files)")]
+    csi: bool,
+
+    #[arg(long, help = "Skip KBI index generation")]
+    no_kbi: bool,
+}
+
+#[derive(Parser)]
+struct QueryArgs {
+    #[arg(help = "Indexed VCF file")]
+    file: PathBuf,
+
+    #[arg(help = "Regions to query (chr:start-end or chr:pos)")]
+    regions: Vec<String>,
+
+    #[arg(short = 'R', long, help = "File with regions (one per line)")]
+    regions_file: Option<PathBuf>,
+
+    #[arg(short, long, help = "Print only matching record count")]
+    count: bool,
+
+    #[arg(short = 'h', long, help = "Include header in output")]
+    print_header: bool,
+
+    #[arg(short = 'H', long, help = "Print only header")]
+    only_header: bool,
+}
+
+#[derive(Parser)]
+struct StatArgs {
+    #[arg(help = "Index file (.kbi or .csi)")]
+    index: PathBuf,
+}
+
+#[derive(Parser)]
+struct ListArgs {
+    #[arg(help = "Indexed VCF file")]
+    file: PathBuf,
+}
+
+#[derive(Parser)]
+struct HeaderArgs {
+    #[arg(help = "VCF file")]
+    file: PathBuf,
+}
+
+#[derive(Parser)]
+struct RegionsArgs {
+    #[arg(help = "Indexed VCF file")]
+    file: PathBuf,
+
+    #[arg(short = 'R', long, help = "Regions file")]
+    regions_file: PathBuf,
+}
+
+fn main() -> Result<()> {
     let cli = Cli::parse();
+    let start = Instant::now();
 
-    match cli.command {
-        Commands::Index {
-            input,
-            output,
-            progress,
-        } => {
-            cmd_index(&input, &output, progress)?;
-        }
-        Commands::Query {
-            index,
-            vcf,
-            positions,
-        } => {
-            cmd_query(&index, vcf.as_deref(), &positions)?;
-        }
-        Commands::Stat { index } => {
-            cmd_stat(&index)?;
-        }
-        Commands::Range {
-            index,
-            chr,
-            start,
-            end,
-        } => {
-            cmd_range(&index, &chr, start, end)?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Parse chromosome name from raw bytes without allocations.
-///
-/// Supports:
-/// - "1".."22"
-/// - "chr1".."chr22" (any case, e.g. "CHR1")
-/// - "X", "Y", "M", "MT" with optional "chr" prefix
-fn parse_chr_id_bytes(bytes: &[u8]) -> Option<u8> {
-    if bytes.is_empty() {
-        return None;
-    }
-
-    // Strip optional "chr" / "CHR" prefix
-    let mut i = 0usize;
-    if bytes.len() >= 3 {
-        let c0 = bytes[0];
-        let c1 = bytes[1];
-        let c2 = bytes[2];
-        if (c0 == b'c' || c0 == b'C') && (c1 == b'h' || c1 == b'H') && (c2 == b'r' || c2 == b'R') {
-            i = 3;
-        }
-    }
-
-    let rem = &bytes[i..];
-    if rem.is_empty() {
-        return None;
-    }
-
-    // Special chromosomes
-    if rem.len() == 1 {
-        match rem[0] {
-            b'X' | b'x' => return Some(23),
-            b'Y' | b'y' => return Some(24),
-            b'M' | b'm' => return Some(25),
-            _ => {}
-        }
-    } else if rem.len() == 2 {
-        // MT / mt
-        if (rem[0] == b'M' || rem[0] == b'm') && (rem[1] == b'T' || rem[1] == b't') {
-            return Some(25);
-        }
-    }
-
-    // Numeric chromosomes 1..22
-    let mut n: u32 = 0;
-    for &b in rem {
-        if b < b'0' || b > b'9' {
-            return None;
-        }
-        n = n.saturating_mul(10).saturating_add((b - b'0') as u32);
-        if n > 22 {
-            return None;
-        }
-    }
-
-    if (1..=22).contains(&n) {
-        Some(n as u8)
-    } else {
-        None
-    }
-}
-
-/// Parse POS field from raw bytes as u32.
-fn parse_pos_bytes(bytes: &[u8]) -> Option<u32> {
-    if bytes.is_empty() {
-        return None;
-    }
-
-    let mut n: u64 = 0;
-    for &b in bytes {
-        if b < b'0' || b > b'9' {
-            return None;
-        }
-        n = n * 10 + (b - b'0') as u64;
-        if n > u32::MAX as u64 {
-            return None;
-        }
-    }
-
-    Some(n as u32)
-}
-
-/// Build index from VCF file using mmap + zero-allocation ASCII parser.
-fn cmd_index(input: &PathBuf, output: &PathBuf, progress: usize) -> anyhow::Result<()> {
-    eprintln!("[index] Building index from: {}", input.display());
-    let start_time = Instant::now();
-
-    eprintln!("[index] Opening VCF...");
-    let file = File::open(input)?;
-    let file_size = file.metadata()?.len();
-    eprintln!(
-        "[index] VCF opened, file size: {:.2} MB",
-        file_size as f64 / 1024.0 / 1024.0
-    );
-
-    eprintln!("[index] Memory-mapping VCF...");
-    let mmap = unsafe { MmapOptions::new().map(&file)? };
-    let data: &[u8] = &mmap;
-    let len = data.len();
-
-    eprintln!("[index] Initializing builder...");
-    let mut builder = VcfIndexBuilder::with_capacity(10_000_000);
-
-    let mut byte_offset: u64 = 0;
-    let mut count: usize = 0;
-    let mut line_count: usize = 0;
-
-    eprintln!("[index] Starting VCF scan (mmap + byte parser)...");
-    let scan_start = Instant::now();
-
-    let mut pos_in_file: usize = 0;
-    while pos_in_file < len {
-        let line_start = pos_in_file;
-
-        // Find end of line ('\n') or EOF
-        let rel = match data[line_start..].iter().position(|&b| b == b'\n') {
-            Some(p) => p,
-            None => len - line_start,
-        };
-        let line_end = line_start + rel;
-        let next_pos = if line_end < len && data[line_end] == b'\n' {
-            line_end + 1
-        } else {
-            line_end
-        };
-
-        let line = &data[line_start..line_end];
-        line_count += 1;
-        byte_offset = line_start as u64;
-
-        if line_count % 10_000 == 0 {
-            let elapsed = scan_start.elapsed().as_secs_f64();
-            eprintln!(
-                "[index] Scan progress: {:>8} lines, {:>8} variants, offset={}, {:.2}s elapsed",
-                line_count, count, byte_offset, elapsed
-            );
-        }
-
-        // Skip empty lines
-        if line.is_empty() {
-            pos_in_file = next_pos;
-            continue;
-        }
-
-        // Header lines start with '#'
-        if line[0] == b'#' {
-            pos_in_file = next_pos;
-            continue;
-        }
-
-        // Parse VCF line: CHROM\tPOS\t...
-        // We only need first two fields, so split at first two tabs
-        let mut field_iter = line.splitn(3, |&b| b == b'\t');
-        let chrom_bytes = field_iter.next().unwrap_or(&[]);
-        let pos_bytes = field_iter.next().unwrap_or(&[]);
-
-        if !chrom_bytes.is_empty() && !pos_bytes.is_empty() {
-            if let (Some(chr_id), Some(pos)) =
-                (parse_chr_id_bytes(chrom_bytes), parse_pos_bytes(pos_bytes))
-            {
-                let key = GenomicKey::new(chr_id, pos);
-                builder.add(key, byte_offset)?;
-                count += 1;
-
-                if count % progress == 0 {
-                    let chrom_str = std::str::from_utf8(chrom_bytes).unwrap_or("<?>");
-                    eprintln!(
-                        "[index] Records: {:>8} (line {}), last key: {}:{} offset {}",
-                        count, line_count, chrom_str, pos, byte_offset
-                    );
-                }
-            }
-        }
-
-        pos_in_file = next_pos;
-    }
-
-    let scan_time = scan_start.elapsed();
-    eprintln!(
-        "[index] Finished VCF scan: {} lines, {} records, {:.2}s",
-        line_count,
-        count,
-        scan_time.as_secs_f64()
-    );
-
-    eprintln!(
-        "[index] Building MPH index for {} entries (last_offset={}, capacity_hint={})...",
-        count, byte_offset, 10_000_000
-    );
-    let build_start = Instant::now();
-    let index = builder.build()?;
-    let build_time = build_start.elapsed();
-    eprintln!(
-        "[index] MPH build finished in {:.2}s",
-        build_time.as_secs_f64()
-    );
-
-    eprintln!("[index] Saving index to: {}", output.display());
-    let save_start = Instant::now();
-    index.save(output)?;
-    let save_time = save_start.elapsed();
-    eprintln!("[index] Save finished in {:.2}s", save_time.as_secs_f64());
-
-    let total_time = start_time.elapsed();
-    eprintln!("\n[index] Statistics:");
-    eprintln!("  Total entries:    {}", index.len());
-    eprintln!(
-        "  Memory usage:     {:.2} MB",
-        index.memory_usage() as f64 / 1024.0 / 1024.0
-    );
-    eprintln!("  Bytes per key:    {:.2}", index.bytes_per_key());
-    eprintln!("  Scan time:        {:.2}s", scan_time.as_secs_f64());
-    eprintln!("  Build time:       {:.2}s", build_time.as_secs_f64());
-    eprintln!("  Save time:        {:.2}s", save_time.as_secs_f64());
-    eprintln!("  Total time:       {:.2}s", total_time.as_secs_f64());
-    if build_time.as_secs_f64() > 0.0 {
-        eprintln!(
-            "  Build rate:       {:.0} entries/s",
-            count as f64 / build_time.as_secs_f64()
-        );
-    }
-
-    Ok(())
-}
-
-fn cmd_query(index_path: &Path, vcf_path: Option<&Path>, positions: &str) -> anyhow::Result<()> {
-    eprintln!("Loading index: {}", index_path.display());
-    let cmd_start = Instant::now();
-    let index = VcfIndex::load_mmap(index_path)?;
-
-    let mut vcf_file = match vcf_path {
-        Some(path) => Some(File::open(path)?),
-        None => None,
+    let result = match cli.command {
+        Commands::Index(args) => cmd_index(args),
+        Commands::Query(args) => cmd_query(args),
+        Commands::Stat(args) => cmd_stat(args),
+        Commands::List(args) => cmd_list(args),
+        Commands::Header(args) => cmd_header(args),
+        Commands::Regions(args) => cmd_regions(args),
     };
 
-    let mut outputs: Vec<String> = Vec::new();
+    let elapsed = start.elapsed();
+    eprintln!("Total time: {:.3}s", elapsed.as_secs_f64());
 
-    for raw in positions.split(',') {
-        let pos_str = raw.trim();
-        if pos_str.is_empty() {
-            continue;
-        }
+    result
+}
 
-        // allow "chr:1234" or just "1234"
-        let (chr_id, pos) = if let Some((chr, p)) = pos_str.split_once(':') {
-            let chr_id =
-                chr_name_to_id(chr).ok_or_else(|| anyhow::anyhow!("Unknown chromosome {}", chr))?;
-            let p = p.parse::<u32>()?;
-            (chr_id, p)
-        } else {
-            (0u8, pos_str.parse::<u32>()?)
-        };
+fn cmd_index(args: IndexArgs) -> Result<()> {
+    let format = detect_format(&args.input)?;
 
-        let key = GenomicKey::new(chr_id, pos);
+    eprintln!("Input: {:?}", args.input);
+    eprintln!("Format: {:?}", format);
 
-        if let Some(offset) = index.get(key) {
-            outputs.push(format!("{} → offset {}", pos_str, offset));
+    match format {
+        VcfFormat::Bgzf => {
+            let csi_path = args.output.clone().unwrap_or_else(|| {
+                let mut p = args.input.clone();
+                p.set_extension("vcf.gz.csi");
+                p
+            });
 
-            if let Some(file) = vcf_file.as_mut() {
-                file.seek(SeekFrom::Start(offset))?;
-                let mut reader = BufReader::new(file);
-                let mut line = String::new();
-                reader.read_line(&mut line)?;
-
-                while line.ends_with(['\n', '\r']) {
-                    line.pop();
-                }
-
-                outputs.push(line);
+            if !args.no_kbi || args.csi {
+                eprintln!("Building CSI index: {:?}", csi_path);
+                let csi_start = Instant::now();
+                build_csi_index(&args.input, &csi_path)?;
+                eprintln!("CSI build time: {:.3}s", csi_start.elapsed().as_secs_f64());
             }
-        } else {
-            outputs.push(format!("{} not found", pos_str));
+
+            if !args.no_kbi {
+                let kbi_path = args.input.with_extension("kbi");
+                eprintln!("Building KBI index: {:?}", kbi_path);
+                let kbi_start = Instant::now();
+                let index = build_kbi_index(&args.input, &kbi_path)?;
+                eprintln!("KBI build time: {:.3}s", kbi_start.elapsed().as_secs_f64());
+                eprintln!("Entries: {}", index.len());
+                eprintln!("Bytes/key: {:.2}", index.bytes_per_key());
+            }
+        }
+        VcfFormat::Plain | VcfFormat::Gzip => {
+            let kbi_path = args.output.unwrap_or_else(|| args.input.with_extension("kbi"));
+
+            eprintln!("Building KBI index: {:?}", kbi_path);
+            let kbi_start = Instant::now();
+            let index = build_kbi_index(&args.input, &kbi_path)?;
+            eprintln!("KBI build time: {:.3}s", kbi_start.elapsed().as_secs_f64());
+            eprintln!("Entries: {}", index.len());
+            eprintln!("Bytes/key: {:.2}", index.bytes_per_key());
+
+            if args.csi {
+                eprintln!("Warning: CSI index requires BGZF compression. Use bgzip first.");
+            }
         }
     }
 
-    print_command_time("query", cmd_start);
+    Ok(())
+}
 
-    for line in outputs {
+fn cmd_query(args: QueryArgs) -> Result<()> {
+    if args.only_header {
+        return cmd_header(HeaderArgs { file: args.file });
+    }
+
+    let kbi_path = args.file.with_extension("kbi");
+    let csi_path = {
+        let mut p = args.file.clone();
+        let name = p.file_name().unwrap().to_string_lossy().to_string();
+        p.set_file_name(format!("{}.csi", name));
+        p
+    };
+
+    let use_kbi = kbi_path.exists();
+    let use_csi = csi_path.exists() && !use_kbi;
+
+    if !use_kbi && !use_csi {
+        anyhow::bail!("No index found. Run 'kira-vcf index {:?}' first.", args.file);
+    }
+
+    let mut regions = args.regions.clone();
+    if let Some(ref regions_file) = args.regions_file {
+        let file = File::open(regions_file)?;
+        for line in BufReader::new(file).lines() {
+            regions.push(line?);
+        }
+    }
+
+    if regions.is_empty() {
+        anyhow::bail!("No regions specified");
+    }
+
+    if args.print_header {
+        print_vcf_header(&args.file)?;
+    }
+
+    let mut total_count = 0usize;
+
+    if use_kbi {
+        let index = KbiIndex::load(&kbi_path)?;
+
+        for region_str in &regions {
+            let region = Region::parse(region_str)
+                .ok_or_else(|| anyhow::anyhow!("Invalid region: {}", region_str))?;
+
+            let chr_id = chr_name_to_id(&region.chr)
+                .ok_or_else(|| anyhow::anyhow!("Unknown chromosome: {}", region.chr))?;
+
+            let start = region.start.unwrap_or(0);
+            let end = region.end.unwrap_or(u32::MAX);
+
+            let results = index.range(chr_id, start, end);
+            total_count += results.len();
+
+            if !args.count {
+                for (pos, offset) in results {
+                    let line = fetch_line(&args.file, offset)?;
+                    println!("{}", line);
+                }
+            }
+        }
+    } else if use_csi {
+        let csi = CsiQuery::open(&csi_path)?;
+
+        for region_str in &regions {
+            let region = Region::parse(region_str)
+                .ok_or_else(|| anyhow::anyhow!("Invalid region: {}", region_str))?;
+
+            let chr_id = chr_name_to_id(&region.chr)
+                .ok_or_else(|| anyhow::anyhow!("Unknown chromosome: {}", region.chr))?;
+
+            let start = region.start.unwrap_or(0);
+            let end = region.end.unwrap_or(u32::MAX);
+
+            let chunks = csi.query((chr_id - 1) as usize, start, end);
+
+            for (chunk_start, _chunk_end) in chunks {
+                let line = fetch_line(&args.file, chunk_start)?;
+                if !args.count {
+                    println!("{}", line);
+                }
+                total_count += 1;
+            }
+        }
+    }
+
+    if args.count {
+        println!("{}", total_count);
+    }
+
+    Ok(())
+}
+
+fn cmd_stat(args: StatArgs) -> Result<()> {
+    let file_size = fs::metadata(&args.index)?.len();
+
+    if args.index.extension().map(|e| e == "kbi").unwrap_or(false) {
+        let index = KbiIndex::load(&args.index)?;
+
+        println!("Index Statistics (KBI)");
+        println!("======================");
+        println!("File:          {:?}", args.index);
+        println!("File size:     {} bytes ({:.2} MB)", file_size, file_size as f64 / 1024.0 / 1024.0);
+        println!("Entries:       {}", index.len());
+        println!("Memory usage:  {} bytes ({:.2} MB)", index.memory_usage(), index.memory_usage() as f64 / 1024.0 / 1024.0);
+        println!("Bytes/key:     {:.2}", index.bytes_per_key());
+    } else if args.index.extension().map(|e| e == "csi").unwrap_or(false) {
+        let _csi = CsiQuery::open(&args.index)?;
+
+        println!("Index Statistics (CSI)");
+        println!("======================");
+        println!("File:          {:?}", args.index);
+        println!("File size:     {} bytes ({:.2} MB)", file_size, file_size as f64 / 1024.0 / 1024.0);
+        println!("Format:        CSI v1 (tabix-compatible)");
+    } else {
+        anyhow::bail!("Unknown index format");
+    }
+
+    Ok(())
+}
+
+fn cmd_list(args: ListArgs) -> Result<()> {
+    let kbi_path = args.file.with_extension("kbi");
+
+    if kbi_path.exists() {
+        let index = KbiIndex::load(&kbi_path)?;
+
+        for chr_id in 1..=25u8 {
+            if let Some(name) = chr_id_to_name(chr_id) {
+                let results = index.range(chr_id, 0, u32::MAX);
+                if !results.is_empty() {
+                    println!("{}", name);
+                }
+            }
+        }
+    } else {
+        let mut reader = VcfReader::open(&args.file)?;
+        let _ = reader.header()?;
+
+        for name in reader.reference_sequences() {
+            println!("{}", name);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_header(args: HeaderArgs) -> Result<()> {
+    print_vcf_header(&args.file)
+}
+
+fn cmd_regions(args: RegionsArgs) -> Result<()> {
+    let query_args = QueryArgs {
+        file: args.file,
+        regions: Vec::new(),
+        regions_file: Some(args.regions_file),
+        count: false,
+        print_header: false,
+        only_header: false,
+    };
+    cmd_query(query_args)
+}
+
+fn print_vcf_header(path: &PathBuf) -> Result<()> {
+    let mut reader = VcfReader::open(path)?;
+    let headers = reader.header()?;
+
+    for line in headers {
         println!("{}", line);
     }
 
     Ok(())
 }
-
-
-fn cmd_stat(index_path: &PathBuf) -> anyhow::Result<()> {
-    let load_start = Instant::now();
-    let index = VcfIndex::load_mmap(index_path)?;
-    let load_time = load_start.elapsed();
-
-    let file_size = std::fs::metadata(index_path)?.len();
-
-    println!("Index Statistics");
-    println!("================");
-    println!("File:             {}", index_path.display());
-    println!(
-        "File size:        {:.2} MB",
-        file_size as f64 / 1024.0 / 1024.0
-    );
-    println!("Entries:          {}", index.len());
-    println!(
-        "Memory usage:     {:.2} MB",
-        index.memory_usage() as f64 / 1024.0 / 1024.0
-    );
-    println!("Bytes per key:    {:.2}", index.bytes_per_key());
-    println!(
-        "Load time:        {:.2}ms",
-        load_time.as_secs_f64() * 1000.0
-    );
-
-    Ok(())
-}
-
-fn cmd_range(index_path: &PathBuf, chr: &str, start: u32, end: u32) -> anyhow::Result<()> {
-    let cmd_start = Instant::now();
-    let index = VcfIndex::load_mmap(index_path)?;
-
-    let chr_id =
-        chr_name_to_id(chr).ok_or_else(|| anyhow::anyhow!("Unknown chromosome: {}", chr))?;
-
-    let results = index.range(chr_id, start, end);
-
-    print_command_time("range", cmd_start);
-
-    println!(
-        "Found {} positions in {}:{}-{}",
-        results.len(),
-        chr,
-        start,
-        end
-    );
-    for (pos, offset) in results {
-        println!("{}\t{}\t{}", chr, pos, offset);
-    }
-
-    Ok(())
-}
-

@@ -3,7 +3,6 @@ rustflags = [
     "-C", "target-cpu=native",
     "-C", "opt-level=3",
     "-C", "codegen-units=1",
-    "-C", "panic=abort"
 ]
 
 [target.x86_64-pc-windows-msvc]
@@ -11,15 +10,31 @@ rustflags = [
     "-C", "target-cpu=native",
     "-C", "opt-level=3",
     "-C", "codegen-units=1",
-    "-C", "panic=abort",
 ]
 
-# === Apple Silicon ===
+[target.x86_64-pc-windows-gnu]
+rustflags = [
+    "-C", "target-cpu=native",
+    "-C", "opt-level=3",
+    "-C", "codegen-units=1",
+]
+
 [target.aarch64-apple-darwin]
 rustflags = [
     "-C", "target-cpu=apple-m1",
     "-C", "opt-level=3",
     "-C", "codegen-units=1",
-    "-C", "panic=abort",
 ]
 
+[target.aarch64-unknown-linux-gnu]
+rustflags = [
+    "-C", "target-cpu=native",
+    "-C", "opt-level=3",
+    "-C", "codegen-units=1",
+]
+
+[build]
+jobs = 8
+
+[net]
+git-fetch-with-cli = true

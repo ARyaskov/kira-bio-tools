@@ -1,35 +1,53 @@
 [package]
-name        = "kira-bio-tools"
-version     = "0.2.0"
-edition     = "2024"
-description = "High-performance VCF indexer for bioinformatics using learned indexes"
-license     = "MIT"
-repository  = "https://github.com/ARyaskov/kira-bio-tools"
-keywords    = ["vcf", "bioinformatics", "genomics", "index", "learned-index"]
+name = "kira-bio-tools"
+version = "0.3.0"
+edition = "2021"
+description = "High-performance VCF indexer with full tabix compatibility"
+license = "MIT"
+repository = "https://github.com/ARyaskov/kira-bio-tools"
+keywords = ["vcf", "bioinformatics", "genomics", "tabix", "index"]
+categories = ["science", "command-line-utilities"]
 
 [dependencies]
-kira_kv_engine = { version = "0.1", features = ["serde", "parallel", "pgm"] }
-thiserror = "1.0"
+kira_kv_engine = { version = "0.1", features = ["parallel"] }
+thiserror = "2.0"
 memmap2 = "0.9"
-bytemuck = { version = "1.16", features = ["derive"] }
-pgm_index = "0.3"
+bytemuck = { version = "1.21", features = ["derive"] }
+rayon = "1.10"
+memchr = "2.7"
+indexmap = "2.7"
 
-# Optional CLI dependencies
+noodles-bgzf = "0.33"
+noodles-csi = "0.40"
+noodles-core = "0.15"
+
+flate2 = "1.1"
+crossbeam-channel = "0.5"
+
 clap = { version = "4", features = ["derive"], optional = true }
 anyhow = { version = "1.0", optional = true }
 
 [dev-dependencies]
-tempfile = "3.8"
+tempfile = "3.15"
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = "0.8"
 
 [features]
-default = ["mmap", "cli"]
-mmap = []
+default = ["cli"]
 cli = ["clap", "anyhow"]
 
 [[bin]]
 name = "kira-vcf"
 path = "src/bin/kira_vcf.rs"
 required-features = ["cli"]
+
+[[bench]]
+name = "index_bench"
+harness = false
+
+[[bench]]
+name = "query_bench"
+harness = false
 
 [profile.release]
 opt-level = 3
@@ -41,3 +59,7 @@ strip = true
 [profile.dev]
 opt-level = 0
 debug = true
+
+[profile.bench]
+inherits = "release"
+debug = false
