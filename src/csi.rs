@@ -48,7 +48,8 @@ pub fn build_csi_index<P: AsRef<Path>>(vcf_path: P, output_path: P) -> Result<()
                 let bin_id = reg2bin(start as usize, end as usize, MIN_SHIFT, DEPTH);
 
                 let start_vp = NoodlesVirtualPosition::try_from(record.offset).unwrap_or_default();
-                let end_vp = NoodlesVirtualPosition::try_from(current_vpos.as_u64()).unwrap_or_default();
+                let end_vp =
+                    NoodlesVirtualPosition::try_from(current_vpos.as_u64()).unwrap_or_default();
 
                 let chunk = Chunk::new(start_vp, end_vp);
 

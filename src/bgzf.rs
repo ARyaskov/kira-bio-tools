@@ -99,9 +99,7 @@ impl<R: Read> BufRead for BgzfReader<R> {
 impl<R: Read + io::Seek> BgzfReader<R> {
     pub fn seek(&mut self, pos: VirtualPosition) -> Result<VirtualPosition> {
         let noodles_pos: bgzf::VirtualPosition = pos.into();
-        self.inner
-            .seek(noodles_pos)
-            .map_err(BgzfError::Io)?;
+        self.inner.seek(noodles_pos).map_err(BgzfError::Io)?;
         Ok(self.virtual_position())
     }
 }

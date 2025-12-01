@@ -45,10 +45,9 @@ pub fn chr_name_to_id(name: &str) -> Option<ChrId> {
 
 pub fn chr_id_to_name(id: ChrId) -> Option<&'static str> {
     static NAMES: [&str; 25] = [
-        "chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8",
-        "chr9", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15",
-        "chr16", "chr17", "chr18", "chr19", "chr20", "chr21", "chr22",
-        "chrX", "chrY", "chrM",
+        "chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11",
+        "chr12", "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19", "chr20", "chr21",
+        "chr22", "chrX", "chrY", "chrM",
     ];
     if id >= 1 && id <= 25 {
         Some(NAMES[(id - 1) as usize])
@@ -165,7 +164,11 @@ fn parse_chromosome_fast(bytes: &[u8]) -> Option<ChrId> {
             for &byte in bytes {
                 num = num.wrapping_mul(10).wrapping_add(byte - b'0');
             }
-            if (1..=22).contains(&num) { Some(num) } else { None }
+            if (1..=22).contains(&num) {
+                Some(num)
+            } else {
+                None
+            }
         }
         _ => None,
     }

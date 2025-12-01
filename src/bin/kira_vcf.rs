@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use kira_bio_tools::{
-    build_csi_index, build_kbi_index, chr_id_to_name, chr_name_to_id, detect_format,
-    fetch_line, CsiQuery, KbiIndex, Region, VcfFormat, VcfReader,
+    build_csi_index, build_kbi_index, chr_id_to_name, chr_name_to_id, detect_format, fetch_line,
+    CsiQuery, KbiIndex, Region, VcfFormat, VcfReader,
 };
 
 #[derive(Parser)]
@@ -52,13 +52,23 @@ struct IndexArgs {
     #[arg(short, long, help = "Output index file")]
     output: Option<PathBuf>,
 
-    #[arg(short, long, default_value = "vcf", help = "Format preset (vcf, bed, gff, sam)")]
+    #[arg(
+        short,
+        long,
+        default_value = "vcf",
+        help = "Format preset (vcf, bed, gff, sam)"
+    )]
     preset: String,
 
     #[arg(short, long, help = "Force overwrite existing index")]
     force: bool,
 
-    #[arg(short = 's', long, default_value = "14", help = "Minimum bin shift (CSI)")]
+    #[arg(
+        short = 's',
+        long,
+        default_value = "14",
+        help = "Minimum bin shift (CSI)"
+    )]
     min_shift: u8,
 
     #[arg(short = 'd', long, default_value = "5", help = "Bin depth (CSI)")]
@@ -170,7 +180,9 @@ fn cmd_index(args: IndexArgs) -> Result<()> {
             }
         }
         VcfFormat::Plain | VcfFormat::Gzip => {
-            let kbi_path = args.output.unwrap_or_else(|| args.input.with_extension("kbi"));
+            let kbi_path = args
+                .output
+                .unwrap_or_else(|| args.input.with_extension("kbi"));
 
             eprintln!("Building KBI index: {:?}", kbi_path);
             let kbi_start = Instant::now();
@@ -205,7 +217,10 @@ fn cmd_query(args: QueryArgs) -> Result<()> {
     let use_csi = csi_path.exists() && !use_kbi;
 
     if !use_kbi && !use_csi {
-        anyhow::bail!("No index found. Run 'kira-vcf index {:?}' first.", args.file);
+        anyhow::bail!(
+            "No index found. Run 'kira-vcf index {:?}' first.",
+            args.file
+        );
     }
 
     let mut regions = args.regions.clone();
@@ -290,9 +305,17 @@ fn cmd_stat(args: StatArgs) -> Result<()> {
         println!("Index Statistics (KBI)");
         println!("======================");
         println!("File:          {:?}", args.index);
-        println!("File size:     {} bytes ({:.2} MB)", file_size, file_size as f64 / 1024.0 / 1024.0);
+        println!(
+            "File size:     {} bytes ({:.2} MB)",
+            file_size,
+            file_size as f64 / 1024.0 / 1024.0
+        );
         println!("Entries:       {}", index.len());
-        println!("Memory usage:  {} bytes ({:.2} MB)", index.memory_usage(), index.memory_usage() as f64 / 1024.0 / 1024.0);
+        println!(
+            "Memory usage:  {} bytes ({:.2} MB)",
+            index.memory_usage(),
+            index.memory_usage() as f64 / 1024.0 / 1024.0
+        );
         println!("Bytes/key:     {:.2}", index.bytes_per_key());
     } else if args.index.extension().map(|e| e == "csi").unwrap_or(false) {
         let _csi = CsiQuery::open(&args.index)?;
@@ -300,7 +323,11 @@ fn cmd_stat(args: StatArgs) -> Result<()> {
         println!("Index Statistics (CSI)");
         println!("======================");
         println!("File:          {:?}", args.index);
-        println!("File size:     {} bytes ({:.2} MB)", file_size, file_size as f64 / 1024.0 / 1024.0);
+        println!(
+            "File size:     {} bytes ({:.2} MB)",
+            file_size,
+            file_size as f64 / 1024.0 / 1024.0
+        );
         println!("Format:        CSI v1 (tabix-compatible)");
     } else {
         anyhow::bail!("Unknown index format");

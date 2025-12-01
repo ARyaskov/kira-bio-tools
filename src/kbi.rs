@@ -5,7 +5,7 @@ use std::path::Path;
 use std::slice;
 
 use bytemuck::{Pod, Zeroable};
-use kira_kv_engine::{BuildConfig, Builder, Mphf, MphError};
+use kira_kv_engine::{BuildConfig, Builder, MphError, Mphf};
 use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
 use thiserror::Error;

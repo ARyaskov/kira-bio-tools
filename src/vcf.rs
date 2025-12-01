@@ -445,11 +445,9 @@ pub fn fetch_line<P: AsRef<Path>>(path: P, offset: u64) -> Result<String> {
             reader.read_line(&mut line)?;
             Ok(line.trim_end().to_string())
         }
-        VcfFormat::Gzip => {
-            Err(VcfError::InvalidFormat(
-                "Cannot seek in gzip file. Use BGZF compression.".into(),
-            ))
-        }
+        VcfFormat::Gzip => Err(VcfError::InvalidFormat(
+            "Cannot seek in gzip file. Use BGZF compression.".into(),
+        )),
         VcfFormat::Bgzf => {
             let file = File::open(path)?;
             let mut bgzf_reader = BgzfReader::new(file);
