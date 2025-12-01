@@ -341,13 +341,15 @@ fn cmd_query_tabix(args: TabixArgs) -> Result<()> {
     let csi_path = {
         let mut p = args.input.clone();
         let name = p.file_name().unwrap().to_string_lossy().to_string();
-        p.set_file_name(format!("{}.csi", name))
+        p.set_file_name(format!("{}.csi", name));
+        p
     };
 
     let tbi_path = {
         let mut p = args.input.clone();
         let name = p.file_name().unwrap().to_string_lossy().to_string();
-        p.set_file_name(format!("{}.tbi", name))
+        p.set_file_name(format!("{}.tbi", name));
+        p
     };
 
     let kbi_path = args.input.with_extension("kbi");
@@ -416,7 +418,7 @@ fn query_with_kbi(args: &TabixArgs, regions: &[String]) -> Result<()> {
     let kbi_path = args.input.with_extension("kbi");
     let index = KbiIndex::load(&kbi_path)?;
 
-    for (region_idx, region_str) in regions.iter().enumerate() {
+    for (_region_idx, region_str) in regions.iter().enumerate() {
         if let Some(overlap_mode) = args.regions_overlap {
             match overlap_mode {
                 1 => println!("#{}", region_str),
