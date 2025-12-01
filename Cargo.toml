@@ -37,6 +37,11 @@ default = ["cli"]
 cli = ["clap", "anyhow"]
 
 [[bin]]
+name = "kira-bt"
+path = "src/bin/kira_bt.rs"
+required-features = ["cli"]
+
+[[bin]]
 name = "kira-vcf"
 path = "src/bin/kira_vcf.rs"
 required-features = ["cli"]
