@@ -16,6 +16,7 @@ bytemuck = { version = "1.21", features = ["derive"] }
 rayon = "1.10"
 memchr = "2.7"
 indexmap = "2.7"
+lazy_static = "1.5"
 
 noodles-bgzf = "0.33"
 noodles-csi = "0.40"
@@ -47,6 +48,10 @@ harness = false
 
 [[bench]]
 name = "query_bench"
+harness = false
+
+[[bench]]
+name = "norm_bench"
 harness = false
 
 [profile.release]

@@ -16,6 +16,9 @@ use kira_bio_tools::norm::normalize;
 use memmap2::Mmap;
 use rayon::prelude::*;
 
+use kira_bio_tools::simple_norm::turbo_norm_vcf;
+// use kira_bio_tools::turbo::simd_tokenizer::tokenize_vcf_line_avx2;
+
 #[derive(Parser)]
 #[command(name = "kira-bt")]
 #[command(about = "High-performance bioinformatics tools with full tabix compatibility")]
@@ -842,8 +845,11 @@ fn normalize_inplace_bytes(raw: &str) -> String {
     out
 }
 
-pub fn cmd_norm(args: NormArgs) -> Result<()> {
+fn cmd_norm(args: NormArgs) -> Result<()> {
     let fmt = detect_format(&args.input)?;
+    if fmt != VcfFormat::Plain {
+        anyhow::bail!("Turbo mode currently supports only plain VCF");
+    }
 
     let out_path = args.output.clone().unwrap_or_else(|| {
         let mut p = args.input.clone();
@@ -851,51 +857,9 @@ pub fn cmd_norm(args: NormArgs) -> Result<()> {
         p
     });
 
-    let mut out = File::create(out_path)?;
+    turbo_norm_vcf(&args.input, &out_path)?;
 
-    if fmt == VcfFormat::Plain {
-        let f = File::open(&args.input)?;
-        let mmap = unsafe { Mmap::map(&f)? };
-        let data = &mmap[..];
-
-        let mut i = 0;
-        let mut start = 0;
-
-        while i < data.len() {
-            if data[i] == b'\n' {
-                let line = std::str::from_utf8(&data[start..i]).unwrap();
-                if line.starts_with('#') {
-                    writeln!(out, "{}", line)?;
-                } else {
-                    let norm = normalize_inplace_bytes(line);
-                    writeln!(out, "{}", norm)?;
-                    i += 1;
-                    start = i;
-                    break;
-                }
-                i += 1;
-                start = i;
-            } else {
-                i += 1;
-            }
-        }
-
-        while i < data.len() {
-            if data[i] == b'\n' {
-                let line = std::str::from_utf8(&data[start..i]).unwrap();
-                let norm = normalize_inplace_bytes(line);
-                writeln!(out, "{}", norm)?;
-                i += 1;
-                start = i;
-            } else {
-                i += 1;
-            }
-        }
-
-        return Ok(());
-    }
-
-    anyhow::bail!("MMAP version implemented only for plain VCF")
+    Ok(())
 }
 
 fn print_vcf_header(path: &PathBuf) -> Result<()> {

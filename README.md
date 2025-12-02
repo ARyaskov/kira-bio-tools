@@ -44,6 +44,8 @@ Binaries will be in `target/release/`:
 
 ## CLI Usage
 
+Use KIRA_BT_TIMING=1 and KIRA_BT_DEBUG=1 envs for time consumption output. 
+
 ### Tabix Mode (Full Compatibility)
 
 `kira-bt tabix` is a **100% compatible drop-in replacement** for tabix. All standard tabix options are supported.
