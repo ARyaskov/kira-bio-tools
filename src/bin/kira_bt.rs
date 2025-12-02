@@ -16,7 +16,7 @@ use kira_bio_tools::norm::normalize;
 use memmap2::Mmap;
 use rayon::prelude::*;
 
-use kira_bio_tools::simple_norm::turbo_norm_vcf;
+use kira_bio_tools::norm::turbo_norm_vcf;
 // use kira_bio_tools::turbo::simd_tokenizer::tokenize_vcf_line_avx2;
 
 #[derive(Parser)]
@@ -768,38 +768,6 @@ fn cmd_header(args: HeaderArgs) -> Result<()> {
     print_vcf_header(&args.file)
 }
 
-fn normalize_inplace(raw: &str) -> String {
-    let b = raw.as_bytes();
-    let mut t = [0usize; 5];
-    let mut k = 0;
-    for i in 0..b.len() {
-        if b[i] == b'\t' {
-            t[k] = i;
-            k += 1;
-            if k == 5 {
-                break;
-            }
-        }
-    }
-    if k < 5 {
-        return raw.to_string();
-    }
-    let rs = t[2] + 1;
-    let re = t[3];
-    let as_ = t[3] + 1;
-    let ae = t[4];
-    let r = &raw[rs..re];
-    let a = &raw[as_..ae];
-    let (nr, na, _, _) = normalize(r, a);
-    let mut out = String::with_capacity(raw.len() + 4);
-    out.push_str(&raw[..rs]);
-    out.push_str(&nr);
-    out.push('\t');
-    out.push_str(&na);
-    out.push_str(&raw[ae..]);
-    out
-}
-
 macro_rules! stage {
     ($name:expr, $block:block) => {{
         let __s = Instant::now();
@@ -807,42 +775,6 @@ macro_rules! stage {
         eprintln!("[norm] {}: {:.6}s", $name, __s.elapsed().as_secs_f64());
         __r
     }};
-}
-
-fn normalize_inplace_bytes(raw: &str) -> String {
-    let b = raw.as_bytes();
-    let mut t = [0usize; 5];
-    let mut k = 0;
-    for i in 0..b.len() {
-        if b[i] == b'\t' {
-            t[k] = i;
-            k += 1;
-            if k == 5 {
-                break;
-            }
-        }
-    }
-    if k < 5 {
-        return raw.to_string();
-    }
-
-    let rs = t[2] + 1;
-    let re = t[3];
-    let as_ = t[3] + 1;
-    let ae = t[4];
-
-    let r = &raw[rs..re];
-    let a = &raw[as_..ae];
-
-    let (nr, na, _, _) = normalize(r, a);
-
-    let mut out = String::with_capacity(raw.len() + 4);
-    out.push_str(&raw[..rs]);
-    out.push_str(&nr);
-    out.push('\t');
-    out.push_str(&na);
-    out.push_str(&raw[ae..]);
-    out
 }
 
 fn cmd_norm(args: NormArgs) -> Result<()> {

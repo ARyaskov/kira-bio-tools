@@ -2,8 +2,6 @@ pub mod bgzf;
 pub mod csi;
 pub mod kbi;
 pub mod norm;
-pub mod norm_avx2;
-pub mod simple_norm;
 pub mod util;
 pub mod vcf;
 
