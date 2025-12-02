@@ -11,6 +11,11 @@ use kira_bio_tools::{
     CsiQuery, KbiIndex, Region, VcfFormat, VcfReader,
 };
 
+use kira_bio_tools::norm::normalize;
+
+use memmap2::Mmap;
+use rayon::prelude::*;
+
 #[derive(Parser)]
 #[command(name = "kira-bt")]
 #[command(about = "High-performance bioinformatics tools with full tabix compatibility")]
@@ -42,6 +47,9 @@ enum Commands {
 
     #[command(about = "Print VCF header", visible_alias = "H")]
     Header(HeaderArgs),
+
+    #[command(about = "Normalization", visible_alias = "N")]
+    Norm(NormArgs),
 }
 
 #[derive(Parser)]
@@ -246,6 +254,15 @@ struct HeaderArgs {
     file: PathBuf,
 }
 
+#[derive(Parser)]
+struct NormArgs {
+    #[arg(help = "Input VCF file (.vcf or .vcf.gz)")]
+    input: PathBuf,
+
+    #[arg(short, long, help = "Output VCF file (optional)")]
+    output: Option<PathBuf>,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let start = Instant::now();
@@ -257,6 +274,7 @@ fn main() -> Result<()> {
         Commands::Stat(args) => cmd_stat(args),
         Commands::List(args) => cmd_list(args),
         Commands::Header(args) => cmd_header(args),
+        Commands::Norm(args) => cmd_norm(args),
     };
 
     if std::env::var("KIRA_BT_TIMING").is_ok() {
@@ -745,6 +763,139 @@ fn cmd_list(args: ListArgs) -> Result<()> {
 
 fn cmd_header(args: HeaderArgs) -> Result<()> {
     print_vcf_header(&args.file)
+}
+
+fn normalize_inplace(raw: &str) -> String {
+    let b = raw.as_bytes();
+    let mut t = [0usize; 5];
+    let mut k = 0;
+    for i in 0..b.len() {
+        if b[i] == b'\t' {
+            t[k] = i;
+            k += 1;
+            if k == 5 {
+                break;
+            }
+        }
+    }
+    if k < 5 {
+        return raw.to_string();
+    }
+    let rs = t[2] + 1;
+    let re = t[3];
+    let as_ = t[3] + 1;
+    let ae = t[4];
+    let r = &raw[rs..re];
+    let a = &raw[as_..ae];
+    let (nr, na, _, _) = normalize(r, a);
+    let mut out = String::with_capacity(raw.len() + 4);
+    out.push_str(&raw[..rs]);
+    out.push_str(&nr);
+    out.push('\t');
+    out.push_str(&na);
+    out.push_str(&raw[ae..]);
+    out
+}
+
+macro_rules! stage {
+    ($name:expr, $block:block) => {{
+        let __s = Instant::now();
+        let __r = { $block };
+        eprintln!("[norm] {}: {:.6}s", $name, __s.elapsed().as_secs_f64());
+        __r
+    }};
+}
+
+fn normalize_inplace_bytes(raw: &str) -> String {
+    let b = raw.as_bytes();
+    let mut t = [0usize; 5];
+    let mut k = 0;
+    for i in 0..b.len() {
+        if b[i] == b'\t' {
+            t[k] = i;
+            k += 1;
+            if k == 5 {
+                break;
+            }
+        }
+    }
+    if k < 5 {
+        return raw.to_string();
+    }
+
+    let rs = t[2] + 1;
+    let re = t[3];
+    let as_ = t[3] + 1;
+    let ae = t[4];
+
+    let r = &raw[rs..re];
+    let a = &raw[as_..ae];
+
+    let (nr, na, _, _) = normalize(r, a);
+
+    let mut out = String::with_capacity(raw.len() + 4);
+    out.push_str(&raw[..rs]);
+    out.push_str(&nr);
+    out.push('\t');
+    out.push_str(&na);
+    out.push_str(&raw[ae..]);
+    out
+}
+
+pub fn cmd_norm(args: NormArgs) -> Result<()> {
+    let fmt = detect_format(&args.input)?;
+
+    let out_path = args.output.clone().unwrap_or_else(|| {
+        let mut p = args.input.clone();
+        p.set_extension("norm.vcf");
+        p
+    });
+
+    let mut out = File::create(out_path)?;
+
+    if fmt == VcfFormat::Plain {
+        let f = File::open(&args.input)?;
+        let mmap = unsafe { Mmap::map(&f)? };
+        let data = &mmap[..];
+
+        let mut i = 0;
+        let mut start = 0;
+
+        while i < data.len() {
+            if data[i] == b'\n' {
+                let line = std::str::from_utf8(&data[start..i]).unwrap();
+                if line.starts_with('#') {
+                    writeln!(out, "{}", line)?;
+                } else {
+                    let norm = normalize_inplace_bytes(line);
+                    writeln!(out, "{}", norm)?;
+                    i += 1;
+                    start = i;
+                    break;
+                }
+                i += 1;
+                start = i;
+            } else {
+                i += 1;
+            }
+        }
+
+        while i < data.len() {
+            if data[i] == b'\n' {
+                let line = std::str::from_utf8(&data[start..i]).unwrap();
+                let norm = normalize_inplace_bytes(line);
+                writeln!(out, "{}", norm)?;
+                i += 1;
+                start = i;
+            } else {
+                i += 1;
+            }
+        }
+
+        return Ok(());
+    }
+
+    anyhow::bail!("MMAP version implemented only for plain VCF")
 }
 
 fn print_vcf_header(path: &PathBuf) -> Result<()> {

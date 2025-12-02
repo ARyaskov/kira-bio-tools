@@ -1,6 +1,7 @@
 pub mod bgzf;
 pub mod csi;
 pub mod kbi;
+pub mod norm;
 pub mod util;
 pub mod vcf;
 
