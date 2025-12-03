@@ -16,8 +16,8 @@ use kira_bio_tools::norm::normalize;
 use memmap2::Mmap;
 use rayon::prelude::*;
 
+use kira_bio_tools::annotate::annotate_vcf_ani;
 use kira_bio_tools::norm::turbo_norm_vcf;
-// use kira_bio_tools::turbo::simd_tokenizer::tokenize_vcf_line_avx2;
 
 #[derive(Parser)]
 #[command(name = "kira-bt")]
@@ -30,6 +30,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(about = "Build annotation index (.ani) from VCF")]
+    AnnotateIndex(AnnotateIndexArgs),
+
+    #[command(about = "Annotate VCF using ANI index (bcftools annotate -a style)")]
+    Annotate(AnnotateArgs),
+
     #[command(about = "Tabix-compatible indexer and query tool")]
     Tabix(TabixArgs),
 
@@ -53,6 +59,9 @@ enum Commands {
 
     #[command(about = "Normalization", visible_alias = "N")]
     Norm(NormArgs),
+
+    #[command(about = "Build ANI annotation index")]
+    DbBuild(DbBuildArgs),
 }
 
 #[derive(Parser)]
@@ -266,6 +275,40 @@ struct NormArgs {
     output: Option<PathBuf>,
 }
 
+#[derive(Parser)]
+struct AnnotateIndexArgs {
+    #[arg(help = "Annotation VCF to index")]
+    input: PathBuf,
+
+    #[arg(short, long, help = "Output .ani file")]
+    output: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+struct AnnotateArgs {
+    #[arg(help = "Input VCF file (.vcf)")]
+    input: PathBuf,
+
+    #[arg(
+        short = 'a',
+        long = "annotations",
+        help = "Annotation DB (.vcf or .ani)"
+    )]
+    annotations: PathBuf,
+
+    #[arg(short, long, help = "Output file (optional)")]
+    output: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+struct DbBuildArgs {
+    #[arg(help = "Input annotation database VCF")]
+    input: PathBuf,
+
+    #[arg(short, long, help = "Output ANI file")]
+    output: Option<PathBuf>,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let start = Instant::now();
@@ -278,6 +321,9 @@ fn main() -> Result<()> {
         Commands::List(args) => cmd_list(args),
         Commands::Header(args) => cmd_header(args),
         Commands::Norm(args) => cmd_norm(args),
+        Commands::AnnotateIndex(args) => cmd_annotate_index(args),
+        Commands::Annotate(args) => cmd_annotate(args),
+        Commands::DbBuild(args) => cmd_db_build(args),
     };
 
     if std::env::var("KIRA_BT_TIMING").is_ok() {
@@ -775,6 +821,65 @@ macro_rules! stage {
         eprintln!("[norm] {}: {:.6}s", $name, __s.elapsed().as_secs_f64());
         __r
     }};
+}
+
+fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
+    let out = args.output.clone().unwrap_or_else(|| {
+        let mut p = args.input.clone();
+        p.set_extension("annot.vcf");
+        p
+    });
+
+    let ani_path = if args.annotations.extension().unwrap_or_default() == "ani" {
+        args.annotations.clone()
+    } else {
+        let mut p = args.annotations.clone();
+        p.set_extension("ani");
+        p
+    };
+
+    if !ani_path.exists() {
+        anyhow::bail!(
+            "Annotation index not found: {:?}. Run kira-bt db-build <vcf>",
+            ani_path
+        );
+    }
+
+    eprintln!("[annotate] ANI = {:?}", ani_path);
+    annotate_vcf_ani(&ani_path, &args.input, &out)?;
+
+    Ok(())
+}
+
+fn cmd_annotate_index(args: AnnotateIndexArgs) -> Result<()> {
+    let out = args.output.clone().unwrap_or_else(|| {
+        let mut p = args.input.clone();
+        p.set_extension("ani");
+        p
+    });
+
+    eprintln!("[annotate-index] Input  = {:?}", args.input);
+    eprintln!("[annotate-index] Output = {:?}", out);
+
+    kira_bio_tools::annotate_index::build_ani_index(&args.input, &out)?;
+
+    Ok(())
+}
+
+fn cmd_db_build(args: DbBuildArgs) -> Result<()> {
+    let out = args.output.clone().unwrap_or_else(|| {
+        let mut p = args.input.clone();
+        p.set_extension("ani");
+        p
+    });
+
+    eprintln!("[db-build] Input: {:?}", args.input);
+    eprintln!("[db-build] Output: {:?}", out);
+
+    kira_bio_tools::annotate_index::build_ani_index(&args.input, &out)?;
+
+    eprintln!("[db-build] Done");
+    Ok(())
 }
 
 fn cmd_norm(args: NormArgs) -> Result<()> {
