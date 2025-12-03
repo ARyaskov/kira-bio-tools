@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
@@ -35,6 +36,49 @@ impl VcfRecord {
     pub fn key(&self) -> GenomicKey {
         GenomicKey::new(self.chr_id, self.position)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct VcfParsedRecord {
+    pub chrom: String,
+    pub pos: u32,
+    pub filter: String,
+    pub info: HashMap<String, String>,
+    pub raw_line: String,
+}
+
+impl VcfParsedRecord {
+    pub fn to_line(&self) -> &str {
+        &self.raw_line
+    }
+}
+
+// Minimal parser – only columns needed for filtering
+pub fn parse_vcf_full_line(line: &str) -> Option<VcfParsedRecord> {
+    if line.starts_with('#') {
+        return None;
+    }
+    let cols: Vec<&str> = line.trim_end().split('\t').collect();
+    if cols.len() < 8 {
+        return None;
+    }
+
+    let filter = cols[6].to_string();
+    let mut info = HashMap::new();
+
+    for item in cols[7].split(';') {
+        if let Some((k, v)) = item.split_once('=') {
+            info.insert(k.to_string(), v.to_string());
+        }
+    }
+
+    Some(VcfParsedRecord {
+        chrom: cols[0].to_string(),
+        pos: cols[1].parse().ok()?,
+        filter,
+        info,
+        raw_line: line.to_string(),
+    })
 }
 
 pub enum VcfReader {
@@ -84,6 +128,14 @@ impl VcfReader {
             VcfReader::Plain(r) => &r.contigs,
             VcfReader::Gzip(r) => &r.contigs,
             VcfReader::Bgzf(r) => &r.contigs,
+        }
+    }
+
+    pub fn next_raw_line(&mut self) -> Result<Option<(String, u64)>> {
+        match self {
+            VcfReader::Plain(r) => r.next_raw_line(),
+            VcfReader::Gzip(r) => r.next_raw_line(),
+            VcfReader::Bgzf(r) => r.next_raw_line(),
         }
     }
 }
@@ -184,6 +236,22 @@ impl PlainVcfReader {
             }
         }
     }
+
+    pub fn next_raw_line(&mut self) -> Result<Option<(String, u64)>> {
+        if !self.header_parsed {
+            self.header()?;
+        }
+
+        let mut line = String::new();
+        let offset = self.offset;
+        let bytes = self.reader.read_line(&mut line)?;
+        if bytes == 0 {
+            return Ok(None);
+        }
+        self.offset += bytes as u64;
+
+        Ok(Some((line, offset)))
+    }
 }
 
 pub struct GzipVcfReader {
@@ -267,6 +335,22 @@ impl GzipVcfReader {
             }
         }
     }
+
+    pub fn next_raw_line(&mut self) -> Result<Option<(String, u64)>> {
+        if !self.header_parsed {
+            self.header()?;
+        }
+
+        let mut line = String::new();
+        let offset = self.offset;
+        let bytes = self.reader.read_line(&mut line)?;
+        if bytes == 0 {
+            return Ok(None);
+        }
+        self.offset += bytes as u64;
+
+        Ok(Some((line, offset)))
+    }
 }
 
 pub struct BgzfVcfReader {
@@ -341,6 +425,14 @@ impl BgzfVcfReader {
 
     pub fn virtual_position(&self) -> VirtualPosition {
         self.reader.virtual_position()
+    }
+
+    pub fn next_raw_line(&mut self) -> Result<Option<(String, u64)>> {
+        let (line, vpos) = match self.reader.read_line()? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        Ok(Some((line.to_string(), vpos.as_u64())))
     }
 }
 

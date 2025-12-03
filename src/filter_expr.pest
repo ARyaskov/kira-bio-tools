@@ -1,0 +1,51 @@
+// bcftools-compatible expression grammar
+
+WHITESPACE = _{ " " | "\t" | NEWLINE }
+NEWLINE = _{ "\n" | "\r" }
+
+expr = _{ or_expr }
+
+or_expr = { and_expr ~ (OR ~ and_expr)* }
+and_expr = { not_expr ~ (AND ~ not_expr)* }
+not_expr = { NOT? ~ cmp_expr }
+
+cmp_expr = _{
+    primary ~ ( cmp_op ~ primary )?
+}
+
+primary = _{
+      field
+    | literal
+    | array_access
+    | LPAREN ~ expr ~ RPAREN
+}
+
+field = @{ ident ~ ("/" ~ ident)? }
+
+array_access = { field ~ LBRACK ~ int ~ RBRACK }
+
+literal = _{ string | float | int }
+
+ident = @{ (ASCII_ALPHANUMERIC | "_" )+ }
+
+string = @{ "\"" ~ ( (!"\"" ~ ANY )* ) ~ "\"" }
+
+float = @{ int ~ "." ~ int }
+int = @{ ASCII_DIGIT+ }
+
+cmp_op = _{ EQ | NEQ | LT | GT | LE | GE }
+
+AND = _{ "&&" }
+OR  = _{ "||" }
+NOT = _{ "!" }
+EQ  = _{ "==" | "=" }
+NEQ = _{ "!=" }
+LE  = _{ "<=" }
+GE  = _{ ">=" }
+LT  = _{ "<" }
+GT  = _{ ">" }
+
+LPAREN = _{ "(" }
+RPAREN = _{ ")" }
+LBRACK = _{ "[" }
+RBRACK = _{ "]" }

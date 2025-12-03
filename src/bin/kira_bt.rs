@@ -17,6 +17,7 @@ use memmap2::Mmap;
 use rayon::prelude::*;
 
 use kira_bio_tools::annotate::annotate_vcf_ani;
+use kira_bio_tools::filter_args::FilterArgs;
 use kira_bio_tools::norm::turbo_norm_vcf;
 
 #[derive(Parser)]
@@ -62,6 +63,9 @@ enum Commands {
 
     #[command(about = "Build ANI annotation index")]
     DbBuild(DbBuildArgs),
+
+    #[command(about = "Filter")]
+    Filter(FilterArgs),
 }
 
 #[derive(Parser)]
@@ -324,6 +328,7 @@ fn main() -> Result<()> {
         Commands::AnnotateIndex(args) => cmd_annotate_index(args),
         Commands::Annotate(args) => cmd_annotate(args),
         Commands::DbBuild(args) => cmd_db_build(args),
+        Commands::Filter(args) => kira_bio_tools::filter::run_filter(&args),
     };
 
     if std::env::var("KIRA_BT_TIMING").is_ok() {
