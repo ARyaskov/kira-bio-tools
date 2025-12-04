@@ -17,6 +17,9 @@ use memmap2::Mmap;
 use rayon::prelude::*;
 
 use kira_bio_tools::annotate::annotate_vcf_ani;
+#[cfg(feature = "gpu")]
+use kira_bio_tools::annotate_gpu::{annotate_vcf_ani_gpu, GpuAni};
+
 use kira_bio_tools::filter_args::FilterArgs;
 use kira_bio_tools::norm::turbo_norm_vcf;
 
@@ -302,6 +305,9 @@ struct AnnotateArgs {
 
     #[arg(short, long, help = "Output file (optional)")]
     output: Option<PathBuf>,
+
+    #[arg(long, help = "Use GPU (CUDA) for annotation")]
+    gpu: bool,
 }
 
 #[derive(Parser)]
@@ -851,8 +857,23 @@ fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
     }
 
     eprintln!("[annotate] ANI = {:?}", ani_path);
-    annotate_vcf_ani(&ani_path, &args.input, &out)?;
 
+    #[cfg(feature = "gpu")]
+    if args.gpu {
+        eprintln!("[annotate] Using GPU backend…");
+
+        let ani = kira_bio_tools::annotate_index::AniIndex::open(&ani_path)
+            .context("Failed to load ANI")?;
+
+        let gpu = GpuAni::load(&ani).context("Failed to initialize CUDA GPU ANI engine")?;
+
+        annotate_vcf_ani_gpu(&gpu, &ani, &args.input, &out).context("GPU annotation failed")?;
+
+        return Ok(());
+    }
+
+    // CPU fallback (default)
+    annotate_vcf_ani(&ani_path, &args.input, &out).context("CPU annotation failed")?;
     Ok(())
 }
 

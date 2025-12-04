@@ -15,7 +15,7 @@ const VERSION: u32 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct AniHeader {
+pub struct AniHeader {
     magic: [u8; 8],
     version: u32,
     n_entries: u64,
@@ -40,6 +40,16 @@ impl AniHeader {
             off_entries: header_size + g_size as u64,
             off_strings: header_size + g_size as u64 + entries_size as u64,
         }
+    }
+
+    pub fn magic(&self) -> &[u8; 8] {
+        &self.magic
+    }
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+    pub fn n_entries(&self) -> u64 {
+        self.n_entries
     }
 }
 
@@ -240,4 +250,42 @@ impl AniIndex {
             mmap,
         })
     }
+
+    pub fn lookup(&self, chr: &str, pos: u32, ref_: &str, alt: &str) -> Option<&str> {
+        let chr_id = chr_name_to_id(chr)?;
+
+        let mut h = fxhash::hash64(&[chr_id]);
+        h ^= fxhash::hash64(pos.to_le_bytes().as_ref());
+        h ^= fxhash::hash64(ref_.as_bytes());
+        h ^= fxhash::hash64(alt.as_bytes());
+
+        let idx = self.mph.index(&h.to_le_bytes()) as usize;
+        if idx >= self.entries.len() {
+            return None;
+        }
+
+        let e = &self.entries[idx];
+
+        if e.chr_id != chr_id || e.pos != pos {
+            return None;
+        }
+
+        let ref_s = read_cstring(&self.string_block, e.ref_ofs as usize);
+        let alt_s = read_cstring(&self.string_block, e.alt_ofs as usize);
+
+        if ref_s != ref_ || alt_s != alt {
+            return None;
+        }
+
+        let info = read_cstring(&self.string_block, e.info_ofs as usize);
+        Some(info)
+    }
+}
+
+fn read_cstring<'a>(data: &'a [u8], mut pos: usize) -> &'a str {
+    let start = pos;
+    while pos < data.len() && data[pos] != 0 {
+        pos += 1;
+    }
+    unsafe { std::str::from_utf8_unchecked(&data[start..pos]) }
 }

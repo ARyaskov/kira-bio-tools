@@ -1,4 +1,5 @@
 pub mod annotate;
+pub mod annotate_gpu;
 pub mod annotate_index;
 pub mod bgzf;
 pub mod csi;
