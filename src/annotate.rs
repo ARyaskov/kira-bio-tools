@@ -136,7 +136,7 @@ fn read_cstring<'a>(data: &'a [u8], mut pos: usize) -> &'a str {
     unsafe { std::str::from_utf8_unchecked(&data[start..pos]) }
 }
 
-fn extract_info(line: &str) -> &str {
+pub fn extract_info(line: &str) -> &str {
     let mut tabs = 0;
     let mut start = 0;
     for (i, c) in line.char_indices() {
@@ -153,7 +153,7 @@ fn extract_info(line: &str) -> &str {
     ""
 }
 
-fn merge_info(base: &str, add: &str) -> String {
+pub fn merge_info(base: &str, add: &str) -> String {
     if add.is_empty() {
         return base.to_string();
     }
@@ -168,7 +168,7 @@ fn merge_info(base: &str, add: &str) -> String {
     out
 }
 
-fn parse_fields(line: &str) -> Option<(&str, u32, &str, &str)> {
+pub fn parse_fields(line: &str) -> Option<(&str, u32, &str, &str)> {
     let mut c = line.split('\t');
     let chrom = c.next()?;
     let pos = c.next()?.parse::<u32>().ok()?;

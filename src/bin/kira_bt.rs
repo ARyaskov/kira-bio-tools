@@ -23,6 +23,13 @@ use kira_bio_tools::annotate_gpu::{annotate_vcf_ani_gpu, GpuAni};
 use kira_bio_tools::filter_args::FilterArgs;
 use kira_bio_tools::norm::turbo_norm_vcf;
 
+use kira_bio_tools::annotate_index::AniIndex;
+
+#[cfg(feature = "opencl")]
+use kira_bio_tools::annotate_opencl::annotate_vcf_ani_opencl;
+#[cfg(feature = "opencl")]
+use kira_bio_tools::annotate_opencl::OpenCLAni;
+
 #[derive(Parser)]
 #[command(name = "kira-bt")]
 #[command(about = "High-performance bioinformatics tools with full tabix compatibility")]
@@ -308,6 +315,9 @@ struct AnnotateArgs {
 
     #[arg(long, help = "Use GPU (CUDA) for annotation")]
     gpu: bool,
+
+    #[arg(long, help = "Use OpenCL backend (AMD/Intel/Apple/GPU/CPU)")]
+    opencl: bool,
 }
 
 #[derive(Parser)]
@@ -850,30 +860,43 @@ fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
     };
 
     if !ani_path.exists() {
-        anyhow::bail!(
-            "Annotation index not found: {:?}. Run kira-bt db-build <vcf>",
-            ani_path
-        );
+        anyhow::bail!("Annotation index not found: {:?}", ani_path);
     }
 
     eprintln!("[annotate] ANI = {:?}", ani_path);
 
+    // ------------------------------
+    // GPU backend (CUDA)
+    // ------------------------------
     #[cfg(feature = "gpu")]
     if args.gpu {
-        eprintln!("[annotate] Using GPU backend…");
+        eprintln!("[annotate] Using CUDA GPU backend…");
 
-        let ani = kira_bio_tools::annotate_index::AniIndex::open(&ani_path)
-            .context("Failed to load ANI")?;
+        let ani = AniIndex::open(&ani_path)?;
+        let gpu = GpuAni::load(&ani)?;
 
-        let gpu = GpuAni::load(&ani).context("Failed to initialize CUDA GPU ANI engine")?;
-
-        annotate_vcf_ani_gpu(&gpu, &ani, &args.input, &out).context("GPU annotation failed")?;
-
+        annotate_vcf_ani_gpu(&gpu, &ani, &args.input, &out)?;
         return Ok(());
     }
 
-    // CPU fallback (default)
-    annotate_vcf_ani(&ani_path, &args.input, &out).context("CPU annotation failed")?;
+    // ------------------------------
+    // OpenCL backend
+    // ------------------------------
+    #[cfg(feature = "opencl")]
+    if args.opencl {
+        eprintln!("[annotate] Using OpenCL backend…");
+
+        let ani = AniIndex::open(&ani_path)?;
+        let gpu = OpenCLAni::new(&ani)?;
+
+        annotate_vcf_ani_opencl(&gpu, &ani, &args.input, &out)?;
+        return Ok(());
+    }
+
+    // ------------------------------
+    // CPU fallback
+    // ------------------------------
+    annotate_vcf_ani(&ani_path, &args.input, &out)?;
     Ok(())
 }
 

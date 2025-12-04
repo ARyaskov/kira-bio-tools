@@ -8,6 +8,8 @@ use anyhow::Result;
 use kira_kv_engine::{BuildConfig, Builder, Mphf};
 use memmap2::{Mmap, MmapOptions};
 
+use ocl::OclPrm;
+
 use crate::chr_name_to_id;
 
 const ANI_MAGIC: &[u8; 8] = b"ANI00001";
@@ -20,7 +22,7 @@ pub struct AniHeader {
     version: u32,
     n_entries: u64,
     mph_m: u32,
-    mph_salt: u32,
+    mph_salt: u64,
     off_mph_g: u64,
     off_entries: u64,
     off_strings: u64,
@@ -35,7 +37,7 @@ impl AniHeader {
             version: VERSION,
             n_entries: n as u64,
             mph_m: mph.m,
-            mph_salt: mph.salt as u32,
+            mph_salt: mph.salt,
             off_mph_g: header_size,
             off_entries: header_size + g_size as u64,
             off_strings: header_size + g_size as u64 + entries_size as u64,
@@ -62,6 +64,18 @@ pub struct AniEntry {
     pub alt_ofs: u32,
     pub info_ofs: u32,
 }
+
+/// OpenCL-friendly representation (no padding, 4×u32)
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct AniEntryCL {
+    pub chr_pos: u32, // chr_id in upper 8 bits + pos in lower 24 bits
+    pub ref_ofs: u32,
+    pub alt_ofs: u32,
+    pub info_ofs: u32,
+}
+
+unsafe impl OclPrm for AniEntryCL {}
 
 pub fn build_ani_index(input_vcf: &Path, output_ani: &Path) -> Result<()> {
     let f = File::open(input_vcf)?;
@@ -282,10 +296,31 @@ impl AniIndex {
     }
 }
 
-fn read_cstring<'a>(data: &'a [u8], mut pos: usize) -> &'a str {
+pub fn read_cstring<'a>(data: &'a [u8], mut pos: usize) -> &'a str {
     let start = pos;
     while pos < data.len() && data[pos] != 0 {
         pos += 1;
     }
     unsafe { std::str::from_utf8_unchecked(&data[start..pos]) }
+}
+
+pub fn make_raw_key(chr: &str, pos: u32, r: &str, a: &str) -> u64 {
+    let chr_id = chr_name_to_id(chr).unwrap_or(0);
+
+    let mut h = fxhash::hash64(&[chr_id]);
+    h ^= fxhash::hash64(pos.to_le_bytes().as_ref());
+    h ^= fxhash::hash64(r.as_bytes());
+    h ^= fxhash::hash64(a.as_bytes());
+    h
+}
+
+impl AniEntry {
+    pub fn to_cl(&self) -> AniEntryCL {
+        AniEntryCL {
+            chr_pos: ((self.chr_id as u32) << 24) | (self.pos & 0x00FF_FFFF),
+            ref_ofs: self.ref_ofs,
+            alt_ofs: self.alt_ofs,
+            info_ofs: self.info_ofs,
+        }
+    }
 }
