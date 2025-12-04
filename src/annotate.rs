@@ -1,247 +1,243 @@
+// Full annotate.rs adapted for ANI v2 structured index
+// CPU implementation
+
+use crate::annotate_index::{AniIndex, AnnotationBundle, FieldNumber, StructuredInfoField};
+use anyhow::Result;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::mem;
-use std::path::Path;
-use std::slice;
 
-use anyhow::{anyhow, Result};
-use kira_kv_engine::Mphf;
-use memmap2::{Mmap, MmapOptions};
+/// ------------------------------------------------------------
+/// Main annotate function (CPU)
+/// ------------------------------------------------------------
+pub fn annotate_vcf_ani(
+    db: &std::path::Path,
+    input: &std::path::Path,
+    output: &std::path::Path,
+) -> Result<()> {
+    let ani = AniIndex::open(db)?;
 
-use crate::chr_name_to_id;
-
-const ANI_MAGIC: &[u8; 8] = b"ANI00001";
-const VERSION: u32 = 1;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct AniHeader {
-    magic: [u8; 8],
-    version: u32,
-    n_entries: u64,
-    mph_m: u32,
-    mph_salt: u32,
-    off_mph_g: u64,
-    off_entries: u64,
-    off_strings: u64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct AniEntry {
-    pub chr_id: u8,
-    pub pos: u32,
-    pub ref_ofs: u32,
-    pub alt_ofs: u32,
-    pub info_ofs: u32,
-}
-
-pub struct AniIndex {
-    mmap: Mmap,
-    pub mph: Mphf,
-    pub entries: &'static [AniEntry],
-    pub string_block: &'static [u8],
-}
-
-impl AniIndex {
-    pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path)?;
-        let mmap = unsafe { MmapOptions::new().map(&file)? };
-
-        let data: &'static [u8] = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(&mmap[..]) };
-
-        if data.len() < mem::size_of::<AniHeader>() {
-            return Err(anyhow!("ANI file too small"));
-        }
-
-        let header: &AniHeader = unsafe { &*(data.as_ptr() as *const AniHeader) };
-
-        if &header.magic != ANI_MAGIC {
-            return Err(anyhow!("Invalid ANI magic"));
-        }
-        if header.version != VERSION {
-            return Err(anyhow!("ANI version mismatch"));
-        }
-
-        let n = header.n_entries as usize;
-
-        let g_start = header.off_mph_g as usize;
-        let g_end = g_start + header.mph_m as usize * 4;
-
-        let g_slice = &data[g_start..g_end];
-        let mut g = Vec::with_capacity(header.mph_m as usize);
-        for chunk in g_slice.chunks_exact(4) {
-            g.push(u32::from_le_bytes(chunk.try_into().unwrap()));
-        }
-
-        let mph = Mphf {
-            n: header.n_entries,
-            m: header.mph_m,
-            salt: header.mph_salt as u64,
-            g,
-        };
-
-        let ent_start = header.off_entries as usize;
-        let ent_end = ent_start + n * mem::size_of::<AniEntry>();
-
-        let entries: &'static [AniEntry] = unsafe {
-            slice::from_raw_parts(data[ent_start..ent_end].as_ptr() as *const AniEntry, n)
-        };
-
-        let string_block: &'static [u8] = &data[header.off_strings as usize..];
-
-        Ok(Self {
-            mmap,
-            mph,
-            entries,
-            string_block,
-        })
-    }
-
-    pub fn lookup(&self, chr: &str, pos: u32, ref_: &str, alt: &str) -> Option<&str> {
-        let chr_id = chr_name_to_id(chr)?;
-
-        let mut h = fxhash::hash64(&[chr_id]);
-        h ^= fxhash::hash64(pos.to_le_bytes().as_ref());
-        h ^= fxhash::hash64(ref_.as_bytes());
-        h ^= fxhash::hash64(alt.as_bytes());
-
-        let idx = self.mph.index(&h.to_le_bytes()) as usize;
-        if idx >= self.entries.len() {
-            return None;
-        }
-
-        let e = &self.entries[idx];
-        if e.chr_id != chr_id || e.pos != pos {
-            return None;
-        }
-
-        let r = read_cstring(self.string_block, e.ref_ofs as usize);
-        let a = read_cstring(self.string_block, e.alt_ofs as usize);
-        let i = read_cstring(self.string_block, e.info_ofs as usize);
-
-        if r == ref_ && a == alt {
-            Some(i)
-        } else {
-            None
-        }
-    }
-}
-
-fn read_cstring<'a>(data: &'a [u8], mut pos: usize) -> &'a str {
-    let start = pos;
-    while pos < data.len() && data[pos] != 0 {
-        pos += 1;
-    }
-    unsafe { std::str::from_utf8_unchecked(&data[start..pos]) }
-}
-
-pub fn extract_info(line: &str) -> &str {
-    let mut tabs = 0;
-    let mut start = 0;
-    for (i, c) in line.char_indices() {
-        if c == '\t' {
-            tabs += 1;
-            if tabs == 8 {
-                start = i + 1;
-            }
-            if tabs == 9 {
-                return &line[start..i];
-            }
-        }
-    }
-    ""
-}
-
-pub fn merge_info(base: &str, add: &str) -> String {
-    if add.is_empty() {
-        return base.to_string();
-    }
-    if base.is_empty() {
-        return add.to_string();
-    }
-
-    let mut out = String::with_capacity(base.len() + add.len() + 2);
-    out.push_str(base);
-    out.push(';');
-    out.push_str(add);
-    out
-}
-
-pub fn parse_fields(line: &str) -> Option<(&str, u32, &str, &str)> {
-    let mut c = line.split('\t');
-    let chrom = c.next()?;
-    let pos = c.next()?.parse::<u32>().ok()?;
-    let _id = c.next()?;
-    let ref_ = c.next()?;
-    let alt = c.next()?;
-    Some((chrom, pos, ref_, alt))
-}
-
-pub fn annotate_vcf_ani(db_ani: &Path, input_vcf: &Path, output_vcf: &Path) -> Result<()> {
-    eprintln!("[annotate] Loading ANI index...");
-    let ani = AniIndex::open(db_ani)?;
-
-    eprintln!("[annotate] Annotating...");
-
-    let fin = File::open(input_vcf)?;
+    let fin = File::open(input)?;
     let rdr = BufReader::new(fin);
 
-    let fout = File::create(output_vcf)?;
+    let fout = File::create(output)?;
     let mut bw = BufWriter::new(fout);
-
-    let mut processed = 0usize;
-    let mut annotated = 0usize;
-    let start = std::time::Instant::now();
 
     for line in rdr.lines() {
         let line = line?;
 
+        // Header lines are passed through unchanged
         if line.starts_with('#') {
             bw.write_all(line.as_bytes())?;
             bw.write_all(b"\n")?;
             continue;
         }
 
-        processed += 1;
+        // Parse data line
+        if let Some(row) = parse_vcf_record(&line) {
+            let (chr, pos, id, r, alt_raw, qual, filter, info, rest) = row;
+            let alt_list: Vec<&str> = alt_raw.split(',').collect();
 
-        if processed % 100_000 == 0 {
-            eprintln!(
-                "[annotate] processed={} annotated={} {:.3}s",
-                processed,
-                annotated,
-                start.elapsed().as_secs_f64()
-            );
-        }
+            // Now lookup returns: (bundle, ann_alt_list)
+            if let Some((ann, ann_alt_list)) = ani.lookup_full(chr, pos, r, alt_raw) {
+                let merged = merge_record(
+                    chr,
+                    pos,
+                    id,
+                    r,
+                    &alt_list,
+                    qual,
+                    filter,
+                    info,
+                    rest,
+                    ann,
+                    &ann_alt_list,
+                );
 
-        if let Some((chr, pos, ref_, alt)) = parse_fields(&line) {
-            if let Some(info2) = ani.lookup(chr, pos, ref_, alt) {
-                let base_info = extract_info(&line);
-                let merged = merge_info(base_info, info2);
-
-                let mut cols: Vec<&str> = line.split('\t').collect();
-                if cols.len() >= 8 {
-                    cols[7] = &merged;
-                    let new_line = cols.join("\t");
-                    bw.write_all(new_line.as_bytes())?;
-                    bw.write_all(b"\n")?;
-                    annotated += 1;
-                    continue;
-                }
+                bw.write_all(merged.as_bytes())?;
+                bw.write_all(b"\n")?;
+                continue;
             }
         }
 
-        // fallback
+        // If no annotation found, write original
         bw.write_all(line.as_bytes())?;
         bw.write_all(b"\n")?;
     }
 
-    eprintln!(
-        "[annotate] DONE: processed={} annotated={} total={:.3}s",
-        processed,
-        annotated,
-        start.elapsed().as_secs_f64()
+    Ok(())
+}
+
+fn parse_vcf_record<'a>(
+    line: &'a str,
+) -> Option<(
+    &'a str,
+    u32,
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    Vec<&'a str>,
+)> {
+    let mut c = line.split('\t');
+    let chr = c.next()?;
+    let pos = c.next()?.parse().ok()?;
+    let id = c.next()?;
+    let r = c.next()?;
+    let alt = c.next()?;
+    let qual = c.next()?;
+    let filter = c.next()?;
+    let info = c.next()?;
+    let rest: Vec<&str> = c.collect();
+    Some((chr, pos, id, r, alt, qual, filter, info, rest))
+}
+
+/// Merge full VCF record with ANI annotation.
+pub fn merge_record(
+    chr: &str,
+    pos: u32,
+    id: &str,
+    r: &str,
+    alt_list: &[&str],
+    qual: &str,
+    filter: &str,
+    info: &str,
+    rest: Vec<&str>,
+    ann: AnnotationBundle,
+    ann_alt_list: &[&str], // required for Number=A mapping
+) -> String {
+    // -------------------------
+    // Merge ID
+    // -------------------------
+    let id2 = match ann.id {
+        Some(".") => id,
+        Some(v) => v,
+        None => id,
+    };
+
+    // -------------------------
+    // Merge QUAL
+    // -------------------------
+    let qual2 = match ann.qual {
+        Some(".") => qual,
+        Some(v) => v,
+        None => qual,
+    };
+
+    // -------------------------
+    // Merge FILTER
+    // -------------------------
+    let filter2 = match ann.filter {
+        Some(".") => filter,
+        Some(v) => v,
+        None => filter,
+    };
+
+    // -------------------------
+    // Merge INFO (delegated)
+    // -------------------------
+    let merged_info = merge_info(info, alt_list, &ann.info, r);
+
+    // -------------------------
+    // Build final VCF line
+    // -------------------------
+    let mut out = format!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        chr,
+        pos,
+        id2,
+        r,
+        alt_list.join(","),
+        qual2,
+        filter2,
+        merged_info,
     );
 
-    Ok(())
+    for f in rest {
+        out.push('\t');
+        out.push_str(f);
+    }
+
+    out
+}
+
+fn merge_info(
+    base: &str,
+    alt_list: &[&str],
+    ann_fields: &[StructuredInfoField],
+    r: &str,
+) -> String {
+    let mut out: Vec<String> = Vec::new();
+
+    // 1) Base INFO
+    if !base.is_empty() && base != "." {
+        for s in base.split(';') {
+            if !s.is_empty() {
+                out.push(s.to_string());
+            }
+        }
+    }
+
+    // 2) ANI INFO
+    for f in ann_fields {
+        match f.number {
+            FieldNumber::Zero => {
+                out.push(f.key.to_string());
+            }
+
+            FieldNumber::One => {
+                out.push(format!("{}={}", f.key, f.values[0]));
+            }
+
+            FieldNumber::Many => {
+                out.push(format!("{}={}", f.key, f.values.join(",")));
+            }
+
+            FieldNumber::A => {
+                // map allele values
+                let mut vals = Vec::with_capacity(alt_list.len());
+                for i in 0..alt_list.len() {
+                    vals.push(if i < f.values.len() {
+                        f.values[i]
+                    } else {
+                        f.values[0]
+                    });
+                }
+                out.push(format!("{}={}", f.key, vals.join(",")));
+            }
+
+            _ => {
+                out.push(format!("{}={}", f.key, f.values.join(",")));
+            }
+        }
+    }
+
+    // 3) INDEL tag
+    let is_indel = r.len() != 1 || alt_list.iter().any(|a| a.len() != 1);
+
+    if is_indel {
+        out.push("INDEL".to_string());
+    }
+
+    // 4) Deduplicate keys
+    let mut seen = std::collections::HashSet::new();
+    let mut dedup = Vec::new();
+
+    for item in out {
+        let key = item.split('=').next().unwrap().to_string();
+        if seen.insert(key) {
+            dedup.push(item);
+        }
+    }
+
+    // 5) Sort keys
+    dedup.sort();
+
+    // 6) Join
+    if dedup.is_empty() {
+        ".".to_string()
+    } else {
+        dedup.join(";")
+    }
 }

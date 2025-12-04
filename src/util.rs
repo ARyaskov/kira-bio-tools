@@ -33,13 +33,36 @@ impl GenomicKey {
     }
 }
 
-pub fn chr_name_to_id(name: &str) -> Option<ChrId> {
-    let normalized = name.strip_prefix("chr").unwrap_or(name);
-    match normalized.to_uppercase().as_str() {
+pub fn chr_name_to_id(name: &str) -> Option<u8> {
+    let n = name.trim().trim_start_matches("chr");
+
+    match n {
+        "1" => Some(1),
+        "2" => Some(2),
+        "3" => Some(3),
+        "4" => Some(4),
+        "5" => Some(5),
+        "6" => Some(6),
+        "7" => Some(7),
+        "8" => Some(8),
+        "9" => Some(9),
+        "10" => Some(10),
+        "11" => Some(11),
+        "12" => Some(12),
+        "13" => Some(13),
+        "14" => Some(14),
+        "15" => Some(15),
+        "16" => Some(16),
+        "17" => Some(17),
+        "18" => Some(18),
+        "19" => Some(19),
+        "20" => Some(20),
+        "21" => Some(21),
+        "22" => Some(22),
         "X" => Some(23),
         "Y" => Some(24),
-        "M" | "MT" => Some(25),
-        s => s.parse::<u8>().ok().filter(|&n| (1..=22).contains(&n)),
+        "MT" | "M" => Some(25),
+        _ => None,
     }
 }
 

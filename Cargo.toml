@@ -46,6 +46,8 @@ default = ["cli"]
 cli = ["clap", "anyhow"]
 gpu = ["cust"]
 opencl = ["ocl"]
+avx2 = []
+neon = []
 
 [[bin]]
 name = "kira-bt"

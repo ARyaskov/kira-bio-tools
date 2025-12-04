@@ -910,7 +910,7 @@ fn cmd_annotate_index(args: AnnotateIndexArgs) -> Result<()> {
     eprintln!("[annotate-index] Input  = {:?}", args.input);
     eprintln!("[annotate-index] Output = {:?}", out);
 
-    kira_bio_tools::annotate_index::build_ani_index(&args.input, &out)?;
+    kira_bio_tools::annotate_index::build_ani_index_from_tab(&args.input, &out)?;
 
     Ok(())
 }
@@ -925,7 +925,7 @@ fn cmd_db_build(args: DbBuildArgs) -> Result<()> {
     eprintln!("[db-build] Input: {:?}", args.input);
     eprintln!("[db-build] Output: {:?}", out);
 
-    kira_bio_tools::annotate_index::build_ani_index(&args.input, &out)?;
+    kira_bio_tools::annotate_index::build_ani_index_from_tab(&args.input, &out)?;
 
     eprintln!("[db-build] Done");
     Ok(())
