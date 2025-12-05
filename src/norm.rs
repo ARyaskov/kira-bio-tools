@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 use thread_local::ThreadLocal;
+use std::io::BufWriter;
 
 #[inline]
 pub fn normalize(ref_allele: &str, alt_allele: &str) -> (usize, usize) {
