@@ -18,7 +18,8 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
     };
 
     if !ani_path.exists() {
-        anyhow::bail!("Annotation index not found: {:?}", ani_path);
+        eprintln!("[annotate] ANI index not found, building from source...");
+        annotate::build_ani_index_auto(&args.annotations, &ani_path)?;
     }
 
     eprintln!("[annotate] ANI = {:?}", ani_path);
@@ -36,8 +37,8 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
     if args.opencl {
         eprintln!("[annotate] Using OpenCL backend…");
         let ani = annotate::AniIndex::open(&ani_path)?;
-        let gpu = annotate::opencl::OpenCLAni::new(&ani)?;
-        annotate::opencl::annotate_vcf_ani_opencl(&gpu, &ani, &args.input, &out)?;
+        let gpu = annotate::opencl::OpenCLv2::new(&ani, 200_000)?;
+        annotate::opencl::annotate_vcf_opencl_v2(&gpu, &ani, &args.input, &out)?;
         return Ok(());
     }
 
@@ -55,7 +56,7 @@ pub fn cmd_annotate_index(args: AnnotateIndexArgs) -> Result<()> {
     eprintln!("[annotate-index] Input  = {:?}", args.input);
     eprintln!("[annotate-index] Output = {:?}", out);
 
-    annotate::build_ani_index_from_tab(&args.input, &out)?;
+    annotate::build_ani_index_auto(&args.input, &out)?;
 
     Ok(())
 }
@@ -70,7 +71,7 @@ pub fn cmd_db_build(args: DbBuildArgs) -> Result<()> {
     eprintln!("[db-build] Input: {:?}", args.input);
     eprintln!("[db-build] Output: {:?}", out);
 
-    annotate::build_ani_index_from_tab(&args.input, &out)?;
+    annotate::build_ani_index_auto(&args.input, &out)?;
 
     eprintln!("[db-build] Done");
     Ok(())

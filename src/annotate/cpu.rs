@@ -27,20 +27,9 @@ pub fn annotate_vcf_ani(db: &Path, input: &Path, output: &Path) -> Result<()> {
             let (chr, pos, id, r, alt_raw, qual, filter, info, rest) = row;
             let alt_list: Vec<&str> = alt_raw.split(',').collect();
 
-            if let Some((ann, ann_alt_list)) = ani.lookup_full(chr, pos, r, alt_raw) {
-                let merged = merge_record(
-                    chr,
-                    pos,
-                    id,
-                    r,
-                    &alt_list,
-                    qual,
-                    filter,
-                    info,
-                    rest,
-                    ann,
-                    &ann_alt_list,
-                );
+            if let Some((ann, _ann_alt_list)) = ani.lookup_full(chr, pos, r, alt_raw) {
+                let merged =
+                    merge_record(chr, pos, id, r, &alt_list, qual, filter, info, rest, ann);
 
                 bw.write_all(merged.as_bytes())?;
                 bw.write_all(b"\n")?;
@@ -92,27 +81,27 @@ fn merge_record(
     info: &str,
     rest: Vec<&str>,
     ann: AnnotationBundle,
-    _ann_alt_list: &[&str],
 ) -> String {
+    // Merge ID
     let id2 = match ann.id {
-        Some(".") => id,
-        Some(v) => v,
-        None => id,
+        Some(ann_id) if ann_id != "." => ann_id,
+        _ => id,
     };
 
+    // Merge QUAL
     let qual2 = match ann.qual {
-        Some(".") => qual,
-        Some(v) => v,
-        None => qual,
+        Some(ann_qual) if ann_qual != "." => ann_qual,
+        _ => qual,
     };
 
+    // Merge FILTER
     let filter2 = match ann.filter {
-        Some(".") => filter,
-        Some(v) => v,
-        None => filter,
+        Some(ann_filter) if ann_filter != "." => ann_filter,
+        _ => filter,
     };
 
-    let merged_info = merge_info(info, alt_list, &ann.info, r);
+    // Merge INFO with bcftools-compatible sorting
+    let merged_info = merge_info_bcftools_order(info, alt_list, &ann.info, r);
 
     let mut out = format!(
         "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -134,37 +123,59 @@ fn merge_record(
     out
 }
 
-fn merge_info(
+/// Custom sorting key to match bcftools INFO field order
+/// bcftools uses case-insensitive alphabetical sort, but with stable ordering
+fn bcftools_sort_key(key: &str) -> String {
+    // Convert to uppercase for case-insensitive comparison
+    // This ensures: AC, AN, DP4, INDEL, STR, TEST, T_FLOAT, T_INT
+    key.to_uppercase()
+}
+
+/// Merge INFO fields with bcftools-compatible alphabetical sorting
+fn merge_info_bcftools_order(
     base: &str,
     alt_list: &[&str],
     ann_fields: &[StructuredInfoField],
     r: &str,
 ) -> String {
-    let mut out: Vec<String> = Vec::new();
+    use std::collections::HashMap;
 
+    let mut map = HashMap::new();
+
+    // Parse base INFO
     if !base.is_empty() && base != "." {
         for s in base.split(';') {
-            if !s.is_empty() {
-                out.push(s.to_string());
+            if s.is_empty() {
+                continue;
+            }
+            if let Some((k, v)) = s.split_once('=') {
+                map.insert(k.to_string(), v.to_string());
+            } else {
+                map.insert(s.to_string(), String::new());
             }
         }
     }
 
+    // Add annotation fields
     for f in ann_fields {
-        match f.number {
+        let value = match f.number {
             FieldNumber::Zero => {
-                out.push(f.key.to_string());
+                map.insert(f.key.to_string(), String::new());
+                continue;
             }
 
             FieldNumber::One => {
-                out.push(format!("{}={}", f.key, f.values[0]));
+                if let Some(v) = f.values.first() {
+                    v.to_string()
+                } else {
+                    continue;
+                }
             }
 
-            FieldNumber::Many => {
-                out.push(format!("{}={}", f.key, f.values.join(",")));
-            }
+            FieldNumber::Many => f.values.join(","),
 
             FieldNumber::A => {
+                // Expand to match number of ALT alleles
                 let mut vals = Vec::with_capacity(alt_list.len());
                 for i in 0..alt_list.len() {
                     vals.push(if i < f.values.len() {
@@ -173,36 +184,40 @@ fn merge_info(
                         f.values[0]
                     });
                 }
-                out.push(format!("{}={}", f.key, vals.join(",")));
+                vals.join(",")
             }
 
-            _ => {
-                out.push(format!("{}={}", f.key, f.values.join(",")));
-            }
-        }
+            _ => f.values.join(","),
+        };
+
+        map.insert(f.key.to_string(), value);
     }
 
+    // Add INDEL flag if applicable
     let is_indel = r.len() != 1 || alt_list.iter().any(|a| a.len() != 1);
-
     if is_indel {
-        out.push("INDEL".to_string());
+        map.insert("INDEL".to_string(), String::new());
     }
 
-    let mut seen = std::collections::HashSet::new();
-    let mut dedup = Vec::new();
+    // Sort keys using bcftools ordering (case-insensitive alphabetical)
+    let mut keys: Vec<String> = map.keys().cloned().collect();
+    keys.sort_by(|a, b| bcftools_sort_key(a).cmp(&bcftools_sort_key(b)));
 
-    for item in out {
-        let key = item.split('=').next().unwrap().to_string();
-        if seen.insert(key) {
-            dedup.push(item);
+    // Build output in sorted order
+    let mut parts = Vec::new();
+    for key in keys {
+        if let Some(value) = map.get(&key) {
+            if value.is_empty() {
+                parts.push(key);
+            } else {
+                parts.push(format!("{}={}", key, value));
+            }
         }
     }
 
-    dedup.sort();
-
-    if dedup.is_empty() {
+    if parts.is_empty() {
         ".".to_string()
     } else {
-        dedup.join(";")
+        parts.join(";")
     }
 }
