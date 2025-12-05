@@ -1,11 +1,8 @@
 pub mod annotate;
-pub mod annotate_gpu;
-pub mod annotate_index;
-pub mod annotate_opencl;
 pub mod bgzf;
+pub mod cli;
 pub mod csi;
 pub mod filter;
-pub mod filter_args;
 pub mod kbi;
 pub mod norm;
 pub mod util;

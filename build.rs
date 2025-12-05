@@ -1,6 +1,3 @@
-use std::process::Command;
-use which::which;
-
 fn main() {
     if std::env::var("CARGO_FEATURE_GPU").is_err() {
         println!("cargo:warning=GPU feature disabled → skipping CUDA build");
@@ -17,7 +14,7 @@ fn main() {
         }
     };
 
-    println!("cargo:rerun-if-changed=src/ani_kernel.cu");
+    println!("cargo:rerun-if-changed=src/annotate/cuda/ani_kernel.cu");
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let output_ptx = format!("{}/ani_kernel.ptx", out_dir);
@@ -27,7 +24,7 @@ fn main() {
     let status = std::process::Command::new(nvcc)
         .args(&[
             "-ptx",
-            "src/ani_kernel.cu",
+            "src/annotate/cuda/ani_kernel.cu",
             "-o",
             &output_ptx,
             "-arch=sm_75",

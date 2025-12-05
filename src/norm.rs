@@ -3,7 +3,6 @@ use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
 use std::path::Path;
 use thread_local::ThreadLocal;
 

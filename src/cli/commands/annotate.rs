@@ -1,0 +1,77 @@
+use crate::annotate;
+use crate::cli::args::{AnnotateArgs, AnnotateIndexArgs, DbBuildArgs};
+use anyhow::Result;
+
+pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
+    let out = args.output.clone().unwrap_or_else(|| {
+        let mut p = args.input.clone();
+        p.set_extension("annot.vcf");
+        p
+    });
+
+    let ani_path = if args.annotations.extension().unwrap_or_default() == "ani" {
+        args.annotations.clone()
+    } else {
+        let mut p = args.annotations.clone();
+        p.set_extension("ani");
+        p
+    };
+
+    if !ani_path.exists() {
+        anyhow::bail!("Annotation index not found: {:?}", ani_path);
+    }
+
+    eprintln!("[annotate] ANI = {:?}", ani_path);
+
+    #[cfg(feature = "gpu")]
+    if args.gpu {
+        eprintln!("[annotate] Using CUDA GPU backend…");
+        let ani = annotate::AniIndex::open(&ani_path)?;
+        let gpu = annotate::cuda::GpuAni::load(&ani)?;
+        annotate::cuda::annotate_vcf_ani_gpu(&gpu, &ani, &args.input, &out)?;
+        return Ok(());
+    }
+
+    #[cfg(feature = "opencl")]
+    if args.opencl {
+        eprintln!("[annotate] Using OpenCL backend…");
+        let ani = annotate::AniIndex::open(&ani_path)?;
+        let gpu = annotate::opencl::OpenCLAni::new(&ani)?;
+        annotate::opencl::annotate_vcf_ani_opencl(&gpu, &ani, &args.input, &out)?;
+        return Ok(());
+    }
+
+    annotate::cpu::annotate_vcf_ani(&ani_path, &args.input, &out)?;
+    Ok(())
+}
+
+pub fn cmd_annotate_index(args: AnnotateIndexArgs) -> Result<()> {
+    let out = args.output.clone().unwrap_or_else(|| {
+        let mut p = args.input.clone();
+        p.set_extension("ani");
+        p
+    });
+
+    eprintln!("[annotate-index] Input  = {:?}", args.input);
+    eprintln!("[annotate-index] Output = {:?}", out);
+
+    annotate::build_ani_index_from_tab(&args.input, &out)?;
+
+    Ok(())
+}
+
+pub fn cmd_db_build(args: DbBuildArgs) -> Result<()> {
+    let out = args.output.clone().unwrap_or_else(|| {
+        let mut p = args.input.clone();
+        p.set_extension("ani");
+        p
+    });
+
+    eprintln!("[db-build] Input: {:?}", args.input);
+    eprintln!("[db-build] Output: {:?}", out);
+
+    annotate::build_ani_index_from_tab(&args.input, &out)?;
+
+    eprintln!("[db-build] Done");
+    Ok(())
+}

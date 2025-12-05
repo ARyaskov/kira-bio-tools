@@ -1,10 +1,9 @@
 // High-performance VCF filtering using pest grammar (filter_expr.pest)
 use crate::vcf::parse_vcf_full_line;
 use crate::vcf::VcfParsedRecord;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use pest::Parser;
 use pest_derive::Parser;
-use std::collections::HashMap;
 
 #[derive(Parser)]
 #[grammar = "filter_expr.pest"]
@@ -68,7 +67,7 @@ impl Value {
                 CmpOp::Le => a <= b,
                 CmpOp::Ge => a >= b,
             },
-            (Value::Int(a), Value::Float(b)) => self.as_float().cmp(op, &Value::Float(*b)),
+            (Value::Int(_a), Value::Float(b)) => self.as_float().cmp(op, &Value::Float(*b)),
             (Value::Float(a), Value::Int(b)) => Value::Float(*a).cmp(op, &Value::Int(*b)),
             (Value::Str(a), Value::Str(b)) => match op {
                 CmpOp::Eq => a == b,
@@ -250,7 +249,7 @@ fn build_expr(pair: pest::iterators::Pair<Rule>) -> AstNode {
         _ => unreachable!("Unhandled rule: {:?}", pair.as_rule()),
     }
 }
-use crate::filter_args::FilterArgs;
+use crate::cli::args::FilterArgs;
 
 pub fn run_filter(args: &FilterArgs) -> Result<()> {
     use std::fs::File;
