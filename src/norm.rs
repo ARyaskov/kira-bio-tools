@@ -1,11 +1,18 @@
 use anyhow::Result;
-use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
 use std::cell::RefCell;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::path::Path;
 use thread_local::ThreadLocal;
-use std::io::BufWriter;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use std::io::{BufWriter, Write};
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+use memmap2::MmapOptions;
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+use std::fs::OpenOptions;
 
 #[inline]
 pub fn normalize(ref_allele: &str, alt_allele: &str) -> (usize, usize) {
@@ -48,7 +55,7 @@ fn extract_tabs(line: &[u8]) -> Option<(usize, usize, usize, usize)> {
 
 pub fn turbo_norm_vcf(input: &Path, output: &Path) -> Result<()> {
     let file = File::open(input)?;
-    let mmap = unsafe { Mmap::map(&file)? };
+    let mmap = unsafe { memmap2::Mmap::map(&file)? };
     let data = &mmap[..];
 
     let mut line_positions = Vec::with_capacity(data.len() / 80);
@@ -95,7 +102,7 @@ pub fn turbo_norm_vcf(input: &Path, output: &Path) -> Result<()> {
         arena.extend_from_slice(nr);
         arena.push(b'\t');
         arena.extend_from_slice(na);
-        arena.extend_from_slice(&line[alt_allele.len() + rs..]);
+        arena.extend_from_slice(&line[ae..]);
         arena.push(b'\n');
     });
 
@@ -129,6 +136,6 @@ pub fn turbo_norm_vcf(input: &Path, output: &Path) -> Result<()> {
             );
         }
         mmap_out.flush()?;
-        return Ok(());
+        Ok(())
     }
 }
