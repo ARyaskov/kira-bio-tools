@@ -66,6 +66,10 @@ harness = false
 name = "norm_bench"
 harness = false
 
+[[bench]]
+name = "annotate_bench"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = "fat"
