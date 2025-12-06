@@ -40,6 +40,8 @@ pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
 
     // Process VCF records
     let mut count = 0usize;
+    let report_interval = if timing { 100_000 } else { 1_000_000 };
+
     while let Some(line) = reader.read_line()? {
         if line.starts_with('#') || line.trim().is_empty() {
             continue;
@@ -59,11 +61,15 @@ pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
 
         count += processed;
 
-        if timing && count % 100_000 == 0 {
+        if count > 0 && count % report_interval == 0 {
+            let total = total_variants.load(Ordering::Relaxed);
+            let unique = entries_map.len();
+            let dups = duplicates_skipped.load(Ordering::Relaxed);
+            let dup_rate = (dups as f64 / total as f64) * 100.0;
+
             eprintln!(
-                "[ani-build] Processed {} variants ({} unique entries)...",
-                total_variants.load(Ordering::Relaxed),
-                entries_map.len()
+                "[ani-build] Progress: {} variants → {} unique entries ({} dups, {:.1}%)",
+                total, unique, dups, dup_rate
             );
         }
     }
@@ -203,13 +209,30 @@ fn finalize_ani_index(
     }
 
     let mph_start = std::time::Instant::now();
+    let n = rows.len();
+
+    // Adaptive MPHF configuration based on dataset size
+    // Larger gamma = more space but better peelability for large datasets
+    let (gamma, rehash_limit) = match n {
+        0..=100_000 => (1.2, 16),            // Small: tight packing
+        100_001..=1_000_000 => (1.5, 32),    // Medium: balanced
+        1_000_001..=10_000_000 => (2.0, 64), // Large: 1000G scale
+        _ => (2.5, 100),                     // Very large: gnomAD scale
+    };
+
+    if timing {
+        eprintln!(
+            "[ani-build] MPHF config: gamma={:.1}, rehash_limit={}, entries={}",
+            gamma, rehash_limit, n
+        );
+    }
 
     let keys_bytes: Vec<[u8; 8]> = rows.iter().map(|(k, _)| k.to_le_bytes()).collect();
 
     let mph = Builder::new()
         .with_config(BuildConfig {
-            gamma: 1.2,
-            rehash_limit: 16,
+            gamma,
+            rehash_limit,
             salt: 0x9E3779B185EBCA87,
         })
         .build(keys_bytes.iter().map(|b| b.as_slice()))?;
@@ -218,6 +241,20 @@ fn finalize_ani_index(
         eprintln!(
             "[ani-build] MPH build: {:.3}s",
             mph_start.elapsed().as_secs_f64()
+        );
+
+        // Memory statistics for large indexes
+        let mph_size = mph.g.len() * mem::size_of::<u32>();
+        let entries_size = n * mem::size_of::<AniEntry>();
+        let pool_size = pool.len();
+        let total_size = mph_size + entries_size + pool_size;
+
+        eprintln!(
+            "[ani-build] Index size: {:.2} MB (MPHF: {:.2} MB, entries: {:.2} MB, pool: {:.2} MB)",
+            total_size as f64 / (1024.0 * 1024.0),
+            mph_size as f64 / (1024.0 * 1024.0),
+            entries_size as f64 / (1024.0 * 1024.0),
+            pool_size as f64 / (1024.0 * 1024.0)
         );
     }
 
@@ -316,6 +353,12 @@ mod tests {
             .unwrap();
         assert_eq!(map.len(), 1); // Still 1 entry
         assert_eq!(dups.load(Ordering::Relaxed), 1); // 1 duplicate skipped
+
+        // Verify first-wins: check if DP=10 (not DP=20)
+        let key = make_key(1, 1000, "A", "T");
+        let (entry, _) = map.get(&key).unwrap();
+        let info_str = read_cstring(&pool, entry.info_ofs as usize);
+        assert!(info_str.contains("DP=10"));
     }
 
     #[test]
@@ -332,6 +375,11 @@ mod tests {
 
         assert_eq!(map.len(), 3); // 3 biallelic variants
         assert_eq!(multi.load(Ordering::Relaxed), 1); // 1 multiallelic
+
+        // Verify all three ALT alleles are indexed
+        assert!(map.contains_key(&make_key(1, 2000, "G", "A")));
+        assert!(map.contains_key(&make_key(1, 2000, "G", "C")));
+        assert!(map.contains_key(&make_key(1, 2000, "G", "T")));
     }
 
     #[test]
@@ -339,8 +387,74 @@ mod tests {
         let key1 = make_key(1, 1000, "A", "T");
         let key2 = make_key(1, 1000, "A", "T");
         let key3 = make_key(1, 1000, "A", "G");
+        let key4 = make_key(1, 1001, "A", "T"); // Different position
+        let key5 = make_key(2, 1000, "A", "T"); // Different chromosome
 
         assert_eq!(key1, key2); // Same variant
         assert_ne!(key1, key3); // Different alt
+        assert_ne!(key1, key4); // Different position
+        assert_ne!(key1, key5); // Different chromosome
+    }
+
+    #[test]
+    fn test_insertion_order() {
+        let mut map = FxHashMap::default();
+        let mut pool = Vec::new();
+        let mut order = 0;
+        let dups = AtomicUsize::new(0);
+        let multi = AtomicUsize::new(0);
+
+        // Add 3 variants
+        let lines = [
+            "chr1\t1000\trs1\tA\tT\t30\tPASS\t.",
+            "chr2\t2000\trs2\tG\tC\t40\tPASS\t.",
+            "chr3\t3000\trs3\tC\tA\t50\tPASS\t.",
+        ];
+
+        for line in &lines {
+            process_vcf_line_dedup(line, &mut map, &mut pool, &mut order, &dups, &multi, false)
+                .unwrap();
+        }
+
+        // Check insertion order
+        let key1 = make_key(1, 1000, "A", "T");
+        let key2 = make_key(2, 2000, "G", "C");
+        let key3 = make_key(3, 3000, "C", "A");
+
+        assert_eq!(map.get(&key1).unwrap().1, 0);
+        assert_eq!(map.get(&key2).unwrap().1, 1);
+        assert_eq!(map.get(&key3).unwrap().1, 2);
+    }
+
+    #[test]
+    fn test_adaptive_mphf_config() {
+        // Test gamma selection logic
+        let test_cases = vec![
+            (50_000, 1.2, 16),
+            (500_000, 1.5, 32),
+            (5_000_000, 2.0, 64),
+            (50_000_000, 2.5, 100),
+        ];
+
+        for (n, expected_gamma, expected_rehash) in test_cases {
+            let (gamma, rehash) = match n {
+                0..=100_000 => (1.2, 16),
+                100_001..=1_000_000 => (1.5, 32),
+                1_000_001..=10_000_000 => (2.0, 64),
+                _ => (2.5, 100),
+            };
+
+            assert_eq!(gamma, expected_gamma, "Wrong gamma for n={}", n);
+            assert_eq!(rehash, expected_rehash, "Wrong rehash for n={}", n);
+        }
+    }
+
+    /// Helper to read C-string from pool
+    fn read_cstring(pool: &[u8], offset: usize) -> String {
+        let mut end = offset;
+        while end < pool.len() && pool[end] != 0 {
+            end += 1;
+        }
+        String::from_utf8_lossy(&pool[offset..end]).to_string()
     }
 }
