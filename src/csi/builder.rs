@@ -9,26 +9,23 @@ use noodles_csi as csi;
 use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
 use noodles_csi::binning_index::index::reference_sequence::Bin;
 
-use crate::bgzf::VirtualPosition as OurVirtualPosition;
 use crate::csi::structs::Result;
 use crate::csi::utils::reg2bin;
-use crate::vcf::BgzfVcfReader;
+use crate::vcf::VcfReader;
 
 const MIN_SHIFT: u8 = 14;
 const DEPTH: u8 = 5;
 
 pub fn build_csi_index<P: AsRef<Path>>(vcf_path: P, output_path: P) -> Result<()> {
-    let mut reader = BgzfVcfReader::open(vcf_path.as_ref())?;
+    let mut reader = VcfReader::open_for_indexing(vcf_path.as_ref())?;
     let _header = reader.header()?;
 
     let mut ref_seqs: BTreeMap<usize, BTreeMap<usize, Vec<Chunk>>> = BTreeMap::new();
     let mut records_indexed = 0u64;
 
     loop {
-        let current_vpos: OurVirtualPosition = reader.virtual_position();
-
-        match reader.next_record()? {
-            Some(record) => {
+        match reader.next_record_with_vpos()? {
+            Some((record, current_vpos)) => {
                 let ref_id = (record.chr_id.saturating_sub(1)) as usize;
                 let start = record.position;
                 let end = record.position + 1;

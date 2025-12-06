@@ -1,9 +1,10 @@
-// High-performance VCF filtering using pest grammar (filter_expr.pest)
 use crate::vcf::parse_vcf_full_line;
-use crate::vcf::VcfParsedRecord;
+use crate::vcf::VcfReader;
 use anyhow::Result;
 use pest::Parser;
 use pest_derive::Parser;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 
 #[derive(Parser)]
 #[grammar = "filter_expr.pest"]
@@ -86,7 +87,7 @@ impl Value {
     }
 }
 
-pub fn eval_ast(ast: &AstNode, rec: &VcfParsedRecord) -> bool {
+pub fn eval_ast(ast: &AstNode, rec: &crate::vcf::VcfParsedRecord) -> bool {
     match ast {
         AstNode::And(a, b) => eval_ast(a, rec) && eval_ast(b, rec),
         AstNode::Or(a, b) => eval_ast(a, rec) || eval_ast(b, rec),
@@ -100,7 +101,7 @@ pub fn eval_ast(ast: &AstNode, rec: &VcfParsedRecord) -> bool {
     }
 }
 
-fn eval_value(node: &AstNode, rec: &VcfParsedRecord) -> Value {
+fn eval_value(node: &AstNode, rec: &crate::vcf::VcfParsedRecord) -> Value {
     match node {
         AstNode::Str(s) => Value::Str(s.clone()),
         AstNode::Int(i) => Value::Int(*i),
@@ -115,7 +116,6 @@ fn eval_value(node: &AstNode, rec: &VcfParsedRecord) -> Value {
 
             match rec.info.get(&lookup) {
                 Some(v_str) => {
-                    // Try int
                     if let Ok(i) = v_str.parse::<i64>() {
                         Value::Int(i)
                     } else if let Ok(f) = v_str.parse::<f64>() {
@@ -249,16 +249,14 @@ fn build_expr(pair: pest::iterators::Pair<Rule>) -> AstNode {
         _ => unreachable!("Unhandled rule: {:?}", pair.as_rule()),
     }
 }
+
 use crate::cli::args::FilterArgs;
 
 pub fn run_filter(args: &FilterArgs) -> Result<()> {
-    use std::fs::File;
-    use std::io::{BufWriter, Write};
     let ast = parse_expr(&args.expr)?;
-    let mut reader = crate::vcf::VcfReader::open(&args.input)?;
+    let mut reader = VcfReader::open(&args.input)?;
     let mut out = BufWriter::new(File::create(&args.output)?);
 
-    // Write header unchanged
     for h in &reader.header()? {
         writeln!(out, "{}", h)?;
     }

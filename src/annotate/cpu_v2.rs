@@ -7,9 +7,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::reader::{BatchVcfReader, VcfAnnotationReader};
 use super::structs::*;
+use crate::vcf_parser_fast::FastVcfParser;
 
 const BATCH_SIZE: usize = 200_000;
-const OUTPUT_BUFFER_SIZE: usize = 64 * 1024 * 1024; // 64MB
+const OUTPUT_BUFFER_SIZE: usize = 64 * 1024 * 1024;
 
 pub fn annotate_vcf_ani_v2(db: &Path, input: &Path, output: &Path) -> Result<()> {
     let timing = std::env::var("KIRA_BT_TIMING").is_ok();
@@ -95,33 +96,44 @@ pub fn annotate_vcf_ani_v2(db: &Path, input: &Path, output: &Path) -> Result<()>
 
 #[inline]
 fn annotate_line(line: &str, ani: &AniIndex) -> String {
-    if let Some(row) = parse_vcf_record(line) {
-        let (chr, pos, id, r, alt_raw, qual, filter, info, rest) = row;
+    let mut parser = FastVcfParser::new(line);
+
+    if let Some(fields) = parser.parse_standard_fields() {
+        let chr = fields.chrom;
+        let pos = fields.pos.parse::<u32>().unwrap_or(0);
+        let id = fields.id;
+        let rf = fields.ref_allele;
+        let alt_raw = fields.alt;
+        let qual = fields.qual;
+        let filter = fields.filter;
+        let info = fields.info;
+
+        let rest = parser.rest();
+        let rest_fields: Vec<&str> = if rest.is_empty() {
+            Vec::new()
+        } else {
+            rest.split('\t').collect()
+        };
+
         let alt_list: Vec<&str> = alt_raw.split(',').collect();
 
-        if let Some((ann, _ann_alt_list)) = ani.lookup_full(chr, pos, r, alt_raw) {
-            return merge_record(chr, pos, id, r, &alt_list, qual, filter, info, rest, ann);
+        if let Some((ann, _ann_alt_list)) = ani.lookup_full(chr, pos, rf, alt_raw) {
+            return merge_record(
+                chr,
+                pos,
+                id,
+                rf,
+                &alt_list,
+                qual,
+                filter,
+                info,
+                rest_fields,
+                ann,
+            );
         }
     }
 
     line.to_string()
-}
-
-#[inline]
-fn parse_vcf_record(
-    line: &str,
-) -> Option<(&str, u32, &str, &str, &str, &str, &str, &str, Vec<&str>)> {
-    let mut cols = line.split('\t');
-    let chr = cols.next()?;
-    let pos = cols.next()?.parse().ok()?;
-    let id = cols.next()?;
-    let r = cols.next()?;
-    let alt = cols.next()?;
-    let qual = cols.next()?;
-    let filter = cols.next()?;
-    let info = cols.next()?;
-    let rest: Vec<&str> = cols.collect();
-    Some((chr, pos, id, r, alt, qual, filter, info, rest))
 }
 
 fn merge_record(

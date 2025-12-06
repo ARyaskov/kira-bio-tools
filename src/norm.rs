@@ -14,6 +14,8 @@ use memmap2::MmapOptions;
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 use std::fs::OpenOptions;
 
+use crate::vcf_parser_fast::FastVcfParser;
+
 #[inline]
 pub fn normalize(ref_allele: &str, alt_allele: &str) -> (usize, usize) {
     let rb = ref_allele.as_bytes();
@@ -34,23 +36,6 @@ pub fn normalize(ref_allele: &str, alt_allele: &str) -> (usize, usize) {
     }
 
     (prefix, suffix)
-}
-
-#[inline]
-fn extract_tabs(line: &[u8]) -> Option<(usize, usize, usize, usize)> {
-    let mut t = [0usize; 5];
-    let mut k = 0;
-
-    for i in 0..line.len() {
-        if line[i] == b'\t' {
-            t[k] = i;
-            k += 1;
-            if k == 5 {
-                return Some((t[2] + 1, t[3], t[3] + 1, t[4]));
-            }
-        }
-    }
-    None
 }
 
 pub fn turbo_norm_vcf(input: &Path, output: &Path) -> Result<()> {
@@ -81,29 +66,44 @@ pub fn turbo_norm_vcf(input: &Path, output: &Path) -> Result<()> {
             return;
         }
 
-        let Some((rs, re, as_, ae)) = extract_tabs(line) else {
+        let line_str = unsafe { std::str::from_utf8_unchecked(line) };
+        let mut parser = FastVcfParser::new(line_str);
+
+        if let Some(fields) = parser.parse_standard_fields() {
+            let ref_allele = fields.ref_allele.as_bytes();
+            let alt_allele = fields.alt.as_bytes();
+
+            let (prefix, suffix) = normalize(fields.ref_allele, fields.alt);
+
+            let nr = &ref_allele[prefix..ref_allele.len() - suffix];
+            let na = &alt_allele[prefix..alt_allele.len() - suffix];
+
+            arena.extend_from_slice(fields.chrom.as_bytes());
+            arena.push(b'\t');
+            arena.extend_from_slice(fields.pos.as_bytes());
+            arena.push(b'\t');
+            arena.extend_from_slice(fields.id.as_bytes());
+            arena.push(b'\t');
+            arena.extend_from_slice(nr);
+            arena.push(b'\t');
+            arena.extend_from_slice(na);
+            arena.push(b'\t');
+            arena.extend_from_slice(fields.qual.as_bytes());
+            arena.push(b'\t');
+            arena.extend_from_slice(fields.filter.as_bytes());
+            arena.push(b'\t');
+            arena.extend_from_slice(fields.info.as_bytes());
+
+            let rest = parser.rest();
+            if !rest.is_empty() {
+                arena.push(b'\t');
+                arena.extend_from_slice(rest.as_bytes());
+            }
+            arena.push(b'\n');
+        } else {
             arena.extend_from_slice(line);
             arena.push(b'\n');
-            return;
-        };
-
-        let ref_allele = &line[rs..re];
-        let alt_allele = &line[as_..ae];
-
-        let ref_str = unsafe { std::str::from_utf8_unchecked(ref_allele) };
-        let alt_str = unsafe { std::str::from_utf8_unchecked(alt_allele) };
-
-        let (prefix, suffix) = normalize(ref_str, alt_str);
-
-        let nr = &ref_allele[prefix..ref_allele.len() - suffix];
-        let na = &alt_allele[prefix..alt_allele.len() - suffix];
-
-        arena.extend_from_slice(&line[..rs]);
-        arena.extend_from_slice(nr);
-        arena.push(b'\t');
-        arena.extend_from_slice(na);
-        arena.extend_from_slice(&line[ae..]);
-        arena.push(b'\n');
+        }
     });
 
     let mut final_buf = Vec::with_capacity(data.len() + data.len() / 3);
