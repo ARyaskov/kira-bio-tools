@@ -1,85 +1,13 @@
-use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use flate2::read::GzDecoder;
-use memmap2::Mmap;
-use rayon::prelude::*;
-use thiserror::Error;
 
 use crate::bgzf::{BgzfLineReader, BgzfReader, VirtualPosition};
-use crate::util::{detect_format, parse_vcf_line_fast, ChrId, GenomicKey, VcfFormat};
-
-#[derive(Debug, Error)]
-pub enum VcfError {
-    #[error("IO error: {0}")]
-    Io(#[from] io::Error),
-    #[error("BGZF error: {0}")]
-    Bgzf(#[from] crate::bgzf::BgzfError),
-    #[error("Invalid VCF format: {0}")]
-    InvalidFormat(String),
-    #[error("Parse error at line {line}: {message}")]
-    ParseError { line: usize, message: String },
-}
-
-pub type Result<T> = std::result::Result<T, VcfError>;
-
-#[derive(Debug, Clone)]
-pub struct VcfRecord {
-    pub chr_id: ChrId,
-    pub position: u32,
-    pub offset: u64,
-}
-
-impl VcfRecord {
-    pub fn key(&self) -> GenomicKey {
-        GenomicKey::new(self.chr_id, self.position)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct VcfParsedRecord {
-    pub chrom: String,
-    pub pos: u32,
-    pub filter: String,
-    pub info: HashMap<String, String>,
-    pub raw_line: String,
-}
-
-impl VcfParsedRecord {
-    pub fn to_line(&self) -> &str {
-        &self.raw_line
-    }
-}
-
-// Minimal parser – only columns needed for filtering
-pub fn parse_vcf_full_line(line: &str) -> Option<VcfParsedRecord> {
-    if line.starts_with('#') {
-        return None;
-    }
-    let cols: Vec<&str> = line.trim_end().split('\t').collect();
-    if cols.len() < 8 {
-        return None;
-    }
-
-    let filter = cols[6].to_string();
-    let mut info = HashMap::new();
-
-    for item in cols[7].split(';') {
-        if let Some((k, v)) = item.split_once('=') {
-            info.insert(k.to_string(), v.to_string());
-        }
-    }
-
-    Some(VcfParsedRecord {
-        chrom: cols[0].to_string(),
-        pos: cols[1].parse().ok()?,
-        filter,
-        info,
-        raw_line: line.to_string(),
-    })
-}
+use crate::util::{detect_format, parse_vcf_line_fast, VcfFormat};
+use crate::vcf::parser::extract_contig_id;
+use crate::vcf::structs::{Result, VcfRecord};
 
 pub enum VcfReader {
     Plain(PlainVcfReader),
@@ -160,7 +88,7 @@ pub struct PlainVcfReader {
     reader: BufReader<File>,
     buf: String,
     offset: u64,
-    contigs: Vec<String>,
+    pub contigs: Vec<String>,
     header_parsed: bool,
 }
 
@@ -258,7 +186,7 @@ pub struct GzipVcfReader {
     reader: BufReader<GzDecoder<File>>,
     buf: String,
     offset: u64,
-    contigs: Vec<String>,
+    pub contigs: Vec<String>,
     header_parsed: bool,
 }
 
@@ -355,7 +283,7 @@ impl GzipVcfReader {
 
 pub struct BgzfVcfReader {
     reader: BgzfLineReader<File>,
-    contigs: Vec<String>,
+    pub contigs: Vec<String>,
     header_parsed: bool,
 }
 
@@ -433,128 +361,5 @@ impl BgzfVcfReader {
             None => return Ok(None),
         };
         Ok(Some((line.to_string(), vpos.as_u64())))
-    }
-}
-
-fn extract_contig_id(line: &str) -> Option<String> {
-    let start = line.find("ID=")? + 3;
-    let rest = &line[start..];
-    let end = rest.find(|c| c == ',' || c == '>')?;
-    Some(rest[..end].to_string())
-}
-
-pub struct MmapVcfParser<'a> {
-    data: &'a [u8],
-}
-
-impl<'a> MmapVcfParser<'a> {
-    pub fn new(mmap: &'a Mmap) -> Self {
-        Self { data: mmap }
-    }
-
-    pub fn parse_parallel(&self, num_threads: usize) -> Vec<VcfRecord> {
-        let chunk_size = self.data.len() / num_threads;
-        let chunks: Vec<_> = (0..num_threads)
-            .map(|i| {
-                let start = i * chunk_size;
-                let end = if i == num_threads - 1 {
-                    self.data.len()
-                } else {
-                    (i + 1) * chunk_size
-                };
-                (start, end)
-            })
-            .collect();
-
-        chunks
-            .into_par_iter()
-            .flat_map(|(start, end)| {
-                let adjusted_start = if start == 0 {
-                    0
-                } else {
-                    self.data[start..]
-                        .iter()
-                        .position(|&b| b == b'\n')
-                        .map(|p| start + p + 1)
-                        .unwrap_or(end)
-                };
-
-                let adjusted_end = if end >= self.data.len() {
-                    self.data.len()
-                } else {
-                    self.data[..end]
-                        .iter()
-                        .rposition(|&b| b == b'\n')
-                        .map(|p| p + 1)
-                        .unwrap_or(end)
-                };
-
-                self.parse_chunk(adjusted_start, adjusted_end)
-            })
-            .collect()
-    }
-
-    fn parse_chunk(&self, start: usize, end: usize) -> Vec<VcfRecord> {
-        let mut records = Vec::new();
-        let mut pos = start;
-
-        while pos < end {
-            let line_end = self.data[pos..end]
-                .iter()
-                .position(|&b| b == b'\n')
-                .map(|p| pos + p)
-                .unwrap_or(end);
-
-            let line = &self.data[pos..line_end];
-
-            if !line.is_empty() && line[0] != b'#' {
-                if let Some((chr_id, position)) = parse_vcf_line_fast(line) {
-                    records.push(VcfRecord {
-                        chr_id,
-                        position,
-                        offset: pos as u64,
-                    });
-                }
-            }
-
-            pos = line_end + 1;
-        }
-
-        records
-    }
-}
-
-pub fn fetch_line<P: AsRef<Path>>(path: P, offset: u64) -> Result<String> {
-    let path = path.as_ref();
-    let format = detect_format(path)?;
-
-    match format {
-        VcfFormat::Plain => {
-            let mut file = File::open(path)?;
-            file.seek(SeekFrom::Start(offset))?;
-            let mut reader = BufReader::new(file);
-            let mut line = String::new();
-            reader.read_line(&mut line)?;
-            Ok(line.trim_end().to_string())
-        }
-        VcfFormat::Gzip => Err(VcfError::InvalidFormat(
-            "Cannot seek in gzip file. Use BGZF compression.".into(),
-        )),
-        VcfFormat::Bgzf => {
-            let file = File::open(path)?;
-            let mut bgzf_reader = BgzfReader::new(file);
-            bgzf_reader.seek(VirtualPosition::from_u64(offset))?;
-
-            let mut line = String::new();
-            bgzf_reader.read_line(&mut line)?;
-
-            if line.ends_with('\n') {
-                line.pop();
-            }
-            if line.ends_with('\r') {
-                line.pop();
-            }
-            Ok(line)
-        }
     }
 }

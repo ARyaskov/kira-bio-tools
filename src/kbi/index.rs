@@ -1,0 +1,167 @@
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::mem;
+use std::path::Path;
+use std::slice;
+
+use kira_kv_engine::Mphf;
+use memmap2::{Mmap, MmapOptions};
+use rayon::prelude::*;
+
+use crate::kbi::structs::{KbiHeader, KbiStats, Result};
+use crate::util::{ChrId, GenomicKey};
+
+pub struct KbiIndex {
+    mph: Mphf,
+    keys: Vec<u64>,
+    offsets: Vec<u64>,
+}
+
+impl KbiIndex {
+    #[inline]
+    pub fn get(&self, key: GenomicKey) -> Option<u64> {
+        let key_bytes = key.as_u64().to_le_bytes();
+        let idx = self.mph.index(&key_bytes) as usize;
+
+        if idx < self.keys.len() && self.keys[idx] == key.as_u64() {
+            Some(self.offsets[idx])
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn contains(&self, key: GenomicKey) -> bool {
+        self.get(key).is_some()
+    }
+
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    pub fn get_batch(&self, keys: &[GenomicKey]) -> Vec<Option<u64>> {
+        keys.par_iter().map(|&k| self.get(k)).collect()
+    }
+
+    pub fn range(&self, chr: ChrId, start_pos: u32, end_pos: u32) -> Vec<(u32, u64)> {
+        let start_key = GenomicKey::new(chr, start_pos).as_u64();
+        let end_key = GenomicKey::new(chr, end_pos).as_u64();
+
+        let start_idx = self.keys.partition_point(|&k| k < start_key);
+        let end_idx = self.keys.partition_point(|&k| k <= end_key);
+
+        self.keys[start_idx..end_idx]
+            .iter()
+            .zip(&self.offsets[start_idx..end_idx])
+            .map(|(&k, &off)| (GenomicKey::from_u64(k).position(), off))
+            .collect()
+    }
+
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let file = File::create(path)?;
+        let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, file);
+
+        let header = KbiHeader::new(self.keys.len(), &self.mph);
+
+        writer.write_all(bytemuck::bytes_of(&header))?;
+
+        let g_bytes = unsafe {
+            slice::from_raw_parts(
+                self.mph.g.as_ptr() as *const u8,
+                self.mph.g.len() * mem::size_of::<u32>(),
+            )
+        };
+        writer.write_all(g_bytes)?;
+
+        let keys_bytes = unsafe {
+            slice::from_raw_parts(
+                self.keys.as_ptr() as *const u8,
+                self.keys.len() * mem::size_of::<u64>(),
+            )
+        };
+        writer.write_all(keys_bytes)?;
+
+        let offsets_bytes = unsafe {
+            slice::from_raw_parts(
+                self.offsets.as_ptr() as *const u8,
+                self.offsets.len() * mem::size_of::<u64>(),
+            )
+        };
+        writer.write_all(offsets_bytes)?;
+
+        writer.flush()?;
+        Ok(())
+    }
+
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let mmap = unsafe {
+            let file = File::open(path)?;
+            MmapOptions::new().map(&file)?
+        };
+
+        Self::from_mmap(&mmap)
+    }
+
+    pub fn from_mmap(mmap: &Mmap) -> Result<Self> {
+        if mmap.len() < mem::size_of::<KbiHeader>() {
+            return Err(crate::kbi::structs::KbiError::InvalidFormat(
+                "File too small".into(),
+            ));
+        }
+
+        let header: &KbiHeader = bytemuck::from_bytes(&mmap[..mem::size_of::<KbiHeader>()]);
+        header.validate()?;
+
+        let n = header.n_entries as usize;
+        let m = header.mph_m as usize;
+
+        let g_start = header.off_mph_g as usize;
+        let g_end = g_start + m * mem::size_of::<u32>();
+        let g: Vec<u32> = bytemuck::cast_slice(&mmap[g_start..g_end]).to_vec();
+
+        let mph = Mphf {
+            n: header.n_entries,
+            m: header.mph_m,
+            salt: header.mph_salt as u64,
+            g,
+        };
+
+        let keys_start = header.off_keys as usize;
+        let keys_end = keys_start + n * mem::size_of::<u64>();
+        let keys: Vec<u64> = bytemuck::cast_slice(&mmap[keys_start..keys_end]).to_vec();
+
+        let offsets_start = header.off_offsets as usize;
+        let offsets_end = offsets_start + n * mem::size_of::<u64>();
+        let offsets: Vec<u64> = bytemuck::cast_slice(&mmap[offsets_start..offsets_end]).to_vec();
+
+        Ok(Self { mph, keys, offsets })
+    }
+
+    pub fn memory_usage(&self) -> usize {
+        mem::size_of::<Self>()
+            + self.keys.len() * mem::size_of::<u64>()
+            + self.offsets.len() * mem::size_of::<u64>()
+            + self.mph.g.len() * mem::size_of::<u32>()
+    }
+
+    pub fn bytes_per_key(&self) -> f64 {
+        self.memory_usage() as f64 / self.len().max(1) as f64
+    }
+
+    pub(crate) fn from_parts(mph: Mphf, keys: Vec<u64>, offsets: Vec<u64>) -> Self {
+        Self { mph, keys, offsets }
+    }
+
+    pub fn stats(&self, file_size: u64) -> KbiStats {
+        KbiStats {
+            entries: self.len(),
+            memory_bytes: self.memory_usage(),
+            bytes_per_key: self.bytes_per_key(),
+            file_size,
+        }
+    }
+}
