@@ -20,41 +20,56 @@ const BGZF_EOF: [u8; 28] = [
 ];
 
 const CHUNK_SIZE: usize = 56 * 1024;
-const CHANNEL_DEPTH: usize = 512;
+const CHANNEL_DEPTH: usize = 256;
+const WRITER_BUFFER_SIZE: usize = 128 * 1024 * 1024;
 
 struct CompressedBlock {
     data: Vec<u8>,
     sequence: usize,
 }
 
-pub struct ParallelBgzfWriter {
+pub struct OptimizedBgzfWriter {
     tx: Sender<(Vec<u8>, usize)>,
     writer_thread: Option<thread::JoinHandle<io::Result<()>>>,
     sequence: AtomicUsize,
+    num_workers: usize,
 }
 
-impl ParallelBgzfWriter {
+impl OptimizedBgzfWriter {
     pub fn create<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         Self::with_compression(path, Compression::new(3))
     }
 
     pub fn with_compression<P: AsRef<Path>>(path: P, compression: Compression) -> io::Result<Self> {
+        let num_workers = rayon::current_num_threads();
+
         let file = File::create(path)?;
-        let writer = BufWriter::with_capacity(64 * 1024 * 1024, file);
+        let writer = BufWriter::with_capacity(WRITER_BUFFER_SIZE, file);
 
         let (chunk_tx, chunk_rx) = bounded::<(Vec<u8>, usize)>(CHANNEL_DEPTH);
         let (block_tx, block_rx) = bounded::<CompressedBlock>(CHANNEL_DEPTH);
 
-        let compressor_handle =
-            thread::spawn(move || Self::compression_worker(chunk_rx, block_tx, compression));
+        let compression_workers: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let rx = chunk_rx.clone();
+                let tx = block_tx.clone();
+                let comp = compression;
+
+                thread::spawn(move || Self::compression_worker(rx, tx, comp))
+            })
+            .collect();
+
+        drop(chunk_rx);
+        drop(block_tx);
 
         let writer_thread =
-            thread::spawn(move || Self::writer_worker(block_rx, writer, compressor_handle));
+            thread::spawn(move || Self::writer_worker(block_rx, writer, compression_workers));
 
         Ok(Self {
             tx: chunk_tx,
             writer_thread: Some(writer_thread),
             sequence: AtomicUsize::new(0),
+            num_workers,
         })
     }
 
@@ -63,22 +78,16 @@ impl ParallelBgzfWriter {
         block_tx: Sender<CompressedBlock>,
         compression: Compression,
     ) -> io::Result<()> {
-        let chunks: Vec<_> = chunk_rx.iter().collect();
+        while let Ok((data, seq)) = chunk_rx.recv() {
+            let compressed = Self::compress_block(&data, compression)?;
 
-        let compressed_blocks: Vec<_> = chunks
-            .into_par_iter()
-            .map(|(data, seq)| {
-                let compressed =
-                    Self::compress_block(&data, compression).unwrap_or_else(|_| Vec::new());
-                CompressedBlock {
+            if block_tx
+                .send(CompressedBlock {
                     data: compressed,
                     sequence: seq,
-                }
-            })
-            .collect();
-
-        for block in compressed_blocks {
-            if block_tx.send(block).is_err() {
+                })
+                .is_err()
+            {
                 break;
             }
         }
@@ -89,22 +98,33 @@ impl ParallelBgzfWriter {
     fn writer_worker(
         block_rx: Receiver<CompressedBlock>,
         mut writer: BufWriter<File>,
-        compressor_handle: thread::JoinHandle<io::Result<()>>,
+        workers: Vec<thread::JoinHandle<io::Result<()>>>,
     ) -> io::Result<()> {
-        let mut blocks: Vec<CompressedBlock> = block_rx.iter().collect();
+        let mut pending_blocks = std::collections::BTreeMap::new();
+        let mut next_expected = 0usize;
 
-        blocks.sort_unstable_by_key(|b| b.sequence);
+        for block in block_rx.iter() {
+            pending_blocks.insert(block.sequence, block.data);
 
-        for block in blocks {
-            writer.write_all(&block.data)?;
+            while let Some(data) = pending_blocks.remove(&next_expected) {
+                writer.write_all(&data)?;
+                next_expected += 1;
+            }
         }
 
-        compressor_handle
-            .join()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Compressor thread panicked"))??;
+        for data in pending_blocks.into_values() {
+            writer.write_all(&data)?;
+        }
+
+        for handle in workers {
+            handle
+                .join()
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "Worker thread panicked"))??;
+        }
 
         writer.write_all(&BGZF_EOF)?;
         writer.flush()?;
+
         Ok(())
     }
 
@@ -116,9 +136,9 @@ impl ParallelBgzfWriter {
             let chunk = data[offset..chunk_end].to_vec();
             let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
 
-            self.tx.send((chunk, seq)).map_err(|_| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "Compression worker died")
-            })?;
+            self.tx
+                .send((chunk, seq))
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Worker died"))?;
 
             offset = chunk_end;
         }
@@ -159,7 +179,7 @@ impl ParallelBgzfWriter {
     }
 }
 
-impl Write for ParallelBgzfWriter {
+impl Write for OptimizedBgzfWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.write_all(buf)?;
         Ok(buf.len())

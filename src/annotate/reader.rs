@@ -23,21 +23,19 @@ impl VcfAnnotationReader {
     }
 }
 
-pub struct BatchVcfReader {
+pub struct StreamingVcfReader {
     reader: UnifiedVcfReader,
-    batch_size: usize,
 }
 
-impl BatchVcfReader {
-    pub fn new(reader: VcfAnnotationReader, batch_size: usize) -> Self {
+impl StreamingVcfReader {
+    pub fn new(reader: VcfAnnotationReader) -> Self {
         Self {
             reader: reader.inner,
-            batch_size,
         }
     }
 
-    pub fn read_batch(&mut self) -> Result<Vec<String>> {
-        Ok(self.reader.read_batch(self.batch_size)?)
+    pub fn read_line(&mut self) -> Result<Option<String>> {
+        Ok(self.reader.read_line()?)
     }
 
     pub fn into_headers_and_self(mut self) -> Result<(Vec<String>, Self)> {

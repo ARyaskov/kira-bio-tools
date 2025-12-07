@@ -20,5 +20,5 @@ pub mod bgzf_parallel;
 pub mod vcf_parser_fast;
 
 // Re-export for convenience
-pub use bgzf_parallel::{BatchedLineReader, ParallelBgzfReader, ParallelBgzfWriter};
+pub use bgzf_parallel::{BatchedLineReader, ParallelBgzfReader};
 pub use vcf_parser_fast::{FastVcfParser, InfoParser, VcfFields};
