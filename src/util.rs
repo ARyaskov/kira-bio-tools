@@ -158,19 +158,6 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 #[inline]
-pub fn parse_vcf_line_fast(line: &[u8]) -> Option<(ChrId, u32)> {
-    let chrom_end = memchr::memchr(b'\t', line)?;
-    let chr_id = parse_chromosome_fast(&line[..chrom_end])?;
-
-    let pos_start = chrom_end + 1;
-    let remaining = &line[pos_start..];
-    let pos_end = memchr::memchr(b'\t', remaining).unwrap_or(remaining.len());
-    let pos = parse_u32_fast(&remaining[..pos_end])?;
-
-    Some((chr_id, pos))
-}
-
-#[inline]
 fn parse_chromosome_fast(bytes: &[u8]) -> Option<ChrId> {
     let bytes = if bytes.len() > 3 && &bytes[..3] == b"chr" {
         &bytes[3..]

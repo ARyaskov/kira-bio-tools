@@ -1,3 +1,3 @@
 mod bgzf;
 
-pub use bgzf::{BgzfError, Result, VirtualPosition};
+pub use bgzf::*;

@@ -163,7 +163,7 @@ pub fn cmd_list(args: ListArgs) -> Result<()> {
         let mut reader = VcfReader::open(&args.file)?;
         let _ = reader.header()?;
 
-        for name in reader.reference_sequences() {
+        for name in reader.reference_sequences()? {
             println!("{}", name);
         }
     }

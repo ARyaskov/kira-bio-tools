@@ -1,7 +1,7 @@
 use memmap2::Mmap;
 use rayon::prelude::*;
 
-use crate::util::parse_vcf_line_fast;
+use crate::util::chr_name_to_id;
 use crate::vcf::structs::VcfRecord;
 
 pub struct MmapVcfParser<'a> {
@@ -69,12 +69,10 @@ impl<'a> MmapVcfParser<'a> {
             let line = &self.data[pos..line_end];
 
             if !line.is_empty() && line[0] != b'#' {
-                if let Some((chr_id, position)) = parse_vcf_line_fast(line) {
-                    records.push(VcfRecord {
-                        chr_id,
-                        position,
-                        offset: pos as u64,
-                    });
+                if let Ok(line_str) = std::str::from_utf8(line) {
+                    if let Some(rec) = parse_full_vcf_record(line_str, pos as u64) {
+                        records.push(rec);
+                    }
                 }
             }
 
@@ -83,4 +81,43 @@ impl<'a> MmapVcfParser<'a> {
 
         records
     }
+}
+
+fn parse_full_vcf_record(line: &str, offset: u64) -> Option<VcfRecord> {
+    let cols: Vec<&str> = line.split('\t').collect();
+    if cols.len() < 8 {
+        return None;
+    }
+
+    let chrom = cols[0];
+    let pos = cols[1].parse::<u32>().ok()?;
+    let chr_id = chr_name_to_id(chrom).unwrap_or(0);
+
+    let format = if cols.len() > 8 {
+        Some(cols[8].to_string())
+    } else {
+        None
+    };
+
+    let samples = if cols.len() > 9 {
+        cols[9..].iter().map(|s| s.to_string()).collect()
+    } else {
+        Vec::new()
+    };
+
+    Some(VcfRecord {
+        chrom: chrom.to_string(),
+        pos,
+        id: cols[2].to_string(),
+        ref_allele: cols[3].to_string(),
+        alt: cols[4].to_string(),
+        qual: cols[5].to_string(),
+        filter: cols[6].to_string(),
+        info: cols[7].to_string(),
+        format,
+        samples,
+        chr_id,
+        position: pos,
+        offset,
+    })
 }

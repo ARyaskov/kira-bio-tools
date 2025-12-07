@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::structs::*;
 use crate::chr_name_to_id;
 use crate::vcf::UnifiedVcfReader;
-use crate::vcf_parser_fast::FastVcfParser;
+use crate::vcf::VcfParser;
 
 pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
     let timing = std::env::var("KIRA_BT_TIMING").is_ok();
@@ -108,7 +108,7 @@ fn process_vcf_line_dedup(
     multiallelic_count: &AtomicUsize,
     debug: bool,
 ) -> Result<usize> {
-    let mut parser = FastVcfParser::new(line);
+    let mut parser = VcfParser::new(line);
 
     let fields = match parser.parse_standard_fields() {
         Some(f) => f,

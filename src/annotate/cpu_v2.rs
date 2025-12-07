@@ -9,9 +9,9 @@ use std::time::Instant;
 
 use super::reader::{StreamingVcfReader, VcfAnnotationReader};
 use super::structs::*;
-use crate::bgzf_parallel::OptimizedBgzfWriter;
+use crate::bgzf::BgzfWriter;
 use crate::util::{detect_format, VcfFormat};
-use crate::vcf_parser_fast::FastVcfParser;
+use crate::vcf::VcfParser;
 
 const BATCH_SIZE: usize = 100_000;
 const CHANNEL_DEPTH: usize = 32;
@@ -65,7 +65,7 @@ pub fn annotate_vcf_ani_v2(db: &Path, input: &Path, output: &Path) -> Result<()>
     if use_bgzf {
         run_optimized_bgzf_pipeline(merged_headers, reader, ani, output, timing, debug)
     } else {
-        run_plain_pipeline(merged_headers, reader, ani, output, timing, debug)
+        run_plain_pipeline_parallel(merged_headers, reader, ani, output, timing, debug)
     }
 }
 
@@ -80,10 +80,10 @@ fn run_optimized_bgzf_pipeline(
     let start = Instant::now();
 
     let writer_start = Instant::now();
-    let mut writer = OptimizedBgzfWriter::create(output)?;
+    let mut writer = BgzfWriter::create(output)?;
     if debug {
         eprintln!(
-            "[annotate] Optimized BGZF writer ready: {:.3}s",
+            "[annotate] BGZF writer ready: {:.3}s",
             writer_start.elapsed().as_secs_f64()
         );
     }
@@ -204,7 +204,136 @@ fn run_optimized_bgzf_pipeline(
     Ok(())
 }
 
-fn run_plain_pipeline(
+fn run_plain_pipeline_parallel(
+    headers: Vec<String>,
+    mut reader: StreamingVcfReader,
+    ani: AniIndex,
+    output: &Path,
+    timing: bool,
+    debug: bool,
+) -> Result<()> {
+    let start = Instant::now();
+
+    let output_file = File::create(output)?;
+    let mut writer = BufWriter::with_capacity(OUTPUT_BUFFER_SIZE, output_file);
+
+    for header in &headers {
+        writer.write_all(header.as_bytes())?;
+        writer.write_all(b"\n")?;
+    }
+
+    if debug {
+        eprintln!("[annotate] Headers written");
+    }
+
+    let (line_tx, line_rx): (Sender<Vec<String>>, Receiver<Vec<String>>) = bounded(CHANNEL_DEPTH);
+    let (result_tx, result_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = bounded(CHANNEL_DEPTH);
+
+    let reader_thread = thread::spawn(move || -> Result<usize> {
+        let mut lines_read = 0;
+        let mut buffer = Vec::with_capacity(BATCH_SIZE);
+
+        loop {
+            for _ in 0..BATCH_SIZE {
+                match reader.read_line()? {
+                    Some(line) => buffer.push(line),
+                    None => break,
+                }
+            }
+
+            if buffer.is_empty() {
+                break;
+            }
+
+            lines_read += buffer.len();
+            let owned_batch = std::mem::replace(&mut buffer, Vec::with_capacity(BATCH_SIZE));
+
+            if line_tx.send(owned_batch).is_err() {
+                break;
+            }
+        }
+
+        drop(line_tx);
+        Ok(lines_read)
+    });
+
+    let num_workers = rayon::current_num_threads() / 4;
+    let ani_arc = std::sync::Arc::new(ani);
+
+    let worker_threads: Vec<_> = (0..num_workers)
+        .map(|_worker_id| {
+            let rx = line_rx.clone();
+            let tx = result_tx.clone();
+            let ani = ani_arc.clone();
+
+            thread::spawn(move || {
+                while let Ok(batch) = rx.recv() {
+                    let mut mega_buffer =
+                        Vec::with_capacity(batch.len() * ESTIMATE_BYTES_PER_LINE * 2);
+
+                    for line in batch {
+                        if annotate_line_to_buffer(&line, &ani, &mut mega_buffer).is_ok() {
+                            mega_buffer.push(b'\n');
+                        } else {
+                            mega_buffer.extend_from_slice(line.as_bytes());
+                            mega_buffer.push(b'\n');
+                        }
+                    }
+
+                    if tx.send(mega_buffer).is_err() {
+                        break;
+                    }
+                }
+            })
+        })
+        .collect();
+
+    drop(line_rx);
+    drop(result_tx);
+
+    let processed = AtomicUsize::new(0);
+
+    for chunk in result_rx.iter() {
+        writer.write_all(&chunk)?;
+
+        let chunk_lines = chunk.iter().filter(|&&b| b == b'\n').count();
+        let total = processed.fetch_add(chunk_lines, Ordering::Relaxed) + chunk_lines;
+
+        if timing && total % 100_000 == 0
+            || (timing && chunk_lines > 0 && total / 100_000 != (total - chunk_lines) / 100_000)
+        {
+            let elapsed = start.elapsed().as_secs_f64();
+            eprintln!(
+                "[annotate] {} variants ({:.0} var/s)",
+                total,
+                total as f64 / elapsed
+            );
+        }
+    }
+
+    writer.flush()?;
+
+    for handle in worker_threads {
+        handle.join().ok();
+    }
+
+    let lines_read = reader_thread.join().unwrap()?;
+
+    if timing || debug {
+        let elapsed = start.elapsed().as_secs_f64();
+        eprintln!(
+            "[annotate] DONE: {} variants in {:.3}s ({:.0} var/s)",
+            lines_read,
+            elapsed,
+            lines_read as f64 / elapsed
+        );
+    }
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn run_plain_pipeline_single_threaded(
     headers: Vec<String>,
     mut reader: StreamingVcfReader,
     ani: AniIndex,
@@ -263,25 +392,33 @@ fn run_plain_pipeline(
 
 #[inline]
 fn annotate_line_to_buffer(line: &str, ani: &AniIndex, out: &mut Vec<u8>) -> Result<()> {
-    let mut parser = FastVcfParser::new(line);
+    use crate::vcf::simd::SimdVcfParser;
 
-    let fields = match parser.parse_standard_fields() {
+    let line_bytes = line.as_bytes();
+
+    let fields = match SimdVcfParser::parse_fields(line_bytes) {
         Some(f) => f,
         None => {
-            out.extend_from_slice(line.as_bytes());
+            out.extend_from_slice(line_bytes);
             return Ok(());
         }
     };
 
     let chr = fields.chrom;
-    let pos = parse_u32_fast(fields.pos.as_bytes()).unwrap_or(0);
+    let pos = fields.position().unwrap_or(0);
     let id = fields.id;
     let rf = fields.ref_allele;
     let alt_raw = fields.alt;
     let qual = fields.qual;
     let filter = fields.filter;
     let info = fields.info;
-    let rest = parser.rest();
+
+    let rest_offset = info.as_ptr() as usize - line.as_ptr() as usize + info.len();
+    let rest = if rest_offset < line.len() {
+        &line[rest_offset..]
+    } else {
+        ""
+    };
 
     if let Some((ann, _)) = ani.lookup_full(chr, pos, rf, alt_raw) {
         write_merged_record(
@@ -290,7 +427,7 @@ fn annotate_line_to_buffer(line: &str, ani: &AniIndex, out: &mut Vec<u8>) -> Res
         return Ok(());
     }
 
-    out.extend_from_slice(line.as_bytes());
+    out.extend_from_slice(line_bytes);
     Ok(())
 }
 

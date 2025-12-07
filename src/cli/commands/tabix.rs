@@ -260,7 +260,7 @@ fn cmd_list_tabix(args: &TabixArgs) -> Result<()> {
         let mut reader = VcfReader::open(&args.input)?;
         let _ = reader.header()?;
 
-        for name in reader.reference_sequences() {
+        for name in reader.reference_sequences()? {
             println!("{}", name);
         }
     }

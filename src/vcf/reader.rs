@@ -1,67 +1,37 @@
 use std::path::Path;
 
 use crate::bgzf::VirtualPosition;
-use crate::util::parse_vcf_line_fast;
 use crate::vcf::structs::{Result, VcfRecord};
 use crate::vcf::unified_reader::UnifiedVcfReader;
 
 pub struct VcfReader {
     inner: UnifiedVcfReader,
-    offset: u64,
 }
 
 impl VcfReader {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         Ok(Self {
             inner: UnifiedVcfReader::open(path)?,
-            offset: 0,
         })
     }
 
     pub fn open_for_indexing<P: AsRef<Path>>(path: P) -> Result<Self> {
         Ok(Self {
             inner: UnifiedVcfReader::open_for_indexing(path)?,
-            offset: 0,
         })
     }
 
     pub fn header(&mut self) -> Result<Vec<String>> {
-        let headers = self.inner.header()?;
-        for h in &headers {
-            self.offset += (h.len() + 1) as u64;
-        }
-        Ok(headers)
+        self.inner.header()
     }
 
     pub fn next_record(&mut self) -> Result<Option<VcfRecord>> {
-        let start_offset = self.offset;
-
-        match self.inner.read_line()? {
-            Some(line) => {
-                self.offset += (line.len() + 1) as u64;
-
-                if let Some((chr_id, position)) = parse_vcf_line_fast(line.as_bytes()) {
-                    Ok(Some(VcfRecord {
-                        chr_id,
-                        position,
-                        offset: start_offset,
-                    }))
-                } else {
-                    self.next_record()
-                }
-            }
-            None => Ok(None),
-        }
+        self.inner.read_record()
     }
 
     pub fn next_raw_line(&mut self) -> Result<Option<(String, u64)>> {
-        let start_offset = self.offset;
-
-        match self.inner.read_line()? {
-            Some(line) => {
-                self.offset += (line.len() + 1) as u64;
-                Ok(Some((line, start_offset)))
-            }
+        match self.inner.read_record()? {
+            Some(rec) => Ok(Some((format_vcf_record(&rec), rec.offset))),
             None => Ok(None),
         }
     }
@@ -70,7 +40,7 @@ impl VcfReader {
         RecordIterator { reader: self }
     }
 
-    pub fn reference_sequences(&self) -> &[String] {
+    pub fn reference_sequences(&self) -> Result<Vec<String>> {
         self.inner.reference_sequences()
     }
 
@@ -92,13 +62,28 @@ impl<'a> Iterator for RecordIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.reader.next_record() {
-            Ok(Some(record)) => Some(Ok(record)),
+            Ok(Some(rec)) => Some(Ok(rec)),
             Ok(None) => None,
             Err(e) => Some(Err(e)),
         }
     }
 }
 
-pub use VcfReader as PlainVcfReader;
-pub use VcfReader as GzipVcfReader;
-pub use VcfReader as BgzfVcfReader;
+fn format_vcf_record(rec: &VcfRecord) -> String {
+    let mut line = format!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        rec.chrom, rec.pos, rec.id, rec.ref_allele, rec.alt, rec.qual, rec.filter, rec.info
+    );
+
+    if let Some(fmt) = &rec.format {
+        line.push('\t');
+        line.push_str(fmt);
+
+        for sample in &rec.samples {
+            line.push('\t');
+            line.push_str(sample);
+        }
+    }
+
+    line
+}

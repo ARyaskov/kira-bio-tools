@@ -14,7 +14,7 @@ use memmap2::MmapOptions;
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 use std::fs::OpenOptions;
 
-use crate::vcf_parser_fast::FastVcfParser;
+use crate::vcf::VcfParser;
 
 #[inline]
 pub fn normalize(ref_allele: &str, alt_allele: &str) -> (usize, usize) {
@@ -67,7 +67,7 @@ pub fn turbo_norm_vcf(input: &Path, output: &Path) -> Result<()> {
         }
 
         let line_str = unsafe { std::str::from_utf8_unchecked(line) };
-        let mut parser = FastVcfParser::new(line_str);
+        let mut parser = VcfParser::new(line_str);
 
         if let Some(fields) = parser.parse_standard_fields() {
             let ref_allele = fields.ref_allele.as_bytes();
