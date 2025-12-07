@@ -23,7 +23,7 @@ pub fn annotate_vcf_ani_v2(db: &Path, input: &Path, output: &Path) -> Result<()>
     let debug = std::env::var("KIRA_BT_DEBUG").is_ok() || timing;
     let start = Instant::now();
 
-    let num_threads = rayon::current_num_threads();
+    let num_threads = rayon::current_num_threads() / 4;
     if debug {
         eprintln!("[annotate] Using {} CPU threads", num_threads);
         eprintln!("[annotate] Batch size: {} lines", BATCH_SIZE);
@@ -127,7 +127,7 @@ fn run_optimized_bgzf_pipeline(
         Ok(lines_read)
     });
 
-    let num_workers = rayon::current_num_threads();
+    let num_workers = rayon::current_num_threads() / 4;
     let ani_arc = std::sync::Arc::new(ani);
 
     let worker_threads: Vec<_> = (0..num_workers)

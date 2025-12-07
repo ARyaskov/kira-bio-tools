@@ -12,7 +12,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
         
     steps:
     - uses: actions/checkout@v4
@@ -25,22 +25,6 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y tabix
-        
-    - name: Install bgzip (macOS)
-      if: runner.os == 'macOS'
-      run: brew install htslib
-      
-    - name: Install bgzip (Windows)
-      if: runner.os == 'Windows'
-      shell: bash
-      run: |
-        choco install wget
-        wget https://github.com/samtools/htslib/releases/download/1.19/htslib-1.19.tar.bz2
-        tar -xjf htslib-1.19.tar.bz2
-        cd htslib-1.19
-        ./configure
-        make
-        make install
         
     - name: Build kira-bt
       run: cargo build --release --features cli

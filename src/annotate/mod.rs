@@ -23,3 +23,6 @@ pub use cuda::*;
 
 #[cfg(feature = "opencl")]
 pub use opencl::*;
+
+pub mod cpu_v2_optimized;
+pub use cpu_v2_optimized::annotate_vcf_ani_v2 as annotate_vcf_ani_v2_optimized;

@@ -1,5 +1,7 @@
 [target.x86_64-unknown-linux-gnu]
 rustflags = [
+    "-C", "target-feature=+avx2",
+    "-C", "target-feature=+fma",
     "-C", "target-cpu=native",
     "-C", "opt-level=3",
     "-C", "codegen-units=1",
@@ -18,6 +20,8 @@ rustflags = [
 
 [target.x86_64-pc-windows-gnu]
 rustflags = [
+    "-C", "target-feature=+avx2",
+    "-C", "target-feature=+fma",
     "-C", "target-cpu=native",
     "-C", "opt-level=3",
     "-C", "codegen-units=1",

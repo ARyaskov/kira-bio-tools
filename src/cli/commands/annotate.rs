@@ -45,6 +45,7 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
     }
 
     annotate::cpu_v2::annotate_vcf_ani_v2(&ani_path, &args.input, &out)?;
+    // annotate::cpu_v2_optimized::annotate_vcf_ani_v2(&ani_path, &args.input, &out)?;
     Ok(())
 }
 

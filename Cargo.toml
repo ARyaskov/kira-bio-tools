@@ -37,6 +37,10 @@ crc32fast = "1.4"
 crossbeam-channel = "0.5"
 smallvec = { version = "1.13", features = ["union", "const_generics"] }
 memchr = "2.7"
+itoa = "1.0"
+libdeflater = "0.12"
+num_cpus = "1.17"
+libz-ng-sys = { version = "1.1", features = [], default-features = false }
 
 [dev-dependencies]
 tempfile = "3.15"
