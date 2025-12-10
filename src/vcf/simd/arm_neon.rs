@@ -20,6 +20,7 @@ pub unsafe fn parse_vcf_line_simd(line: &[u8]) -> Option<VcfFieldsFull<'_>> {
     }
 
     let line_str = std::str::from_utf8_unchecked(line);
+    let line_len = line.len();
 
     let chrom = &line_str[0..tabs[0]];
     let pos = &line_str[tabs[0] + 1..tabs[1]];
@@ -28,16 +29,31 @@ pub unsafe fn parse_vcf_line_simd(line: &[u8]) -> Option<VcfFieldsFull<'_>> {
     let alt = &line_str[tabs[3] + 1..tabs[4]];
     let qual = &line_str[tabs[4] + 1..tabs[5]];
     let filter = &line_str[tabs[5] + 1..tabs[6]];
-    let info = &line_str[tabs[6] + 1..tabs.get(7).copied().unwrap_or(line.len())];
+    
+    let info_end = tabs.get(7).copied().unwrap_or(line_len);
+    let info_start = tabs[6] + 1;
+    let info = if info_start < info_end {
+        &line_str[info_start..info_end]
+    } else {
+        ""
+    };
 
     let (format, samples) = if found >= 8 {
-        let format_field = &line_str[tabs[7] + 1..tabs.get(8).copied().unwrap_or(line.len())];
+        let format_start = tabs[7] + 1;
+        let format_end = tabs.get(8).copied().unwrap_or(line_len);
+        let format_field = if format_start < format_end {
+            &line_str[format_start..format_end]
+        } else {
+            ""
+        };
 
         let mut sample_vec = Vec::with_capacity(found.saturating_sub(8));
         for i in 8..found {
             let sample_start = tabs[i] + 1;
-            let sample_end = tabs.get(i + 1).copied().unwrap_or(line.len());
-            sample_vec.push(&line_str[sample_start..sample_end]);
+            let sample_end = tabs.get(i + 1).copied().unwrap_or(line_len);
+            if sample_start < sample_end {
+                sample_vec.push(&line_str[sample_start..sample_end]);
+            }
         }
 
         (Some(format_field), sample_vec)
@@ -73,6 +89,15 @@ pub unsafe fn parse_vcf_fields_neon(line: &[u8]) -> Option<VcfFields<'_>> {
     }
 
     let line_str = std::str::from_utf8_unchecked(line);
+    let line_len = line.len();
+
+    let info_end = tabs.get(7).copied().unwrap_or(line_len);
+    let info_start = tabs[6] + 1;
+    let info = if info_start < info_end {
+        &line_str[info_start..info_end]
+    } else {
+        ""
+    };
 
     let info_start = tabs[6] + 1;
     let info_end = if n >= 8 { tabs[7] } else { line_str.len() };
@@ -109,6 +134,11 @@ pub unsafe fn parse_chr_pos_neon(line: &[u8]) -> Option<(u8, u32)> {
 
     let pos_start = tabs[0] + 1;
     let pos_end = if n >= 2 { tabs[1] } else { line.len() };
+    
+    if pos_start >= pos_end {
+        return None;
+    }
+    
     let pos = parse_u32_fast(line.as_ptr().add(pos_start), pos_end - pos_start);
 
     Some((chr_id, pos))
