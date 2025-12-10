@@ -19,7 +19,7 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
       
     - name: Build kira-bt
-      run: cargo build --release --all-features
+      run: cargo build --release
       
     - name: Add kira-bt to PATH
       run: |
