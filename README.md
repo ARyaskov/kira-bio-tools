@@ -406,12 +406,14 @@ Breakdown:
 - **Drop-in replacement** - all command-line options supported
 
 
+
 ## License
 
 MIT License - see [LICENSE](LICENSE).
 
 ## Acknowledgments
 
+- [bcftools](https://github.com/samtools/bcftools) we are using original tests from bcftools in tests/
 - [kira_kv_engine](https://crates.io/crates/kira_kv_engine) - MPH implementation
 - [noodles](https://github.com/zaeleus/noodles) - Bioinformatics formats
 - [rayon](https://github.com/rayon-rs/rayon) - Parallel processing
