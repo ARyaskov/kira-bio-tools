@@ -7,8 +7,8 @@ use std::mem;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::annotate::structs::{AniEntry, AniHeader, ANI_MAGIC, ANI_VERSION};
-use crate::chr_name_to_id;
+use crate::annotate::structs::{AniEntry, AniHeader, TabSchema, ANI_MAGIC, ANI_VERSION};
+use crate::util::{append_cstr, chr_name_to_id, url_encode_info_value};
 use crate::vcf::UnifiedVcfReader;
 
 pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
@@ -104,6 +104,10 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
 
     let schema = TabSchema::parse(input, columns)?;
 
+    if timing {
+        eprintln!("[ani-build-tab] Schema: {:?}", schema);
+    }
+
     let file = File::open(input)?;
     let reader = BufReader::new(file);
 
@@ -118,12 +122,9 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
     let mut count = 0usize;
     let report_interval = if timing { 100_000 } else { 1_000_000 };
 
-    let mut line_no = 0usize;
     for line in reader.lines() {
         let line = line?;
-        line_no += 1;
-
-        if line.trim().is_empty() || line.starts_with('#') {
+        if line.starts_with('#') || line.trim().is_empty() {
             continue;
         }
 
@@ -190,136 +191,100 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct TabColumn {
-    index: usize,
-    key: String,
-    is_append: bool,
-}
+fn process_vcf_line_multiallelic(
+    line: &str,
+    entries_map: &mut FxHashMap<u64, (AniEntry, usize)>,
+    pool: &mut Vec<u8>,
+    insertion_order: &mut usize,
+    duplicates_skipped: &AtomicUsize,
+    multiallelic_count: &AtomicUsize,
+    debug: bool,
+) -> Result<usize> {
+    let parts: Vec<&str> = line.split('\t').collect();
+    if parts.len() < 8 {
+        return Ok(0);
+    }
 
-#[derive(Debug, Clone)]
-struct TabSchema {
-    chrom_idx: usize,
-    pos_idx: usize,
-    ref_idx: Option<usize>,
-    alt_idx: Option<usize>,
-    id_idx: Option<usize>,
-    qual_idx: Option<usize>,
-    filter_idx: Option<usize>,
-    info_start: Option<usize>,
-    info_cols: Vec<TabColumn>,
-}
+    let chr = parts[0];
+    let pos_str = parts[1];
+    let rf = parts[3].trim();
+    let alt = parts[4].trim();
 
-impl TabSchema {
-    fn parse(path: &Path, columns: Option<&str>) -> Result<Self> {
-        if let Some(cols) = columns {
-            return Self::from_column_spec(cols);
-        }
+    if rf.is_empty() || rf == "." || alt.is_empty() || alt == "." {
+        return Ok(0);
+    }
 
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
-        let mut first_line = String::new();
-        reader.read_line(&mut first_line)?;
+    let pos = pos_str.parse::<u32>().unwrap_or(0);
+    let chr_id = match chr_name_to_id(chr) {
+        Some(v) => v,
+        None => return Ok(0),
+    };
 
-        if first_line.starts_with('#') {
-            let header = first_line.trim_start_matches('#').trim();
-            Self::from_header(header)
-        } else {
-            let ncols = first_line.split('\t').count();
-            if ncols >= 9 {
-                Self::from_column_spec("CHROM,POS,REF,ALT,ID,QUAL,FILTER,INFO")
-            } else if ncols >= 5 {
-                Self::from_column_spec("CHROM,POS,REF,ALT,ID")
-            } else if ncols >= 4 {
-                Self::from_column_spec("CHROM,POS,REF,ALT")
-            } else {
-                anyhow::bail!("Cannot detect TAB schema from {} columns", ncols)
-            }
+    let alt_alleles: Vec<&str> = alt.split(',').collect();
+
+    if alt_alleles.len() > 1 {
+        multiallelic_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let key = make_position_key(chr_id, pos, rf);
+
+    if entries_map.contains_key(&key) {
+        duplicates_skipped.fetch_add(1, Ordering::Relaxed);
+
+        if debug {
+            eprintln!("[ani-build] Overwriting duplicate: {}:{} {}", chr, pos, rf);
         }
     }
 
-    fn from_header(header: &str) -> Result<Self> {
-        let parts: Vec<&str> = header.split('\t').map(|s| s.trim()).collect();
-        let spec = parts.join(",");
-        Self::from_column_spec(&spec)
-    }
+    let id = parts[2].trim();
+    let qual = parts[5].trim();
+    let filter = parts[6].trim();
 
-    fn from_column_spec(spec: &str) -> Result<Self> {
-        let parts: Vec<&str> = spec.split(',').map(|s| s.trim()).collect();
+    let ref_ofs = append_cstr(pool, rf);
+    let alt_ofs = append_cstr(pool, alt);
 
-        let mut chrom_idx = None;
-        let mut pos_idx = None;
-        let mut ref_idx = None;
-        let mut alt_idx = None;
-        let mut id_idx = None;
-        let mut qual_idx = None;
-        let mut filter_idx = None;
-        let mut info_start = None;
-        let mut info_cols = Vec::new();
+    let id_ofs = if id != "." && !id.is_empty() {
+        append_cstr(pool, id)
+    } else {
+        append_cstr(pool, ".")
+    };
 
-        for (i, part) in parts.iter().enumerate() {
-            let (is_append, clean_part) = if part.starts_with('+') {
-                (true, &part[1..])
-            } else if part.starts_with('-') {
-                (false, &part[1..])
-            } else {
-                (false, *part)
-            };
+    let qual_ofs = if qual != "." && !qual.is_empty() {
+        append_cstr(pool, qual)
+    } else {
+        append_cstr(pool, ".")
+    };
 
-            match clean_part {
-                "CHROM" => chrom_idx = Some(i),
-                "POS" => pos_idx = Some(i),
-                "REF" => ref_idx = Some(i),
-                "ALT" => alt_idx = Some(i),
-                "ID" => id_idx = Some(i),
-                "QUAL" => qual_idx = Some(i),
-                "FILTER" => filter_idx = Some(i),
-                "INFO" => info_start = Some(i),
-                _ if clean_part.starts_with("INFO/") => {
-                    let key = clean_part.strip_prefix("INFO/").unwrap();
-                    info_cols.push(TabColumn {
-                        index: i,
-                        key: key.to_string(),
-                        is_append,
-                    });
-                }
-                _ if clean_part.starts_with("FMT/") || clean_part.starts_with("FORMAT/") => {
-                    let key = if let Some(k) = clean_part.strip_prefix("FMT/") {
-                        k
-                    } else {
-                        clean_part.strip_prefix("FORMAT/").unwrap()
-                    };
-                    info_cols.push(TabColumn {
-                        index: i,
-                        key: key.to_string(),
-                        is_append,
-                    });
-                }
-                _ => {
-                    info_cols.push(TabColumn {
-                        index: i,
-                        key: clean_part.to_string(),
-                        is_append,
-                    });
-                }
-            }
-        }
+    let filter_ofs = if filter != "." && !filter.is_empty() {
+        append_cstr(pool, filter)
+    } else {
+        append_cstr(pool, ".")
+    };
 
-        let chrom_idx = chrom_idx.ok_or_else(|| anyhow::anyhow!("CHROM column required"))?;
-        let pos_idx = pos_idx.ok_or_else(|| anyhow::anyhow!("POS column required"))?;
+    let info_str = parts[7].trim();
+    let info_ofs = if info_str != "." && !info_str.is_empty() {
+        let encoded = url_encode_info_value(info_str);
+        append_cstr(pool, &encoded)
+    } else {
+        append_cstr(pool, ".")
+    };
 
-        Ok(Self {
-            chrom_idx,
-            pos_idx,
-            ref_idx,
-            alt_idx,
-            id_idx,
-            qual_idx,
-            filter_idx,
-            info_start,
-            info_cols,
-        })
-    }
+    let entry = AniEntry {
+        chr_id,
+        pos,
+        ref_ofs: ref_ofs as u32,
+        alt_ofs: alt_ofs as u32,
+        id_ofs: id_ofs as u32,
+        qual_ofs: qual_ofs as u32,
+        filter_ofs: filter_ofs as u32,
+        info_ofs: info_ofs as u32,
+        info_len: 0,
+    };
+
+    entries_map.insert(key, (entry, *insertion_order));
+    *insertion_order += 1;
+
+    Ok(alt_alleles.len())
 }
 
 fn process_tab_line_multiallelic(
@@ -414,168 +379,59 @@ fn process_tab_line_multiallelic(
         if let Some(info_str) = parts.get(info_idx) {
             let info_str = info_str.trim();
             if !info_str.is_empty() && info_str != "." {
-                pool.extend_from_slice(info_str.as_bytes());
+                let encoded = url_encode_info_value(info_str);
+                pool.extend_from_slice(encoded.as_bytes());
             }
         }
-    } else {
-        let mut info_parts = Vec::new();
+    }
 
-        for col in &schema.info_cols {
-            if let Some(val) = parts.get(col.index) {
-                let val = val.trim();
-                if val.is_empty() || val == "." {
-                    continue;
+    for col in &schema.info_cols {
+        if let Some(val_str) = parts.get(col.index) {
+            let val_str = val_str.trim();
+            if !val_str.is_empty() && val_str != "." {
+                if pool.len() > info_start_ofs {
+                    pool.push(b';');
                 }
 
-                let encoded_val = url_encode_info_value(val);
+                pool.extend_from_slice(col.key.as_bytes());
+                pool.push(b'=');
 
-                let field_str = if col.is_append {
-                    format!("+{}={}", col.key, encoded_val)
-                } else {
-                    format!("{}={}", col.key, encoded_val)
-                };
-                info_parts.push(field_str);
+                let encoded = url_encode_info_value(val_str);
+                pool.extend_from_slice(encoded.as_bytes());
             }
-        }
-
-        if !info_parts.is_empty() {
-            pool.extend_from_slice(info_parts.join(";").as_bytes());
         }
     }
 
     pool.push(0);
-    let info_ofs = info_start_ofs as u32;
-    let info_len = (pool.len() - info_start_ofs - 1) as u32;
 
     let entry = AniEntry {
         chr_id,
         pos,
-        ref_ofs,
-        alt_ofs,
-        id_ofs,
-        qual_ofs,
-        filter_ofs,
-        info_ofs,
-        info_len,
-    };
-
-    entries_map.insert(key, (entry, *insertion_order));
-    *insertion_order += 1;
-
-    Ok(1)
-}
-
-fn process_vcf_line_multiallelic(
-    line: &str,
-    entries_map: &mut FxHashMap<u64, (AniEntry, usize)>,
-    pool: &mut Vec<u8>,
-    insertion_order: &mut usize,
-    duplicates_skipped: &AtomicUsize,
-    multiallelic_count: &AtomicUsize,
-    debug: bool,
-) -> Result<usize> {
-    let parts: Vec<&str> = line.split('\t').collect();
-
-    if parts.len() < 8 {
-        return Ok(0);
-    }
-
-    let chr = parts[0];
-    let pos = parts[1].parse::<u32>().unwrap_or(0);
-    let id = if parts[2] == "." { "." } else { parts[2] };
-    let rf = parts[3];
-    let alt = parts[4];
-    let qual = if parts[5] == "." { "." } else { parts[5] };
-    let filter = if parts[6] == "." { "." } else { parts[6] };
-    let info = parts[7];
-
-    if rf.is_empty() || rf == "." || alt.is_empty() || alt == "." {
-        return Ok(0);
-    }
-
-    let chr_id = match chr_name_to_id(chr) {
-        Some(v) => v,
-        None => return Ok(0),
-    };
-
-    let alt_alleles: Vec<&str> = alt.split(',').collect();
-
-    if alt_alleles.len() > 1 {
-        multiallelic_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    let key = make_position_key(chr_id, pos, rf);
-
-    if entries_map.contains_key(&key) {
-        duplicates_skipped.fetch_add(1, Ordering::Relaxed);
-
-        if debug {
-            eprintln!(
-                "[ani-build-vcf] Overwriting duplicate: {}:{} {}",
-                chr, pos, rf
-            );
-        }
-    }
-
-    let ref_ofs = append_cstr(pool, rf);
-    let alt_ofs = append_cstr(pool, alt);
-    let id_ofs = append_cstr(pool, id);
-    let qual_ofs = append_cstr(pool, qual);
-    let filter_ofs = append_cstr(pool, filter);
-    let info_ofs = append_cstr(pool, info);
-
-    let entry = AniEntry {
-        chr_id,
-        pos,
-        ref_ofs,
-        alt_ofs,
-        id_ofs,
-        qual_ofs,
-        filter_ofs,
-        info_ofs,
+        ref_ofs: ref_ofs as u32,
+        alt_ofs: alt_ofs as u32,
+        id_ofs: id_ofs as u32,
+        qual_ofs: qual_ofs as u32,
+        filter_ofs: filter_ofs as u32,
+        info_ofs: info_start_ofs as u32,
         info_len: 0,
     };
 
     entries_map.insert(key, (entry, *insertion_order));
     *insertion_order += 1;
 
-    Ok(1)
+    Ok(alt_alleles.len())
 }
 
-fn url_encode_info_value(val: &str) -> String {
-    let mut result = String::with_capacity(val.len() * 2);
+fn make_position_key(chr: u8, pos: u32, rf: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h: u64 = ((chr as u64) << 56) | ((pos as u64) << 24);
 
-    for c in val.chars() {
-        match c {
-            '=' => result.push_str("%3D"),
-            ';' => result.push_str("%3B"),
-            ',' => result.push_str("%2C"),
-            '%' => result.push_str("%25"),
-            ' ' => result.push_str("%20"),
-            '\t' => result.push_str("%09"),
-            '\n' => result.push_str("%0A"),
-            '\r' => result.push_str("%0D"),
-            _ => result.push(c),
-        }
-    }
+    let mut hasher = fxhash::FxHasher::default();
+    rf.hash(&mut hasher);
+    let rf_hash = hasher.finish();
 
-    result
-}
-
-fn make_position_key(chr_id: u8, pos: u32, rf: &str) -> u64 {
-    use fxhash::hash64;
-
-    let mut h = hash64(&[chr_id]);
-    h ^= hash64(pos.to_le_bytes().as_ref());
-    h ^= hash64(rf.as_bytes());
+    h ^= (rf_hash & 0x00FFFFFF);
     h
-}
-
-fn append_cstr(pool: &mut Vec<u8>, s: &str) -> u32 {
-    let ofs = pool.len() as u32;
-    pool.extend_from_slice(s.as_bytes());
-    pool.push(0);
-    ofs
 }
 
 fn finalize_ani_index(
@@ -625,7 +481,28 @@ fn finalize_ani_index(
         );
     }
 
-    let entries: Vec<AniEntry> = rows.into_iter().map(|(_, e)| e).collect();
+    let mut entries = vec![
+        AniEntry {
+            chr_id: 0,
+            pos: 0,
+            ref_ofs: 0,
+            alt_ofs: 0,
+            id_ofs: 0,
+            qual_ofs: 0,
+            filter_ofs: 0,
+            info_ofs: 0,
+            info_len: 0,
+        };
+        n
+    ];
+
+    for (k, entry) in rows {
+        let key_bytes = k.to_le_bytes();
+        let idx = mph.index(&key_bytes) as usize;
+        if idx < n {
+            entries[idx] = entry;
+        }
+    }
 
     let header = AniHeader {
         magic: ANI_MAGIC,

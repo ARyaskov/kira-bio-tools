@@ -29,7 +29,7 @@ pub unsafe fn parse_vcf_line_simd(line: &[u8]) -> Option<VcfFieldsFull<'_>> {
     let alt = &line_str[tabs[3] + 1..tabs[4]];
     let qual = &line_str[tabs[4] + 1..tabs[5]];
     let filter = &line_str[tabs[5] + 1..tabs[6]];
-    
+
     let info_end = tabs.get(7).copied().unwrap_or(line_len);
     let info_start = tabs[6] + 1;
     let info = if info_start < info_end {
@@ -134,11 +134,11 @@ pub unsafe fn parse_chr_pos_neon(line: &[u8]) -> Option<(u8, u32)> {
 
     let pos_start = tabs[0] + 1;
     let pos_end = if n >= 2 { tabs[1] } else { line.len() };
-    
+
     if pos_start >= pos_end {
         return None;
     }
-    
+
     let pos = parse_u32_fast(line.as_ptr().add(pos_start), pos_end - pos_start);
 
     Some((chr_id, pos))

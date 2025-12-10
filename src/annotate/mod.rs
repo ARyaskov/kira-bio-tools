@@ -1,4 +1,5 @@
 pub mod builder_v2;
+pub mod constants;
 pub mod cpu_v2;
 pub mod reader;
 pub mod structs;
@@ -10,6 +11,7 @@ pub mod cuda;
 pub mod opencl;
 
 pub use builder_v2::*;
+pub use constants::*;
 pub use cpu_v2::annotate_vcf_ani_v2;
 pub use reader::*;
 pub use structs::*;

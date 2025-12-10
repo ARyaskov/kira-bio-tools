@@ -231,3 +231,81 @@ impl Region {
         }
     }
 }
+
+pub fn url_encode_info_value(val: &str) -> String {
+    let mut result = String::with_capacity(val.len() + 10);
+    for ch in val.chars() {
+        match ch {
+            ' ' => result.push_str("%20"),
+            ';' => result.push_str("%3B"),
+            '=' => result.push_str("%3D"),
+            '%' => result.push_str("%25"),
+            ',' => result.push_str("%2C"),
+            '\r' => result.push_str("%0D"),
+            '\n' => result.push_str("%0A"),
+            '\t' => result.push_str("%09"),
+            _ => result.push(ch),
+        }
+    }
+    result
+}
+
+pub fn url_decode_info_value(val: &str) -> String {
+    let mut result = String::with_capacity(val.len());
+    let mut chars = val.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex1 = chars.next();
+            let hex2 = chars.next();
+
+            if let (Some(h1), Some(h2)) = (hex1, hex2) {
+                let hex_str = format!("{}{}", h1, h2);
+                if let Ok(byte) = u8::from_str_radix(&hex_str, 16) {
+                    result.push(byte as char);
+                    continue;
+                }
+            }
+
+            result.push(c);
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+pub fn append_cstr(pool: &mut Vec<u8>, s: &str) -> usize {
+    let ofs = pool.len();
+    pool.extend_from_slice(s.as_bytes());
+    pool.push(0);
+    ofs
+}
+
+pub fn clean_info_values(val: &str) -> String {
+    let v: Vec<&str> = val.split(',').filter(|s| *s != ".").collect();
+
+    let v = match v.len() {
+        0 => return String::new(),
+        1 => {
+            if v[0] == "." {
+                return String::new();
+            }
+            v
+        }
+        _ => {
+            let mut v = v;
+            while v.last() == Some(&".") {
+                v.pop();
+            }
+            v
+        }
+    };
+
+    if v.is_empty() || v.iter().all(|s| s == &".") {
+        return String::new();
+    }
+
+    v.join(",")
+}
