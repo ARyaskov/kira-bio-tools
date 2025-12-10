@@ -26,6 +26,7 @@ pub struct StructuredInfoField<'a> {
 
 #[derive(Debug)]
 pub struct AnnotationBundle<'a> {
+    pub alt: &'a str,
     pub id: Option<&'a str>,
     pub qual: Option<&'a str>,
     pub filter: Option<&'a str>,

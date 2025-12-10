@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossbeam_channel::{bounded, Receiver, Sender};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -131,7 +132,7 @@ fn run_optimized_bgzf_pipeline(
     let ani_arc = std::sync::Arc::new(ani);
 
     let worker_threads: Vec<_> = (0..num_workers)
-        .map(|worker_id| {
+        .map(|_worker_id| {
             let rx = line_rx.clone();
             let tx = result_tx.clone();
             let ani = ani_arc.clone();
@@ -420,7 +421,7 @@ fn annotate_line_to_buffer(line: &str, ani: &AniIndex, out: &mut Vec<u8>) -> Res
         ""
     };
 
-    if let Some((ann, _)) = ani.lookup_full(chr, pos, rf, alt_raw) {
+    if let Some(ann) = ani.lookup(chr, pos, rf) {
         write_merged_record(
             out, chr, fields.pos, &ann, id, rf, alt_raw, qual, filter, info, rest,
         )?;
@@ -478,7 +479,7 @@ fn write_merged_record(
     out.extend_from_slice(filter2.as_bytes());
     out.push(b'\t');
 
-    write_merged_info_fast(out, info, alt_raw, &ann.info, rf)?;
+    write_merged_info_bcftools_compat(out, info, alt_raw, ann)?;
 
     if !rest.is_empty() {
         out.push(b'\t');
@@ -488,84 +489,145 @@ fn write_merged_record(
     Ok(())
 }
 
-fn write_merged_info_fast(
+fn write_merged_info_bcftools_compat(
     out: &mut Vec<u8>,
-    base: &str,
+    base_info: &str,
     alt_raw: &str,
-    ann_fields: &[StructuredInfoField],
-    r: &str,
+    ann: &AnnotationBundle,
 ) -> Result<()> {
-    let alt_count = alt_raw.bytes().filter(|&b| b == b',').count() + 1;
-    let mut first = true;
+    let alt_count = alt_raw.split(',').count();
 
-    if !base.is_empty() && base != "." {
-        for segment in base.split(';') {
+    let mut merged_fields: HashMap<String, InfoFieldMerged> = HashMap::new();
+
+    if !base_info.is_empty() && base_info != "." {
+        for segment in base_info.split(';') {
             if segment.is_empty() {
                 continue;
             }
 
+            if !segment.contains('=') {
+                merged_fields.insert(
+                    segment.to_string(),
+                    InfoFieldMerged {
+                        values: vec![],
+                        is_flag: true,
+                        number: FieldNumber::Zero,
+                        ty: FieldType::Flag,
+                    },
+                );
+                continue;
+            }
+
+            let mut kv = segment.splitn(2, '=');
+            let key = kv.next().unwrap().to_string();
+            let vals = kv.next().unwrap_or("");
+            let values: Vec<String> = vals.split(',').map(|s| s.to_string()).collect();
+
+            merged_fields.insert(
+                key,
+                InfoFieldMerged {
+                    values,
+                    is_flag: false,
+                    number: FieldNumber::Many,
+                    ty: FieldType::Str,
+                },
+            );
+        }
+    }
+
+    for field in &ann.info {
+        let key = field.key.to_string();
+        let is_append = key.starts_with('+');
+        let clean_key = if is_append { &key[1..] } else { &key };
+
+        let entry = merged_fields
+            .entry(clean_key.to_string())
+            .or_insert_with(|| InfoFieldMerged {
+                values: vec![],
+                is_flag: false,
+                number: field.number,
+                ty: field.ty,
+            });
+
+        entry.number = field.number;
+        entry.ty = field.ty;
+
+        if matches!(field.ty, FieldType::Flag) {
+            entry.is_flag = true;
+            continue;
+        }
+
+        match field.number {
+            FieldNumber::A => {
+                let mut new_values = vec![".".to_string(); alt_count];
+
+                for i in 0..alt_count.min(field.values.len()) {
+                    let decoded = url_decode_info_value(field.values[i]);
+                    if !decoded.is_empty() && decoded != "." {
+                        new_values[i] = decoded;
+                    }
+                }
+
+                entry.values = new_values;
+            }
+
+            FieldNumber::R => {
+                let mut new_values = vec![".".to_string(); alt_count + 1];
+
+                for i in 0..(alt_count + 1).min(field.values.len()) {
+                    let decoded = url_decode_info_value(field.values[i]);
+                    if !decoded.is_empty() && decoded != "." {
+                        new_values[i] = decoded;
+                    }
+                }
+
+                entry.values = new_values;
+            }
+
+            FieldNumber::One | FieldNumber::Many => {
+                let decoded_values: Vec<String> = field
+                    .values
+                    .iter()
+                    .map(|v| url_decode_info_value(v))
+                    .collect();
+
+                entry.values = decoded_values;
+            }
+
+            _ => {}
+        }
+    }
+
+    let mut keys: Vec<String> = merged_fields.keys().cloned().collect();
+    keys.sort();
+
+    let mut first = true;
+
+    for key in keys {
+        let f = &merged_fields[&key];
+
+        if f.is_flag {
             if !first {
                 out.push(b';');
             }
+            out.extend_from_slice(key.as_bytes());
             first = false;
-
-            out.extend_from_slice(segment.as_bytes());
+            continue;
         }
-    }
 
-    for field in ann_fields {
+        let cleaned = clean_info_values(&f.values, f.number);
+
+        if cleaned.is_empty() {
+            continue;
+        }
+
         if !first {
             out.push(b';');
         }
+        out.extend_from_slice(key.as_bytes());
+        out.push(b'=');
+        out.extend_from_slice(cleaned.as_bytes());
         first = false;
-
-        out.extend_from_slice(field.key.as_bytes());
-
-        match field.number {
-            FieldNumber::Zero => continue,
-            FieldNumber::One => {
-                if let Some(&v) = field.values.first() {
-                    out.push(b'=');
-                    out.extend_from_slice(v.as_bytes());
-                }
-            }
-            FieldNumber::A => {
-                out.push(b'=');
-                if field.values.len() == 1 {
-                    let val = field.values[0].as_bytes();
-                    out.extend_from_slice(val);
-                    for _ in 1..alt_count {
-                        out.push(b',');
-                        out.extend_from_slice(val);
-                    }
-                } else {
-                    for i in 0..alt_count {
-                        if i > 0 {
-                            out.push(b',');
-                        }
-                        let v = field.values.get(i).copied().unwrap_or(field.values[0]);
-                        out.extend_from_slice(v.as_bytes());
-                    }
-                }
-            }
-            _ => {
-                out.push(b'=');
-                for (i, &v) in field.values.iter().enumerate() {
-                    if i > 0 {
-                        out.push(b',');
-                    }
-                    out.extend_from_slice(v.as_bytes());
-                }
-            }
-        }
-    }
-
-    let is_indel = r.len() != 1 || alt_raw.bytes().any(|b| b != b',' && (b < b'A' || b > b'T'));
-    if is_indel {
-        if !first {
-            out.push(b';');
-        }
-        out.extend_from_slice(b"INDEL");
     }
 
     if first {
@@ -575,23 +637,65 @@ fn write_merged_info_fast(
     Ok(())
 }
 
-fn merge_annotation_headers(vcf_headers: &[String], _ani: &AniIndex) -> Result<Vec<String>> {
-    let mut merged = Vec::with_capacity(vcf_headers.len() + 10);
+struct InfoFieldMerged {
+    values: Vec<String>,
+    is_flag: bool,
+    number: FieldNumber,
+    ty: FieldType,
+}
 
-    for header in vcf_headers {
-        if header.starts_with("#CHROM") {
-            merged.push(
-                "##INFO=<ID=T_STR,Number=1,Type=String,Description=\"Test String\">".to_string(),
-            );
-            merged.push(
-                "##INFO=<ID=T_INT,Number=.,Type=Integer,Description=\"Test Integer\">".to_string(),
-            );
-            merged.push(
-                "##INFO=<ID=T_FLOAT,Number=.,Type=Float,Description=\"Test Float\">".to_string(),
-            );
+fn clean_info_values(values: &[String], number: FieldNumber) -> String {
+    let mut v = values.to_vec();
+
+    match number {
+        FieldNumber::A => {
+            while v.last().map_or(false, |s| s == ".") {
+                v.pop();
+            }
         }
-        merged.push(header.clone());
+
+        FieldNumber::R => {
+            while v.len() > 1 && v.last().map_or(false, |s| s == ".") {
+                v.pop();
+            }
+        }
+
+        _ => {}
     }
 
-    Ok(merged)
+    if v.is_empty() || v.iter().all(|s| s == ".") {
+        return String::new();
+    }
+
+    v.join(",")
+}
+
+fn url_decode_info_value(val: &str) -> String {
+    let mut result = String::with_capacity(val.len());
+    let mut chars = val.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex1 = chars.next();
+            let hex2 = chars.next();
+
+            if let (Some(h1), Some(h2)) = (hex1, hex2) {
+                let hex_str = format!("{}{}", h1, h2);
+                if let Ok(byte) = u8::from_str_radix(&hex_str, 16) {
+                    result.push(byte as char);
+                    continue;
+                }
+            }
+
+            result.push(c);
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+fn merge_annotation_headers(vcf_headers: &[String], _ani: &AniIndex) -> Result<Vec<String>> {
+    Ok(vcf_headers.to_vec())
 }

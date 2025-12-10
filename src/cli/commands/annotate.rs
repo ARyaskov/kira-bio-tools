@@ -19,7 +19,18 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
 
     if !ani_path.exists() {
         eprintln!("[annotate] ANI index not found, building from source...");
-        annotate::build_ani_index_auto_v2(&args.annotations, &ani_path)?;
+
+        let ext = args.annotations.extension().and_then(|e| e.to_str());
+
+        if ext == Some("tab") {
+            annotate::build_ani_index_from_tab(
+                &args.annotations,
+                &ani_path,
+                args.columns.as_deref(),
+            )?;
+        } else {
+            annotate::build_ani_index_auto_v2(&args.annotations, &ani_path)?;
+        }
     }
 
     eprintln!("[annotate] ANI = {:?}", ani_path);
@@ -45,7 +56,6 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
     }
 
     annotate::cpu_v2::annotate_vcf_ani_v2(&ani_path, &args.input, &out)?;
-    // annotate::cpu_v2_optimized::annotate_vcf_ani_v2(&ani_path, &args.input, &out)?;
     Ok(())
 }
 
@@ -59,7 +69,13 @@ pub fn cmd_annotate_index(args: AnnotateIndexArgs) -> Result<()> {
     eprintln!("[annotate-index] Input  = {:?}", args.input);
     eprintln!("[annotate-index] Output = {:?}", out);
 
-    annotate::build_ani_index_auto_v2(&args.input, &out)?;
+    let ext = args.input.extension().and_then(|e| e.to_str());
+
+    if ext == Some("tab") {
+        annotate::build_ani_index_from_tab(&args.input, &out, None)?;
+    } else {
+        annotate::build_ani_index_auto_v2(&args.input, &out)?;
+    }
 
     Ok(())
 }
@@ -74,7 +90,13 @@ pub fn cmd_db_build(args: DbBuildArgs) -> Result<()> {
     eprintln!("[db-build] Input: {:?}", args.input);
     eprintln!("[db-build] Output: {:?}", out);
 
-    annotate::build_ani_index_auto_v2(&args.input, &out)?;
+    let ext = args.input.extension().and_then(|e| e.to_str());
+
+    if ext == Some("tab") {
+        annotate::build_ani_index_from_tab(&args.input, &out, None)?;
+    } else {
+        annotate::build_ani_index_auto_v2(&args.input, &out)?;
+    }
 
     eprintln!("[db-build] Done");
     Ok(())

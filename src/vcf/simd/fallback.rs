@@ -69,6 +69,13 @@ pub fn parse_vcf_fields_scalar(line: &[u8]) -> Option<VcfFields<'_>> {
 
     let line_str = std::str::from_utf8(line).ok()?;
 
+    let info_start = tabs[6] + 1;
+    let info_end = if n >= 8 { tabs[7] } else { line_str.len() };
+
+    if info_start > info_end || info_end > line_str.len() {
+        return None;
+    }
+
     Some(VcfFields {
         chrom: &line_str[0..tabs[0]],
         pos: &line_str[tabs[0] + 1..tabs[1]],
@@ -77,7 +84,7 @@ pub fn parse_vcf_fields_scalar(line: &[u8]) -> Option<VcfFields<'_>> {
         alt: &line_str[tabs[3] + 1..tabs[4]],
         qual: &line_str[tabs[4] + 1..tabs[5]],
         filter: &line_str[tabs[5] + 1..tabs[6]],
-        info: &line_str[tabs[6] + 1..tabs.get(7).copied().unwrap_or(line.len())],
+        info: &line_str[info_start..info_end],
     })
 }
 
