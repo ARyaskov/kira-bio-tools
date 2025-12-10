@@ -1,0 +1,1 @@
+kira-bt annotate -a annots4.tab -c CHROM,POS,REF,ALT,+FA,+FR,+IA,+IR,+SA,+SR annotate4.vcf -o annotate4.kira.vcf
