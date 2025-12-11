@@ -10,7 +10,7 @@ jobs:
   test:
     name: Annotate Tests
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: always()
     
     steps:
     - uses: actions/checkout@v4
@@ -106,4 +106,3 @@ jobs:
           done
           exit 1
         fi
-        
