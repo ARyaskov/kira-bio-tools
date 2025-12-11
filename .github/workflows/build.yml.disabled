@@ -1,5 +1,4 @@
 name: Build
-disabled: true
 
 on:
   push:
