@@ -22,7 +22,7 @@ fn main() {
     println!("cargo:warning=Compiling CUDA kernel with nvcc: {:?}", nvcc);
 
     let status = std::process::Command::new(nvcc)
-        .args(&[
+        .args([
             "-ptx",
             "src/annotate/cuda/ani_kernel.cu",
             "-o",
