@@ -1,10 +1,10 @@
 name: Annotate Tests
 
 on:
-  workflow_run:
-    workflows: ["Build"]
-    types:
-      - completed
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
   test:
