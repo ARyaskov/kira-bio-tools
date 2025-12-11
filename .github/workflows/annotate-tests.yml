@@ -15,8 +15,10 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+    - name: Install Rust 1.91
+      uses: dtolnay/rust-toolchain@v1
+      with:
+        toolchain: 1.91.0
       
     - name: Build kira-bt
       run: cargo build --release
@@ -64,7 +66,7 @@ jobs:
             continue
           fi
           
-          ref_file=$(ls *.ref.vcf 2>/dev/null | head -n 1)
+          ref_file=$(ls *.kira.ref.vcf 2>/dev/null | head -n 1)
           kira_file=$(ls *.kira.vcf 2>/dev/null | head -n 1)
           
           if [ -z "$ref_file" ] || [ -z "$kira_file" ]; then
