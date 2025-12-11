@@ -19,6 +19,7 @@ jobs:
       uses: dtolnay/rust-toolchain@v1
       with:
         toolchain: 1.91.0
+        components: rustfmt
       
     - name: Build kira-bt
       run: cargo build --release
