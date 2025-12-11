@@ -39,8 +39,7 @@ impl StreamingVcfReader {
     }
 
     pub fn into_headers_and_self(self) -> Result<(Vec<String>, Self)> {
-        let mut reader = self.reader;
-        let headers = reader.header()?;
-        Ok((headers, Self { reader }))
+        let headers = self.reader.header()?;
+        Ok((headers, self))
     }
 }

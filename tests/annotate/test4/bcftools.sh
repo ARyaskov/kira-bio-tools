@@ -1,0 +1,1 @@
+bcftools annotate -a annots4.vcf -c CHROM,POS,REF,ALT,+FA,+FR,+IA,+IR,+SA,+SR -o annotate4.bcf.vcf annotate4.vcf

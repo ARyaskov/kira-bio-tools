@@ -87,6 +87,7 @@ pub struct PlainReader {
     contigs: Vec<String>,
     headers: Vec<String>,
     offset: u64,
+    first_data_line: Option<String>,
 }
 
 impl PlainReader {
@@ -97,6 +98,7 @@ impl PlainReader {
         let mut contigs = Vec::new();
         let mut headers = Vec::new();
         let mut offset = 0u64;
+        let mut first_data_line = None;
 
         loop {
             buffer.clear();
@@ -106,6 +108,7 @@ impl PlainReader {
             }
             offset += n as u64;
             if !buffer.starts_with('#') {
+                first_data_line = Some(buffer.trim_end().to_string());
                 break;
             }
             headers.push(buffer.trim_end().to_string());
@@ -118,14 +121,19 @@ impl PlainReader {
 
         Ok(Self {
             reader,
-            buffer,
+            buffer: String::new(),
             contigs,
             headers,
             offset,
+            first_data_line,
         })
     }
 
     pub fn read_record(&mut self) -> Result<Option<VcfRecord>> {
+        if let Some(line) = self.first_data_line.take() {
+            return parse_vcf_record(&line, self.offset);
+        }
+
         let start_offset = self.offset;
         self.buffer.clear();
         let n = self.reader.read_line(&mut self.buffer)?;
@@ -142,6 +150,10 @@ impl PlainReader {
     }
 
     pub fn read_line(&mut self) -> Result<Option<String>> {
+        if let Some(line) = self.first_data_line.take() {
+            return Ok(Some(line));
+        }
+
         self.buffer.clear();
         let n = self.reader.read_line(&mut self.buffer)?;
         if n == 0 {
@@ -157,6 +169,7 @@ pub struct BgzfReader {
     buffer: String,
     contigs: Vec<String>,
     headers: Vec<String>,
+    first_data_line: Option<String>,
 }
 
 impl BgzfReader {
@@ -165,6 +178,7 @@ impl BgzfReader {
         let mut buffer = String::new();
         let mut contigs = Vec::new();
         let mut headers = Vec::new();
+        let mut first_data_line = None;
 
         loop {
             buffer.clear();
@@ -173,6 +187,7 @@ impl BgzfReader {
                 break;
             }
             if !buffer.starts_with('#') {
+                first_data_line = Some(buffer.trim_end().to_string());
                 break;
             }
             headers.push(buffer.trim_end().to_string());
@@ -185,13 +200,18 @@ impl BgzfReader {
 
         Ok(Self {
             reader,
-            buffer,
+            buffer: String::new(),
             contigs,
             headers,
+            first_data_line,
         })
     }
 
     pub fn read_record(&mut self) -> Result<Option<VcfRecord>> {
+        if let Some(line) = self.first_data_line.take() {
+            return parse_vcf_record(&line, 0);
+        }
+
         self.buffer.clear();
         let n = self.reader.read_line(&mut self.buffer)?;
         if n == 0 {
@@ -202,11 +222,14 @@ impl BgzfReader {
             return self.read_record();
         }
 
-        let vpos = self.reader.virtual_position();
-        parse_vcf_record(&self.buffer, vpos.as_u64())
+        parse_vcf_record(&self.buffer, 0)
     }
 
     pub fn read_line(&mut self) -> Result<Option<String>> {
+        if let Some(line) = self.first_data_line.take() {
+            return Ok(Some(line));
+        }
+
         self.buffer.clear();
         let n = self.reader.read_line(&mut self.buffer)?;
         if n == 0 {
@@ -222,6 +245,7 @@ pub struct BgzfIndexingReader {
     contigs: Vec<String>,
     headers: Vec<String>,
     vpos: VirtualPosition,
+    first_data_line: Option<String>,
 }
 
 impl BgzfIndexingReader {
@@ -230,6 +254,7 @@ impl BgzfIndexingReader {
         let mut buffer = String::new();
         let mut contigs = Vec::new();
         let mut headers = Vec::new();
+        let mut first_data_line = None;
 
         loop {
             buffer.clear();
@@ -238,6 +263,7 @@ impl BgzfIndexingReader {
                 break;
             }
             if !buffer.starts_with('#') {
+                first_data_line = Some(buffer.trim_end().to_string());
                 break;
             }
             headers.push(buffer.trim_end().to_string());
@@ -252,14 +278,19 @@ impl BgzfIndexingReader {
 
         Ok(Self {
             reader,
-            buffer,
+            buffer: String::new(),
             contigs,
             headers,
             vpos,
+            first_data_line,
         })
     }
 
     pub fn read_record(&mut self) -> Result<Option<VcfRecord>> {
+        if let Some(line) = self.first_data_line.take() {
+            return parse_vcf_record(&line, self.vpos.as_u64());
+        }
+
         self.vpos = self.reader.virtual_position();
         self.buffer.clear();
         let n = self.reader.read_line(&mut self.buffer)?;
@@ -275,6 +306,10 @@ impl BgzfIndexingReader {
     }
 
     pub fn read_line(&mut self) -> Result<Option<String>> {
+        if let Some(line) = self.first_data_line.take() {
+            return Ok(Some(line));
+        }
+
         self.buffer.clear();
         let n = self.reader.read_line(&mut self.buffer)?;
         if n == 0 {

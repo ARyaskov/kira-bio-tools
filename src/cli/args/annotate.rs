@@ -22,13 +22,13 @@ pub struct AnnotateArgs {
     )]
     pub annotations: PathBuf,
 
-    #[arg(short, long, help = "Output file (optional)")]
+    #[arg(short = 'o', long = "output", help = "Output file (optional)")]
     pub output: Option<PathBuf>,
 
     #[arg(
         short = 'c',
         long = "columns",
-        help = "Column specification for TAB files (e.g., CHROM,POS,REF,ALT,ID,INFO/AC)"
+        help = "Column specification for TAB files (e.g., CHROM,POS,REF,ALT,ID,+INFO/AC)"
     )]
     pub columns: Option<String>,
 
