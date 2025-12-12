@@ -19,23 +19,23 @@ pub enum FieldType {
 }
 
 #[derive(Debug, Clone)]
-pub struct StructuredInfoField<'a> {
-    pub key: &'a str,
+pub struct StructuredInfoField {
+    pub key: String,
     pub number: FieldNumber,
     pub ty: FieldType,
-    pub values: Vec<&'a str>,
+    pub values: Vec<String>,
 }
 
 #[derive(Debug)]
-pub struct AnnotationBundle<'a> {
-    pub alt: &'a str,
-    pub id: Option<&'a str>,
-    pub qual: Option<&'a str>,
-    pub filter: Option<&'a str>,
-    pub info: Vec<StructuredInfoField<'a>>,
+pub struct AnnotationBundle {
+    pub alt: String,
+    pub id: Option<String>,
+    pub qual: Option<String>,
+    pub filter: Option<String>,
+    pub info: Vec<StructuredInfoField>,
 }
 
-impl<'a> AnnotationBundle<'a> {
+impl AnnotationBundle {
     pub fn match_alleles(&self, vcf_alt_alleles: &[&str]) -> Vec<Option<usize>> {
         let db_alts: Vec<&str> = self.alt.split(',').collect();
 
@@ -56,7 +56,7 @@ impl<'a> AnnotationBundle<'a> {
 
     pub fn remap_field_values(
         &self,
-        field: &StructuredInfoField<'a>,
+        field: &StructuredInfoField,
         allele_map: &[Option<usize>],
     ) -> Vec<String> {
         match field.number {
@@ -65,7 +65,7 @@ impl<'a> AnnotationBundle<'a> {
                 .map(|opt_idx| {
                     opt_idx
                         .and_then(|idx| field.values.get(idx))
-                        .map(|v| v.to_string())
+                        .cloned()
                         .unwrap_or_else(|| ".".to_string())
                 })
                 .collect(),
@@ -73,16 +73,15 @@ impl<'a> AnnotationBundle<'a> {
                 let mut result = Vec::new();
 
                 if let Some(ref_val) = field.values.first() {
-                    result.push(ref_val.to_string());
+                    result.push(ref_val.clone());
                 } else {
                     result.push(".".to_string());
                 }
 
                 for opt_idx in allele_map {
                     if let Some(idx) = opt_idx {
-                        let alt_idx = idx + 1;
-                        if let Some(val) = field.values.get(alt_idx) {
-                            result.push(val.to_string());
+                        if let Some(val) = field.values.get(idx + 1) {
+                            result.push(val.clone());
                         } else {
                             result.push(".".to_string());
                         }
@@ -93,72 +92,70 @@ impl<'a> AnnotationBundle<'a> {
 
                 result
             }
-            _ => field.values.iter().map(|v| v.to_string()).collect(),
+            _ => field.values.clone(),
         }
     }
 }
 
-pub fn parse_info_field<'a>(raw: &'a str) -> Vec<StructuredInfoField<'a>> {
-    if raw == "." || raw.is_empty() {
-        return vec![];
-    }
+pub fn parse_info_field(info: &str) -> Vec<StructuredInfoField> {
+    use crate::util::url_decode_info_value;
 
-    let mut out = Vec::new();
+    let decoded_info = url_decode_info_value(info);
+    let mut fields = Vec::new();
 
-    for part in raw.split(';') {
-        if part.is_empty() {
+    for kv in decoded_info.split(';') {
+        if kv.is_empty() || kv == "." {
             continue;
         }
 
-        let mut kv = part.splitn(2, '=');
-        let key = kv.next().unwrap();
-        let vals = kv.next().unwrap_or("");
+        if let Some(eq_pos) = kv.find('=') {
+            let key = &kv[..eq_pos];
+            let value_part = &kv[eq_pos + 1..];
 
-        let number = if vals.is_empty() {
-            FieldNumber::Zero
-        } else if !vals.contains(',') {
-            FieldNumber::One
+            let values: Vec<String> = value_part.split(',').map(|s| s.to_string()).collect();
+
+            let ty = infer_field_type(key);
+
+            let number = match values.len() {
+                0 => FieldNumber::Zero,
+                1 => FieldNumber::One,
+                _ => FieldNumber::Many,
+            };
+
+            fields.push(StructuredInfoField {
+                key: key.to_string(),
+                number,
+                ty,
+                values,
+            });
         } else {
-            FieldNumber::Many
-        };
-
-        let ty = if number == FieldNumber::Zero {
-            FieldType::Flag
-        } else if vals.parse::<i64>().is_ok() {
-            FieldType::Int
-        } else if vals.parse::<f64>().is_ok() {
-            FieldType::Float
-        } else {
-            FieldType::Str
-        };
-
-        let values: Vec<&str> = if number == FieldNumber::Zero {
-            vec![]
-        } else {
-            vals.split(',').collect()
-        };
-
-        out.push(StructuredInfoField {
-            key,
-            number,
-            ty,
-            values,
-        });
+            fields.push(StructuredInfoField {
+                key: kv.to_string(),
+                number: FieldNumber::Zero,
+                ty: FieldType::Flag,
+                values: vec![],
+            });
+        }
     }
 
-    out
+    fields
 }
 
-pub fn infer_field_number(header_key: &str, value_count: usize, n_alt: usize) -> FieldNumber {
-    if value_count == 0 {
-        FieldNumber::Zero
-    } else if value_count == 1 {
-        FieldNumber::One
-    } else if value_count == n_alt {
-        FieldNumber::A
-    } else if value_count == n_alt + 1 {
-        FieldNumber::R
-    } else {
-        FieldNumber::Many
+fn infer_field_type(key: &str) -> FieldType {
+    if key.ends_with("_AF") || key.ends_with("_FREQ") || key == "AF" || key == "FREQ" {
+        return FieldType::Float;
     }
+
+    if key.ends_with("_AC")
+        || key.ends_with("_AN")
+        || key.ends_with("_DP")
+        || key == "AC"
+        || key == "AN"
+        || key == "DP"
+        || key == "NS"
+    {
+        return FieldType::Int;
+    }
+
+    FieldType::Str
 }

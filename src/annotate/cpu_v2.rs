@@ -52,7 +52,8 @@ pub fn annotate_vcf_ani_v2(db: &Path, input: &Path, output: &Path) -> Result<()>
             .take(10)
             .flat_map(|e| {
                 let info_str = read_cstring(&ani.strings, e.info_ofs as usize);
-                info_str
+                let decoded = url_decode_info_value(info_str);
+                decoded
                     .split(';')
                     .filter_map(|kv| kv.split('=').next().map(|k| k.to_string()))
                     .collect::<Vec<_>>()
@@ -220,20 +221,19 @@ fn infer_field_metadata_from_data(
     for entry_idx in 0..ani.entries.len().min(100) {
         let entry = &ani.entries[entry_idx];
         let info_str = read_cstring(&ani.strings, entry.info_ofs as usize);
+        let decoded_info = url_decode_info_value(info_str);
 
         for field_name in field_names {
             let pattern = format!("{}=", field_name);
-            if let Some(start) = info_str.find(&pattern) {
+            if let Some(start) = decoded_info.find(&pattern) {
                 let value_start = start + pattern.len();
-                let rest = &info_str[value_start..];
+                let rest = &decoded_info[value_start..];
                 let value_end = rest.find(';').unwrap_or(rest.len());
                 let value = &rest[..value_end];
 
-                let decoded_value = url_decode_info_value(value);
-
                 let alt_str = read_cstring(&ani.strings, entry.alt_ofs as usize);
                 let num_alts = alt_str.split(',').count();
-                let num_values = decoded_value.split(',').count();
+                let num_values = value.split(',').count();
 
                 let number = if num_values == num_alts {
                     FieldNumber::A
@@ -289,55 +289,6 @@ fn infer_field_metadata_from_data(
     }
 
     metadata
-}
-
-fn linear_search_ani<'a>(
-    ani: &'a AniIndex,
-    chr: &str,
-    pos: u32,
-    rf: &str,
-) -> Option<AnnotationBundle<'a>> {
-    use crate::chr_name_to_id;
-
-    let chr_id = chr_name_to_id(chr)? as u8;
-
-    for entry in &ani.entries {
-        if entry.chr_id == chr_id && entry.pos == pos {
-            let rf_str = read_cstring(&ani.strings, entry.ref_ofs as usize);
-
-            if rf_str == rf {
-                let alt_str = read_cstring(&ani.strings, entry.alt_ofs as usize);
-                let id_str = read_cstring(&ani.strings, entry.id_ofs as usize);
-                let qual_str = read_cstring(&ani.strings, entry.qual_ofs as usize);
-                let filter_str = read_cstring(&ani.strings, entry.filter_ofs as usize);
-                let info_str = read_cstring(&ani.strings, entry.info_ofs as usize);
-
-                let info_fields = parse_info_field(info_str);
-
-                return Some(AnnotationBundle {
-                    alt: alt_str,
-                    id: if id_str == "." || id_str.is_empty() {
-                        None
-                    } else {
-                        Some(id_str)
-                    },
-                    qual: if qual_str == "." || qual_str.is_empty() {
-                        None
-                    } else {
-                        Some(qual_str)
-                    },
-                    filter: if filter_str == "." || filter_str.is_empty() {
-                        None
-                    } else {
-                        Some(filter_str)
-                    },
-                    info: info_fields,
-                });
-            }
-        }
-    }
-
-    None
 }
 
 fn merge_allele_values(
@@ -504,85 +455,11 @@ fn annotate_line(line: &str, ani: &AniIndex, field_meta: &HashMap<String, FieldN
 
     let pos = rec.pos.parse::<u32>().unwrap_or(0);
 
-    let bundle = match ani.lookup(rec.chrom, pos, rec.ref_allele) {
-        Some(b) => b,
-        None => {
-            if debug {
-                eprintln!(
-                    "[DEBUG] Primary lookup failed for {}:{} {}, trying linear search...",
-                    rec.chrom, pos, rec.ref_allele
-                );
-            }
-
-            match linear_search_ani(ani, rec.chrom, pos, rec.ref_allele) {
-                Some(b) => {
-                    if debug {
-                        eprintln!(
-                            "[DEBUG] Linear search found match for {}:{} {} - DB ALT: {}",
-                            rec.chrom, pos, rec.ref_allele, b.alt
-                        );
-                    }
-                    b
-                }
-                None => {
-                    if debug {
-                        eprintln!(
-                            "[DEBUG] No lookup match for {}:{} {}",
-                            rec.chrom, pos, rec.ref_allele
-                        );
-                    }
-                    return line.to_string();
-                }
-            }
-        }
-    };
-
-    if debug && ani.lookup(rec.chrom, pos, rec.ref_allele).is_some() {
-        eprintln!(
-            "[DEBUG] Found match for {}:{} {} - DB ALT: {}",
-            rec.chrom, pos, rec.ref_allele, bundle.alt
-        );
-        eprintln!("[DEBUG] Metadata contains {} fields", field_meta.len());
-    }
-
     let vcf_alt_alleles: Vec<&str> = rec.alt.split(',').collect();
-    let db_alt_alleles: Vec<&str> = bundle.alt.split(',').collect();
-
-    let allele_map = match_alleles(&db_alt_alleles, &vcf_alt_alleles);
-
-    if debug {
-        eprintln!(
-            "[DEBUG] VCF ALTs: {:?}, DB ALTs: {:?}, Map: {:?}",
-            vcf_alt_alleles, db_alt_alleles, allele_map
-        );
-    }
 
     let mut updated_id = rec.id.to_string();
-    let mut updated_qual = rec.qual.to_string();
     let mut updated_filter = rec.filter.to_string();
     let mut info_map: IndexMap<String, String> = IndexMap::new();
-
-    if let Some(id) = bundle.id {
-        if id != "." && !id.is_empty() {
-            if rec.id == "." || rec.id.is_empty() {
-                updated_id = id.to_string();
-            } else if !rec.id.contains(id) {
-                updated_id = format!("{};{}", rec.id, id);
-            }
-        }
-    }
-
-    if let Some(qual) = bundle.qual {
-        if qual != "." && !qual.is_empty() && (rec.qual == "." || rec.qual.is_empty()) {
-            updated_qual = qual.to_string();
-        }
-    }
-
-    if let Some(filt) = bundle.filter {
-        if filt != "." && !filt.is_empty() && (rec.filter == "." || rec.filter.is_empty()) {
-            updated_filter = filt.to_string();
-        }
-    }
 
     for kv in rec.info.split(';') {
         if kv.is_empty() || kv == "." {
@@ -595,106 +472,130 @@ fn annotate_line(line: &str, ani: &AniIndex, field_meta: &HashMap<String, FieldN
         info_map.insert(k.to_string(), v.to_string());
     }
 
-    for field in &bundle.info {
-        let key = field.key;
-
-        let Some(field_number) = field_meta.get(key).copied() else {
-            if debug {
-                eprintln!(
-                    "[DEBUG] No metadata for field {}, using fallback (values.len={})",
-                    key,
-                    field.values.len()
-                );
-            }
-
-            if field.values.is_empty() {
-                info_map.insert(key.to_string(), String::new());
-            } else {
-                let decoded: Vec<String> = field
-                    .values
-                    .iter()
-                    .map(|v| url_decode_info_value(v))
-                    .collect();
-                info_map.insert(key.to_string(), decoded.join(","));
-            }
-            continue;
+    for vcf_alt in &vcf_alt_alleles {
+        let vcf_alt_trimmed = vcf_alt.trim();
+        let bundle = match ani.lookup(rec.chrom, pos, rec.ref_allele.trim(), vcf_alt_trimmed) {
+            Some(b) => b,
+            None => continue,
         };
 
         if debug {
             eprintln!(
-                "[DEBUG] Processing field {} with Number={:?}, values.len={}, allele_map.len={}",
-                key,
-                field_number,
-                field.values.len(),
-                allele_map.len()
+                "[DEBUG] VCF ALTs: {:?}, DB ALTs: {:?}",
+                vcf_alt_alleles,
+                bundle.alt.split(',').collect::<Vec<_>>()
             );
         }
 
-        if field.values.is_empty() {
-            match field_number {
-                FieldNumber::Zero => {
-                    info_map.insert(key.to_string(), String::new());
-                }
-                FieldNumber::A => {
-                    let missing: Vec<String> =
-                        vcf_alt_alleles.iter().map(|_| ".".to_string()).collect();
-                    info_map.insert(key.to_string(), missing.join(","));
-                }
-                FieldNumber::R => {
-                    let mut missing = vec![".".to_string()];
-                    for _ in &vcf_alt_alleles {
-                        missing.push(".".to_string());
-                    }
-                    info_map.insert(key.to_string(), missing.join(","));
-                }
-                _ => {}
-            }
-            continue;
+        let allele_map = bundle.match_alleles(&vcf_alt_alleles);
+
+        if debug {
+            eprintln!("[DEBUG] Allele map: {:?}", allele_map);
         }
 
-        match field_number {
-            FieldNumber::Zero => {
-                info_map.insert(key.to_string(), String::new());
+        if let Some(id) = &bundle.id {
+            if updated_id == "." || updated_id.is_empty() {
+                updated_id = id.clone();
+            } else if !rec.id.contains(id.as_str()) {
+                updated_id = format!("{};{}", updated_id, id);
             }
+        }
 
-            FieldNumber::One => {
-                if !field.values.is_empty() {
-                    let decoded = url_decode_info_value(field.values[0]);
-                    info_map.insert(key.to_string(), decoded);
+        if let Some(filt) = &bundle.filter {
+            if updated_filter == "." || updated_filter.is_empty() {
+                updated_filter = filt.clone();
+            }
+        }
+
+        for field in &bundle.info {
+            let key = &field.key;
+
+            let Some(field_number) = field_meta.get(key.as_str()).copied() else {
+                if debug {
+                    eprintln!(
+                        "[DEBUG] No metadata for field {}, using fallback (values.len={})",
+                        key,
+                        field.values.len()
+                    );
                 }
-            }
 
-            FieldNumber::Many => {
-                let decoded: Vec<String> = field
-                    .values
-                    .iter()
-                    .map(|v| url_decode_info_value(v))
-                    .collect();
-                info_map.insert(key.to_string(), decoded.join(","));
-            }
-
-            FieldNumber::A | FieldNumber::R => {
-                let remapped = remap_field_values(&field.values, field_number, &allele_map);
-
-                if info_map.contains_key(key) {
-                    let existing_val = info_map.get(key).unwrap();
-                    let existing_parts: Vec<&str> = existing_val.split(',').collect();
-                    let field_type = infer_field_type(key);
-                    let merged =
-                        merge_allele_values(&existing_parts, &remapped, field_number, field_type);
-                    info_map.insert(key.to_string(), merged.join(","));
+                if field.values.is_empty() {
+                    info_map.insert(key.clone(), String::new());
                 } else {
-                    info_map.insert(key.to_string(), remapped.join(","));
+                    info_map.insert(key.clone(), field.values.join(","));
                 }
+                continue;
+            };
+
+            if debug {
+                eprintln!(
+                    "[DEBUG] Processing field {} with Number={:?}, values.len={}, allele_map.len={}",
+                    key,
+                    field_number,
+                    field.values.len(),
+                    allele_map.len()
+                );
             }
 
-            FieldNumber::G => {
-                let decoded: Vec<String> = field
-                    .values
-                    .iter()
-                    .map(|v| url_decode_info_value(v))
-                    .collect();
-                info_map.insert(key.to_string(), decoded.join(","));
+            if field.values.is_empty() {
+                match field_number {
+                    FieldNumber::Zero => {
+                        info_map.insert(key.clone(), String::new());
+                    }
+                    FieldNumber::A => {
+                        let missing: Vec<String> =
+                            vcf_alt_alleles.iter().map(|_| ".".to_string()).collect();
+                        info_map.insert(key.clone(), missing.join(","));
+                    }
+                    FieldNumber::R => {
+                        let mut missing = vec![".".to_string()];
+                        for _ in &vcf_alt_alleles {
+                            missing.push(".".to_string());
+                        }
+                        info_map.insert(key.clone(), missing.join(","));
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            match field_number {
+                FieldNumber::Zero => {
+                    info_map.insert(key.clone(), String::new());
+                }
+
+                FieldNumber::One => {
+                    if !field.values.is_empty() {
+                        info_map.insert(key.clone(), field.values[0].clone());
+                    }
+                }
+
+                FieldNumber::Many => {
+                    info_map.insert(key.clone(), field.values.join(","));
+                }
+
+                FieldNumber::A | FieldNumber::R => {
+                    let remapped = bundle.remap_field_values(&field, &allele_map);
+
+                    if info_map.contains_key(key.as_str()) {
+                        let existing_val = info_map.get(key.as_str()).unwrap();
+                        let existing_parts: Vec<&str> = existing_val.split(',').collect();
+                        let field_type = infer_field_type(key);
+                        let merged = merge_allele_values(
+                            &existing_parts,
+                            &remapped,
+                            field_number,
+                            field_type,
+                        );
+                        info_map.insert(key.clone(), merged.join(","));
+                    } else {
+                        info_map.insert(key.clone(), remapped.join(","));
+                    }
+                }
+
+                FieldNumber::G => {
+                    info_map.insert(key.clone(), field.values.join(","));
+                }
             }
         }
     }
@@ -726,85 +627,16 @@ fn annotate_line(line: &str, ani: &AniIndex, field_meta: &HashMap<String, FieldN
         updated_id,
         rec.ref_allele.to_string(),
         rec.alt.to_string(),
-        updated_qual,
+        rec.qual.to_string(),
         updated_filter,
         info_str,
     ];
 
-    if !rest.is_empty() && rest != "." {
+    if !rest.is_empty() {
         fields.push(rest.to_string());
     }
 
     fields.join("\t")
-}
-
-fn match_alleles(db_alts: &[&str], vcf_alts: &[&str]) -> Vec<Option<usize>> {
-    let mut db_map: HashMap<&str, Vec<usize>> = HashMap::new();
-    for (idx, alt) in db_alts.iter().enumerate() {
-        db_map.entry(*alt).or_insert_with(Vec::new).push(idx);
-    }
-
-    vcf_alts
-        .iter()
-        .map(|vcf_alt| {
-            db_map
-                .get(vcf_alt)
-                .and_then(|indices| indices.first().copied())
-        })
-        .collect()
-}
-
-fn remap_field_values(
-    values: &[&str],
-    number: FieldNumber,
-    allele_map: &[Option<usize>],
-) -> Vec<String> {
-    let decoded_values: Vec<String> = values
-        .iter()
-        .flat_map(|v| {
-            let decoded = url_decode_info_value(v);
-            decoded
-                .split(',')
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    match number {
-        FieldNumber::A => allele_map
-            .iter()
-            .map(|opt_idx| {
-                opt_idx
-                    .and_then(|idx| decoded_values.get(idx))
-                    .cloned()
-                    .unwrap_or_else(|| ".".to_string())
-            })
-            .collect(),
-        FieldNumber::R => {
-            let mut result = Vec::new();
-
-            if let Some(ref_val) = decoded_values.first() {
-                result.push(ref_val.clone());
-            } else {
-                result.push(".".to_string());
-            }
-
-            for opt_idx in allele_map {
-                if let Some(idx) = opt_idx {
-                    if let Some(val) = decoded_values.get(idx + 1) {
-                        result.push(val.clone());
-                    } else {
-                        result.push(".".to_string());
-                    }
-                } else {
-                    result.push(".".to_string());
-                }
-            }
-
-            result
-        }
-        _ => decoded_values,
-    }
 }
 
 fn merge_annotation_headers(vcf_headers: &[String], _ani: &AniIndex) -> Result<Vec<String>> {

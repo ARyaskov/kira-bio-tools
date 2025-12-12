@@ -5,9 +5,7 @@ use std::fs::File;
 use std::mem;
 use std::path::Path;
 
-use super::bundle::{
-    parse_info_field, AnnotationBundle, FieldNumber, FieldType, StructuredInfoField,
-};
+use super::bundle::{parse_info_field, AnnotationBundle};
 
 pub const ANI_MAGIC: u64 = 0x494E4149524B4256;
 pub const ANI_VERSION: u64 = 2;
@@ -106,18 +104,26 @@ impl AniIndex {
         })
     }
 
-    pub fn lookup<'a>(&'a self, chr: &str, pos: u32, rf: &str) -> Option<AnnotationBundle<'a>> {
+    pub fn lookup(&self, chr: &str, pos: u32, rf: &str, alt: &str) -> Option<AnnotationBundle> {
         use crate::chr_name_to_id;
         use fxhash::hash64;
 
+        let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
         let chr_id = chr_name_to_id(chr)? as u8;
 
-        let mut h = hash64(&[chr_id]);
-        h ^= hash64(pos.to_le_bytes().as_ref());
+        let mut h = (chr_id as u64) << 32 | (pos as u64);
         h ^= hash64(rf.as_bytes());
+        h ^= hash64(alt.as_bytes());
 
         let idx = self.mph.index(&h.to_le_bytes()) as usize;
         if idx >= self.entries.len() {
+            if debug {
+                eprintln!(
+                    "[DEBUG-LOOKUP] MPH returned idx {} >= entries.len() {}",
+                    idx,
+                    self.entries.len()
+                );
+            }
             return None;
         }
 
@@ -128,12 +134,27 @@ impl AniIndex {
         }
 
         let rf_str = read_cstring(&self.strings, e.ref_ofs as usize);
-
         if rf_str != rf {
+            if debug {
+                eprintln!(
+                    "[DEBUG-LOOKUP] REF mismatch: expected {}, got {}",
+                    rf, rf_str
+                );
+            }
             return None;
         }
 
         let alt_str = read_cstring(&self.strings, e.alt_ofs as usize);
+        if alt_str != alt {
+            if debug {
+                eprintln!(
+                    "[DEBUG-LOOKUP] ALT mismatch: expected {}, got {}",
+                    alt, alt_str
+                );
+            }
+            return None;
+        }
+
         let id_str = read_cstring(&self.strings, e.id_ofs as usize);
         let qual_str = read_cstring(&self.strings, e.qual_ofs as usize);
         let filter_str = read_cstring(&self.strings, e.filter_ofs as usize);
@@ -142,21 +163,21 @@ impl AniIndex {
         let info_fields = parse_info_field(info_str);
 
         let bundle = AnnotationBundle {
-            alt: alt_str,
+            alt: alt_str.to_string(),
             id: if id_str == "." || id_str.is_empty() {
                 None
             } else {
-                Some(id_str)
+                Some(id_str.to_string())
             },
             qual: if qual_str == "." || qual_str.is_empty() {
                 None
             } else {
-                Some(qual_str)
+                Some(qual_str.to_string())
             },
             filter: if filter_str == "." || filter_str.is_empty() {
                 None
             } else {
-                Some(filter_str)
+                Some(filter_str.to_string())
             },
             info: info_fields,
         };

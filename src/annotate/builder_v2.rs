@@ -1,6 +1,6 @@
 use anyhow::Result;
 use fxhash::FxHashMap;
-use kira_kv_engine::Mphf;
+use kira_kv_engine::{BuildConfig, Builder};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::mem;
@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::annotate::structs::{AniEntry, AniHeader, TabSchema, ANI_MAGIC, ANI_VERSION};
 use crate::util::{append_cstr, chr_name_to_id, url_encode_info_value};
+use crate::vcf::simd::SimdVcfParser;
 use crate::vcf::UnifiedVcfReader;
 
 pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
@@ -37,8 +38,8 @@ pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
 
         total_variants.fetch_add(1, Ordering::Relaxed);
 
-        let processed = process_vcf_line_multiallelic(
-            &line,
+        let processed = process_vcf_line_multiallelic_simd(
+            line.as_bytes(),
             &mut entries_map,
             &mut pool,
             &mut insertion_order,
@@ -80,7 +81,7 @@ pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
             multi,
             (multi as f64 / total.max(1) as f64) * 100.0
         );
-        eprintln!("  Time: {:.3}s", start.elapsed().as_secs_f64());
+        eprintln!("  Parse time: {:.3}s", start.elapsed().as_secs_f64());
     }
 
     let mut rows: Vec<(u64, AniEntry, usize)> = entries_map
@@ -88,7 +89,7 @@ pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
         .map(|(key, (entry, order))| (key, entry, order))
         .collect();
 
-    rows.sort_by_key(|(_, _, order)| *order);
+    rows.sort_unstable_by_key(|(_, _, order)| *order);
 
     let rows: Vec<(u64, AniEntry)> = rows.into_iter().map(|(k, e, _)| (k, e)).collect();
 
@@ -182,7 +183,7 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
             multi,
             (multi as f64 / total.max(1) as f64) * 100.0
         );
-        eprintln!("  Time: {:.3}s", start.elapsed().as_secs_f64());
+        eprintln!("  Parse time: {:.3}s", start.elapsed().as_secs_f64());
     }
 
     let mut rows: Vec<(u64, AniEntry, usize)> = entries_map
@@ -190,7 +191,7 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
         .map(|(key, (entry, order))| (key, entry, order))
         .collect();
 
-    rows.sort_by_key(|(_, _, order)| *order);
+    rows.sort_unstable_by_key(|(_, _, order)| *order);
 
     let rows: Vec<(u64, AniEntry)> = rows.into_iter().map(|(k, e, _)| (k, e)).collect();
 
@@ -199,8 +200,8 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
     Ok(())
 }
 
-fn process_vcf_line_multiallelic(
-    line: &str,
+fn process_vcf_line_multiallelic_simd(
+    line: &[u8],
     entries_map: &mut FxHashMap<u64, (AniEntry, usize)>,
     pool: &mut Vec<u8>,
     insertion_order: &mut usize,
@@ -208,25 +209,28 @@ fn process_vcf_line_multiallelic(
     multiallelic_count: &AtomicUsize,
     debug: bool,
 ) -> Result<usize> {
-    let parts: Vec<&str> = line.split('\t').collect();
-    if parts.len() < 8 {
-        return Ok(0);
-    }
+    let fields = match SimdVcfParser::parse_fields(line) {
+        Some(f) => f,
+        None => return Ok(0),
+    };
 
-    let chr = parts[0];
-    let pos_str = parts[1];
-    let rf = parts[3].trim();
-    let alt = parts[4].trim();
-
-    if rf.is_empty() || rf == "." || alt.is_empty() || alt == "." {
-        return Ok(0);
-    }
-
-    let pos = pos_str.parse::<u32>().unwrap_or(0);
+    let chr = fields.chrom;
     let chr_id = match chr_name_to_id(chr) {
         Some(v) => v,
         None => return Ok(0),
     };
+
+    let pos = match fields.pos.parse::<u32>() {
+        Ok(p) => p,
+        Err(_) => return Ok(0),
+    };
+
+    let rf = fields.ref_allele.trim();
+    let alt = fields.alt.trim();
+
+    if rf.is_empty() || rf == "." || alt.is_empty() || alt == "." {
+        return Ok(0);
+    }
 
     let alt_alleles: Vec<&str> = alt.split(',').collect();
 
@@ -234,63 +238,73 @@ fn process_vcf_line_multiallelic(
         multiallelic_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    let key = make_position_key(chr_id, pos, rf);
+    let id = if fields.id != "." && !fields.id.is_empty() {
+        fields.id
+    } else {
+        "."
+    };
 
-    if entries_map.contains_key(&key) {
-        duplicates_skipped.fetch_add(1, Ordering::Relaxed);
+    let qual = if fields.qual != "." && !fields.qual.is_empty() {
+        fields.qual
+    } else {
+        "."
+    };
 
-        if debug {
-            eprintln!("[ani-build] Overwriting duplicate: {}:{} {}", chr, pos, rf);
-        }
-    }
-
-    let id = parts[2].trim();
-    let qual = parts[5].trim();
-    let filter = parts[6].trim();
+    let filter = if fields.filter != "." && !fields.filter.is_empty() {
+        fields.filter
+    } else {
+        "."
+    };
 
     let ref_ofs = append_cstr(pool, rf);
-    let alt_ofs = append_cstr(pool, alt);
+    let id_ofs = append_cstr(pool, id);
+    let qual_ofs = append_cstr(pool, qual);
+    let filter_ofs = append_cstr(pool, filter);
 
-    let id_ofs = if id != "." && !id.is_empty() {
-        append_cstr(pool, id)
-    } else {
-        append_cstr(pool, ".")
-    };
-
-    let qual_ofs = if qual != "." && !qual.is_empty() {
-        append_cstr(pool, qual)
-    } else {
-        append_cstr(pool, ".")
-    };
-
-    let filter_ofs = if filter != "." && !filter.is_empty() {
-        append_cstr(pool, filter)
-    } else {
-        append_cstr(pool, ".")
-    };
-
-    let info_str = parts[7].trim();
-    let info_ofs = if info_str != "." && !info_str.is_empty() {
+    let info_str = fields.info.trim();
+    let base_info_ofs = if info_str != "." && !info_str.is_empty() {
         let encoded = url_encode_info_value(info_str);
         append_cstr(pool, &encoded)
     } else {
         append_cstr(pool, ".")
     };
 
-    let entry = AniEntry {
-        chr_id,
-        pos,
-        ref_ofs: ref_ofs as u32,
-        alt_ofs: alt_ofs as u32,
-        id_ofs: id_ofs as u32,
-        qual_ofs: qual_ofs as u32,
-        filter_ofs: filter_ofs as u32,
-        info_ofs: info_ofs as u32,
-        info_len: 0,
-    };
+    for alt_single in &alt_alleles {
+        let key = make_position_key(chr_id, pos, rf, alt_single);
 
-    entries_map.insert(key, (entry, *insertion_order));
-    *insertion_order += 1;
+        if entries_map.contains_key(&key) {
+            duplicates_skipped.fetch_add(1, Ordering::Relaxed);
+
+            if debug {
+                eprintln!(
+                    "[ani-build] Overwriting duplicate: {}:{} {} {}",
+                    chr, pos, rf, alt_single
+                );
+            }
+        } else if debug && *insertion_order < 10 {
+            eprintln!(
+                "[ani-build] Creating entry #{}: {}:{} {} {} (key={:016x})",
+                insertion_order, chr, pos, rf, alt_single, key
+            );
+        }
+
+        let alt_ofs = append_cstr(pool, alt_single);
+
+        let entry = AniEntry {
+            chr_id,
+            pos,
+            ref_ofs: ref_ofs as u32,
+            alt_ofs: alt_ofs as u32,
+            id_ofs: id_ofs as u32,
+            qual_ofs: qual_ofs as u32,
+            filter_ofs: filter_ofs as u32,
+            info_ofs: base_info_ofs as u32,
+            info_len: 0,
+        };
+
+        entries_map.insert(key, (entry, *insertion_order));
+        *insertion_order += 1;
+    }
 
     Ok(alt_alleles.len())
 }
@@ -341,19 +355,6 @@ fn process_tab_line_multiallelic(
         multiallelic_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    let key = make_position_key(chr_id, pos, rf);
-
-    if entries_map.contains_key(&key) {
-        duplicates_skipped.fetch_add(1, Ordering::Relaxed);
-
-        if debug {
-            eprintln!(
-                "[ani-build-tab] Overwriting duplicate: {}:{} {}",
-                chr, pos, rf
-            );
-        }
-    }
-
     let id = schema
         .id_idx
         .and_then(|i| parts.get(i))
@@ -376,7 +377,6 @@ fn process_tab_line_multiallelic(
         .unwrap_or(".");
 
     let ref_ofs = append_cstr(pool, rf);
-    let alt_ofs = append_cstr(pool, alt);
     let id_ofs = append_cstr(pool, id);
     let qual_ofs = append_cstr(pool, qual);
     let filter_ofs = append_cstr(pool, filt);
@@ -416,30 +416,60 @@ fn process_tab_line_multiallelic(
 
     pool.push(0);
 
-    let info_ofs = info_start_ofs as u32;
+    let base_info_ofs = info_start_ofs;
 
-    let entry = AniEntry {
-        chr_id,
-        pos,
-        ref_ofs: ref_ofs as u32,
-        alt_ofs: alt_ofs as u32,
-        id_ofs: id_ofs as u32,
-        qual_ofs: qual_ofs as u32,
-        filter_ofs: filter_ofs as u32,
-        info_ofs,
-        info_len: 0,
-    };
+    for alt_single in &alt_alleles {
+        let key = make_position_key(chr_id, pos, rf, alt_single);
 
-    entries_map.insert(key, (entry, *insertion_order));
-    *insertion_order += 1;
+        if entries_map.contains_key(&key) {
+            duplicates_skipped.fetch_add(1, Ordering::Relaxed);
+
+            if debug {
+                eprintln!(
+                    "[ani-build-tab] Overwriting duplicate: {}:{} {} {}",
+                    chr, pos, rf, alt_single
+                );
+            }
+        }
+
+        let alt_ofs = append_cstr(pool, alt_single);
+
+        let entry = AniEntry {
+            chr_id,
+            pos,
+            ref_ofs: ref_ofs as u32,
+            alt_ofs: alt_ofs as u32,
+            id_ofs: id_ofs as u32,
+            qual_ofs: qual_ofs as u32,
+            filter_ofs: filter_ofs as u32,
+            info_ofs: base_info_ofs as u32,
+            info_len: 0,
+        };
+
+        entries_map.insert(key, (entry, *insertion_order));
+        *insertion_order += 1;
+    }
 
     Ok(alt_alleles.len())
 }
 
-fn make_position_key(chr_id: u8, pos: u32, rf: &str) -> u64 {
+fn make_position_key(chr_id: u8, pos: u32, rf: &str, alt: &str) -> u64 {
     use fxhash::hash64;
-    let mut h = (chr_id as u64) << 32 | (pos as u64);
-    h ^= hash64(rf.as_bytes());
+    let base_h = (chr_id as u64) << 32 | (pos as u64);
+    let ref_hash = hash64(rf.as_bytes());
+    let alt_hash = hash64(alt.as_bytes());
+    let mut h = base_h;
+    h ^= ref_hash;
+    h ^= alt_hash;
+
+    let debug = std::env::var("KIRA_BT_DEBUG_HASH").is_ok();
+    if debug {
+        eprintln!(
+            "[HASH-BUILD] {}:{} {:?} {:?} -> base={:016x} ref={:016x} alt={:016x} key={:016x}",
+            chr_id, pos, rf, alt, base_h, ref_hash, alt_hash, h
+        );
+    }
+
     h
 }
 
@@ -449,14 +479,11 @@ fn finalize_ani_index(
     output: &Path,
     timing: bool,
 ) -> Result<()> {
-    use kira_kv_engine::{BuildConfig, Builder};
-
     if rows.is_empty() {
         anyhow::bail!("No valid entries to index");
     }
 
     let n = rows.len();
-
     let mph_start = std::time::Instant::now();
 
     let (gamma, rehash_limit) = match n {
@@ -471,9 +498,37 @@ fn finalize_ani_index(
             "[ani-build] MPHF config: gamma={:.1}, rehash_limit={}, entries={}",
             gamma, rehash_limit, n
         );
+        eprintln!("[ani-build] First 5 keys for verification:");
+        for (i, (k, e)) in rows.iter().enumerate().take(5) {
+            eprintln!("  [{}] key={:016x} chr={} pos={}", i, k, e.chr_id, e.pos);
+        }
     }
 
     let keys_bytes: Vec<[u8; 8]> = rows.iter().map(|(k, _)| k.to_le_bytes()).collect();
+
+    if timing {
+        let mut key_set = std::collections::HashSet::new();
+        let mut dup_count = 0;
+        for (i, key) in keys_bytes.iter().enumerate() {
+            let k = u64::from_le_bytes(*key);
+            if !key_set.insert(k) {
+                dup_count += 1;
+                if dup_count <= 5 {
+                    let (_, e) = &rows[i];
+                    eprintln!(
+                        "[ani-build] WARNING: Duplicate key {:016x} for chr={} pos={}",
+                        k, e.chr_id, e.pos
+                    );
+                }
+            }
+        }
+        if dup_count > 0 {
+            eprintln!(
+                "[ani-build] ERROR: Found {} duplicate keys! MPH will not work correctly!",
+                dup_count
+            );
+        }
+    }
 
     let mph = Builder::new()
         .with_config(BuildConfig {
@@ -490,26 +545,47 @@ fn finalize_ani_index(
         );
     }
 
-    let mut entries = vec![
-        AniEntry {
-            chr_id: 0,
-            pos: 0,
-            ref_ofs: 0,
-            alt_ofs: 0,
-            id_ofs: 0,
-            qual_ofs: 0,
-            filter_ofs: 0,
-            info_ofs: 0,
-            info_len: 0,
-        };
-        n
-    ];
+    let entries: Vec<AniEntry> = rows.into_iter().map(|(_, entry)| entry).collect();
 
-    for (k, entry) in rows {
-        let key_bytes = k.to_le_bytes();
-        let idx = mph.index(&key_bytes) as usize;
-        if idx < n {
-            entries[idx] = entry;
+    if timing {
+        eprintln!("[ani-build] Verifying MPH lookups (checking 100 random entries):");
+        let mut errors = 0;
+        let check_count = 100.min(entries.len());
+        let step = entries.len() / check_count;
+
+        for i in (0..entries.len()).step_by(step.max(1)).take(check_count) {
+            let key = u64::from_le_bytes(keys_bytes[i]);
+            let idx = mph.index(&keys_bytes[i]) as usize;
+            let retrieved = &entries[idx];
+            let expected = &entries[i];
+
+            if retrieved.chr_id != expected.chr_id || retrieved.pos != expected.pos {
+                errors += 1;
+                if errors <= 5 {
+                    eprintln!(
+                        "  [{}] ERROR: key={:016x} -> mph_idx={} -> chr={} pos={} (expected chr={} pos={})",
+                        i, key, idx, retrieved.chr_id, retrieved.pos, expected.chr_id, expected.pos
+                    );
+                }
+            } else if i < 3 {
+                eprintln!(
+                    "  [{}] OK: key={:016x} -> mph_idx={} -> chr={} pos={}",
+                    i, key, idx, retrieved.chr_id, retrieved.pos
+                );
+            }
+        }
+
+        if errors > 0 {
+            eprintln!(
+                "[ani-build] ERROR: MPH verification FAILED with {} errors out of {} checks!",
+                errors, check_count
+            );
+            eprintln!("[ani-build] This means the index will NOT work correctly!");
+        } else {
+            eprintln!(
+                "[ani-build] MPH verification: All {} checks passed ✓",
+                check_count
+            );
         }
     }
 
