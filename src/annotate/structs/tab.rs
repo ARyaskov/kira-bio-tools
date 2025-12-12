@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use super::bundle::FieldNumber;
+use crate::util::{choose_best_number, extract_info_key, extract_info_number};
 
 #[derive(Debug, Clone)]
 pub struct TabColumn {
@@ -75,49 +76,14 @@ impl TabSchema {
                 continue;
             }
 
-            if let Some(key) = Self::extract_info_key(&line) {
-                if let Some(number) = Self::extract_info_number(&line) {
+            if let Some(key) = extract_info_key(&line) {
+                if let Some(number) = extract_info_number(&line) {
                     metadata.insert(key, number);
                 }
             }
         }
 
         Ok(metadata)
-    }
-
-    fn extract_info_key(line: &str) -> Option<String> {
-        if let Some(start) = line.find("ID=") {
-            let rest = &line[start + 3..];
-            if let Some(end) = rest.find(',') {
-                return Some(rest[..end].to_string());
-            }
-        }
-        None
-    }
-
-    fn extract_info_number(line: &str) -> Option<FieldNumber> {
-        if let Some(start) = line.find("Number=") {
-            let rest = &line[start + 7..];
-            if let Some(end) = rest.find(',') {
-                let number_str = &rest[..end];
-                return match number_str {
-                    "0" => Some(FieldNumber::Zero),
-                    "1" => Some(FieldNumber::One),
-                    "A" => Some(FieldNumber::A),
-                    "R" => Some(FieldNumber::R),
-                    "G" => Some(FieldNumber::G),
-                    "." => Some(FieldNumber::Many),
-                    _ => {
-                        if number_str.parse::<i32>().is_ok() {
-                            Some(FieldNumber::Many)
-                        } else {
-                            None
-                        }
-                    }
-                };
-            }
-        }
-        None
     }
 
     fn from_header(header: &str, field_metadata: HashMap<String, FieldNumber>) -> Result<Self> {
@@ -157,30 +123,6 @@ impl TabSchema {
                 "QUAL" => qual_idx = Some(i),
                 "FILTER" => filter_idx = Some(i),
                 "INFO" => info_start = Some(i),
-                _ if clean_part.starts_with("INFO/") => {
-                    let key = clean_part.strip_prefix("INFO/").unwrap();
-                    let number = field_metadata.get(key).copied();
-                    info_cols.push(TabColumn {
-                        index: i,
-                        key: key.to_string(),
-                        is_append,
-                        number,
-                    });
-                }
-                _ if clean_part.starts_with("FMT/") || clean_part.starts_with("FORMAT/") => {
-                    let key = if let Some(k) = clean_part.strip_prefix("FMT/") {
-                        k
-                    } else {
-                        clean_part.strip_prefix("FORMAT/").unwrap()
-                    };
-                    let number = field_metadata.get(key).copied();
-                    info_cols.push(TabColumn {
-                        index: i,
-                        key: key.to_string(),
-                        is_append,
-                        number,
-                    });
-                }
                 _ => {
                     let number = field_metadata.get(clean_part).copied();
                     info_cols.push(TabColumn {
@@ -193,8 +135,8 @@ impl TabSchema {
             }
         }
 
-        let chrom_idx = chrom_idx.ok_or_else(|| anyhow::anyhow!("CHROM column missing"))?;
-        let pos_idx = pos_idx.ok_or_else(|| anyhow::anyhow!("POS column missing"))?;
+        let chrom_idx = chrom_idx.ok_or_else(|| anyhow::anyhow!("Missing CHROM column"))?;
+        let pos_idx = pos_idx.ok_or_else(|| anyhow::anyhow!("Missing POS column"))?;
 
         Ok(Self {
             chrom_idx,

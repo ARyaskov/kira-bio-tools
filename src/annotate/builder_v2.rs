@@ -104,8 +104,16 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
 
     let schema = TabSchema::parse(input, columns)?;
 
-    if timing {
-        eprintln!("[ani-build-tab] Schema: {:?}", schema);
+    if debug {
+        eprintln!("[ani-build-tab] Schema detected:");
+        eprintln!("  CHROM={}, POS={}", schema.chrom_idx, schema.pos_idx);
+        if let Some(i) = schema.ref_idx {
+            eprintln!("  REF={}", i);
+        }
+        if let Some(i) = schema.alt_idx {
+            eprintln!("  ALT={}", i);
+        }
+        eprintln!("  INFO columns: {}", schema.info_cols.len());
     }
 
     let file = File::open(input)?;
@@ -402,7 +410,13 @@ fn process_tab_line_multiallelic(
         }
     }
 
+    if pool.len() == info_start_ofs {
+        pool.push(b'.');
+    }
+
     pool.push(0);
+
+    let info_ofs = info_start_ofs as u32;
 
     let entry = AniEntry {
         chr_id,
@@ -412,7 +426,7 @@ fn process_tab_line_multiallelic(
         id_ofs: id_ofs as u32,
         qual_ofs: qual_ofs as u32,
         filter_ofs: filter_ofs as u32,
-        info_ofs: info_start_ofs as u32,
+        info_ofs,
         info_len: 0,
     };
 
@@ -422,15 +436,10 @@ fn process_tab_line_multiallelic(
     Ok(alt_alleles.len())
 }
 
-fn make_position_key(chr: u8, pos: u32, rf: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h: u64 = ((chr as u64) << 56) | ((pos as u64) << 24);
-
-    let mut hasher = fxhash::FxHasher::default();
-    rf.hash(&mut hasher);
-    let rf_hash = hasher.finish();
-
-    h ^= (rf_hash & 0x00FFFFFF);
+fn make_position_key(chr_id: u8, pos: u32, rf: &str) -> u64 {
+    use fxhash::hash64;
+    let mut h = (chr_id as u64) << 32 | (pos as u64);
+    h ^= hash64(rf.as_bytes());
     h
 }
 

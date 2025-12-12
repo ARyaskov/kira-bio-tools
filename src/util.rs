@@ -309,3 +309,80 @@ pub fn clean_info_values(val: &str) -> String {
 
     v.join(",")
 }
+
+pub fn read_cstring(pool: &[u8], offset: usize) -> &str {
+    if offset >= pool.len() {
+        return "";
+    }
+    let end = pool[offset..]
+        .iter()
+        .position(|&b| b == 0)
+        .map(|p| offset + p)
+        .unwrap_or(pool.len());
+    std::str::from_utf8(&pool[offset..end]).unwrap_or("")
+}
+
+use crate::annotate::structs::bundle::FieldNumber;
+
+pub fn extract_info_key(line: &str) -> Option<String> {
+    if let Some(start) = line.find("ID=") {
+        let rest = &line[start + 3..];
+        if let Some(end) = rest.find(',') {
+            return Some(rest[..end].to_string());
+        }
+    }
+    None
+}
+
+pub fn extract_info_number(line: &str) -> Option<FieldNumber> {
+    if let Some(start) = line.find("Number=") {
+        let rest = &line[start + 7..];
+        if let Some(end) = rest.find(',') {
+            let num_str = &rest[..end];
+            return match num_str {
+                "0" => Some(FieldNumber::Zero),
+                "1" => Some(FieldNumber::One),
+                "." => Some(FieldNumber::Many),
+                "A" => Some(FieldNumber::A),
+                "R" => Some(FieldNumber::R),
+                "G" => Some(FieldNumber::G),
+                _ => Some(FieldNumber::Many),
+            };
+        }
+    }
+    None
+}
+
+pub fn choose_best_number(numbers: &[FieldNumber]) -> FieldNumber {
+    use FieldNumber::*;
+
+    let mut has_r = false;
+    let mut has_a = false;
+    let mut has_many = false;
+    let mut has_one = false;
+
+    for n in numbers {
+        match n {
+            R => has_r = true,
+            A => has_a = true,
+            Many => has_many = true,
+            One => has_one = true,
+            _ => {}
+        }
+    }
+
+    if has_r {
+        return R;
+    }
+    if has_a {
+        return A;
+    }
+    if has_many {
+        return Many;
+    }
+    if has_one {
+        return One;
+    }
+
+    One
+}

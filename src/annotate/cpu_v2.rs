@@ -10,10 +10,13 @@ use std::time::Instant;
 
 use super::constants::*;
 use super::reader::{StreamingVcfReader, VcfAnnotationReader};
-use super::structs::bundle::{parse_info_field, AnnotationBundle};
+use super::structs::bundle::{parse_info_field, AnnotationBundle, FieldNumber};
 use super::structs::*;
 use crate::bgzf::BgzfWriter;
-use crate::util::{detect_format, url_decode_info_value, VcfFormat};
+use crate::util::{
+    choose_best_number, detect_format, extract_info_key, extract_info_number, read_cstring,
+    url_decode_info_value, VcfFormat,
+};
 use crate::vcf::VcfParser;
 
 pub fn annotate_vcf_ani_v2(db: &Path, input: &Path, output: &Path) -> Result<()> {
@@ -37,7 +40,6 @@ pub fn annotate_vcf_ani_v2(db: &Path, input: &Path, output: &Path) -> Result<()>
     }
 
     let mut field_meta = load_field_metadata(&ani)?;
-    let mut field_order: Vec<String> = Vec::new();
 
     if field_meta.is_empty() {
         if debug {
@@ -60,10 +62,6 @@ pub fn annotate_vcf_ani_v2(db: &Path, input: &Path, output: &Path) -> Result<()>
             .collect();
 
         field_meta = infer_field_metadata_from_data(&ani, &field_names);
-
-        field_order = field_names;
-    } else {
-        field_order = field_meta.keys().cloned().collect();
     }
 
     let input_format = detect_format(input)?;
@@ -293,49 +291,6 @@ fn infer_field_metadata_from_data(
     metadata
 }
 
-fn choose_best_number(numbers: &[FieldNumber]) -> FieldNumber {
-    let mut has_r = false;
-    let mut has_a = false;
-    let mut has_many = false;
-    let mut has_one = false;
-
-    for n in numbers {
-        match n {
-            FieldNumber::R => has_r = true,
-            FieldNumber::A => has_a = true,
-            FieldNumber::Many => has_many = true,
-            FieldNumber::One => has_one = true,
-            _ => {}
-        }
-    }
-
-    if has_r {
-        return FieldNumber::R;
-    }
-    if has_a {
-        return FieldNumber::A;
-    }
-    if has_many {
-        return FieldNumber::Many;
-    }
-    if has_one {
-        return FieldNumber::One;
-    }
-
-    FieldNumber::One
-}
-
-fn read_cstring<'a>(data: &'a [u8], pos: usize) -> &'a str {
-    if pos >= data.len() {
-        return "";
-    }
-    let mut end = pos;
-    while end < data.len() && data[end] != 0 {
-        end += 1;
-    }
-    std::str::from_utf8(&data[pos..end]).unwrap_or("")
-}
-
 fn linear_search_ani<'a>(
     ani: &'a AniIndex,
     chr: &str,
@@ -443,41 +398,6 @@ fn infer_field_type(key: &str) -> &'static str {
         return "String";
     }
     "String"
-}
-
-fn extract_info_key(line: &str) -> Option<String> {
-    if let Some(start) = line.find("ID=") {
-        let rest = &line[start + 3..];
-        if let Some(end) = rest.find(',') {
-            return Some(rest[..end].to_string());
-        }
-    }
-    None
-}
-
-fn extract_info_number(line: &str) -> Option<FieldNumber> {
-    if let Some(start) = line.find("Number=") {
-        let rest = &line[start + 7..];
-        if let Some(end) = rest.find(',') {
-            let number_str = &rest[..end];
-            return match number_str {
-                "0" => Some(FieldNumber::Zero),
-                "1" => Some(FieldNumber::One),
-                "A" => Some(FieldNumber::A),
-                "R" => Some(FieldNumber::R),
-                "G" => Some(FieldNumber::G),
-                "." => Some(FieldNumber::Many),
-                _ => {
-                    if number_str.parse::<i32>().is_ok() {
-                        Some(FieldNumber::Many)
-                    } else {
-                        None
-                    }
-                }
-            };
-        }
-    }
-    None
 }
 
 fn worker_thread(
@@ -756,24 +676,16 @@ fn annotate_line(line: &str, ani: &AniIndex, field_meta: &HashMap<String, FieldN
             FieldNumber::A | FieldNumber::R => {
                 let remapped = remap_field_values(&field.values, field_number, &allele_map);
 
-                let final_values = if let Some(existing) = info_map.shift_remove(key) {
-                    let existing_vals: Vec<&str> = existing.split(',').collect();
+                if info_map.contains_key(key) {
+                    let existing_val = info_map.get(key).unwrap();
+                    let existing_parts: Vec<&str> = existing_val.split(',').collect();
                     let field_type = infer_field_type(key);
-                    merge_allele_values(&existing_vals, &remapped, field_number, field_type)
+                    let merged =
+                        merge_allele_values(&existing_parts, &remapped, field_number, field_type);
+                    info_map.insert(key.to_string(), merged.join(","));
                 } else {
-                    remapped
-                };
-
-                let joined = final_values.join(",");
-
-                if debug {
-                    eprintln!(
-                        "[DEBUG] Field {} remapped: {:?} -> {:?}",
-                        key, field.values, final_values
-                    );
+                    info_map.insert(key.to_string(), remapped.join(","));
                 }
-
-                info_map.insert(key.to_string(), joined);
             }
 
             FieldNumber::G => {
@@ -790,15 +702,21 @@ fn annotate_line(line: &str, ani: &AniIndex, field_meta: &HashMap<String, FieldN
     let info_str = if info_map.is_empty() {
         ".".to_string()
     } else {
-        let mut parts: Vec<String> = Vec::new();
-        for (k, v) in info_map {
-            if v.is_empty() {
-                parts.push(k);
-            } else {
-                parts.push(format!("{}={}", k, v));
-            }
+        let parts: Vec<String> = info_map
+            .into_iter()
+            .filter_map(|(k, v)| {
+                if v.is_empty() {
+                    Some(k)
+                } else {
+                    Some(format!("{}={}", k, v))
+                }
+            })
+            .collect();
+        if parts.is_empty() {
+            ".".to_string()
+        } else {
+            parts.join(";")
         }
-        parts.join(";")
     };
 
     let rest = parser.rest();
