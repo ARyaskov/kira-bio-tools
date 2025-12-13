@@ -262,14 +262,8 @@ fn process_vcf_line_multiallelic_simd(
     let filter_ofs = append_cstr(pool, filter);
 
     let info_str = fields.info.trim();
-    let base_info_ofs = if info_str != "." && !info_str.is_empty() {
-        let encoded = url_encode_info_value(info_str);
-        append_cstr(pool, &encoded)
-    } else {
-        append_cstr(pool, ".")
-    };
 
-    for alt_single in &alt_alleles {
+    for (alt_idx, alt_single) in alt_alleles.iter().enumerate() {
         let key = make_position_key(chr_id, pos, rf, alt_single);
 
         if entries_map.contains_key(&key) {
@@ -290,6 +284,17 @@ fn process_vcf_line_multiallelic_simd(
 
         let alt_ofs = append_cstr(pool, alt_single);
 
+        let info_ofs = if info_str != "." && !info_str.is_empty() && alt_alleles.len() > 1 {
+            let split_info = split_info_for_allele(info_str, alt_idx, alt_alleles.len());
+            let encoded = url_encode_info_value(&split_info);
+            append_cstr(pool, &encoded) as u32
+        } else if info_str != "." && !info_str.is_empty() {
+            let encoded = url_encode_info_value(info_str);
+            append_cstr(pool, &encoded) as u32
+        } else {
+            append_cstr(pool, ".") as u32
+        };
+
         let entry = AniEntry {
             chr_id,
             pos,
@@ -298,7 +303,7 @@ fn process_vcf_line_multiallelic_simd(
             id_ofs: id_ofs as u32,
             qual_ofs: qual_ofs as u32,
             filter_ofs: filter_ofs as u32,
-            info_ofs: base_info_ofs as u32,
+            info_ofs,
             info_len: 0,
         };
 
@@ -381,14 +386,13 @@ fn process_tab_line_multiallelic(
     let qual_ofs = append_cstr(pool, qual);
     let filter_ofs = append_cstr(pool, filt);
 
-    let info_start_ofs = pool.len();
+    let mut base_info_str = String::new();
 
     if let Some(info_idx) = schema.info_start {
         if let Some(info_str) = parts.get(info_idx) {
             let info_str = info_str.trim();
             if !info_str.is_empty() && info_str != "." {
-                let encoded = url_encode_info_value(info_str);
-                pool.extend_from_slice(encoded.as_bytes());
+                base_info_str.push_str(info_str);
             }
         }
     }
@@ -397,28 +401,18 @@ fn process_tab_line_multiallelic(
         if let Some(val_str) = parts.get(col.index) {
             let val_str = val_str.trim();
             if !val_str.is_empty() && val_str != "." {
-                if pool.len() > info_start_ofs {
-                    pool.push(b';');
+                if !base_info_str.is_empty() {
+                    base_info_str.push(';');
                 }
 
-                pool.extend_from_slice(col.key.as_bytes());
-                pool.push(b'=');
-
-                let encoded = url_encode_info_value(val_str);
-                pool.extend_from_slice(encoded.as_bytes());
+                base_info_str.push_str(&col.key);
+                base_info_str.push('=');
+                base_info_str.push_str(val_str);
             }
         }
     }
 
-    if pool.len() == info_start_ofs {
-        pool.push(b'.');
-    }
-
-    pool.push(0);
-
-    let base_info_ofs = info_start_ofs;
-
-    for alt_single in &alt_alleles {
+    for (alt_idx, alt_single) in alt_alleles.iter().enumerate() {
         let key = make_position_key(chr_id, pos, rf, alt_single);
 
         if entries_map.contains_key(&key) {
@@ -434,6 +428,45 @@ fn process_tab_line_multiallelic(
 
         let alt_ofs = append_cstr(pool, alt_single);
 
+        if debug {
+            eprintln!(
+                "[ani-build-tab] Processing alt_idx={} alt_single={} num_alts={} base_info='{}'",
+                alt_idx,
+                alt_single,
+                alt_alleles.len(),
+                if base_info_str.len() > 50 {
+                    &base_info_str[..50]
+                } else {
+                    &base_info_str
+                }
+            );
+        }
+
+        let info_ofs = if !base_info_str.is_empty() && base_info_str != "." {
+            let final_info = if alt_alleles.len() > 1 {
+                if debug {
+                    eprintln!("[ani-build-tab] Calling split_info_for_allele");
+                }
+                split_info_for_allele(&base_info_str, alt_idx, alt_alleles.len())
+            } else {
+                base_info_str.clone()
+            };
+            if debug {
+                eprintln!(
+                    "[ani-build-tab] final_info='{}'",
+                    if final_info.len() > 50 {
+                        &final_info[..50]
+                    } else {
+                        &final_info
+                    }
+                );
+            }
+            let encoded = url_encode_info_value(&final_info);
+            append_cstr(pool, &encoded) as u32
+        } else {
+            append_cstr(pool, ".") as u32
+        };
+
         let entry = AniEntry {
             chr_id,
             pos,
@@ -442,7 +475,7 @@ fn process_tab_line_multiallelic(
             id_ofs: id_ofs as u32,
             qual_ofs: qual_ofs as u32,
             filter_ofs: filter_ofs as u32,
-            info_ofs: base_info_ofs as u32,
+            info_ofs,
             info_len: 0,
         };
 
@@ -451,6 +484,67 @@ fn process_tab_line_multiallelic(
     }
 
     Ok(alt_alleles.len())
+}
+
+fn split_info_for_allele(info: &str, alt_idx: usize, num_alts: usize) -> String {
+    let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
+    let mut result = Vec::new();
+
+    for field in info.split(';') {
+        if field.is_empty() {
+            continue;
+        }
+
+        if let Some(eq_pos) = field.find('=') {
+            let key = &field[..eq_pos];
+            let value = &field[eq_pos + 1..];
+
+            if value.contains(',') {
+                let values: Vec<&str> = value.split(',').collect();
+
+                if debug {
+                    eprintln!(
+                        "[split] key={} values.len={} num_alts={} alt_idx={} value={}",
+                        key,
+                        values.len(),
+                        num_alts,
+                        alt_idx,
+                        value
+                    );
+                }
+
+                if values.len() == num_alts {
+                    let selected = values[alt_idx];
+                    result.push(format!("{}={}", key, selected));
+                    if debug {
+                        eprintln!("[split] Number=A: selected={}", selected);
+                    }
+                } else if values.len() == num_alts + 1 {
+                    let ref_val = values[0];
+                    let alt_val = values[alt_idx + 1];
+                    result.push(format!("{}={},{}", key, ref_val, alt_val));
+                    if debug {
+                        eprintln!("[split] Number=R: ref={} alt={}", ref_val, alt_val);
+                    }
+                } else {
+                    result.push(field.to_string());
+                    if debug {
+                        eprintln!("[split] Unknown number, keeping as-is");
+                    }
+                }
+            } else {
+                result.push(field.to_string());
+            }
+        } else {
+            result.push(field.to_string());
+        }
+    }
+
+    if result.is_empty() {
+        ".".to_string()
+    } else {
+        result.join(";")
+    }
 }
 
 fn make_position_key(chr_id: u8, pos: u32, rf: &str, alt: &str) -> u64 {

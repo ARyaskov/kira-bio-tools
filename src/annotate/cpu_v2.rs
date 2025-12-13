@@ -19,10 +19,26 @@ use crate::util::{
 };
 use crate::vcf::VcfParser;
 
-pub fn annotate_vcf_ani_v2(db: &Path, input: &Path, output: &Path) -> Result<()> {
+pub fn annotate_vcf_ani_v2(
+    db: &Path,
+    input: &Path,
+    output: &Path,
+    columns: &[String],
+) -> Result<()> {
     let timing = std::env::var("KIRA_BT_TIMING").is_ok();
     let debug = std::env::var("KIRA_BT_DEBUG").is_ok() || timing;
     let start = Instant::now();
+
+    let field_order: Vec<String> = columns
+        .iter()
+        .filter_map(|c| {
+            if c.starts_with('+') {
+                Some(c[1..].to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
 
     let num_threads = rayon::current_num_threads() / 4;
     if debug {
@@ -94,11 +110,20 @@ pub fn annotate_vcf_ani_v2(db: &Path, input: &Path, output: &Path) -> Result<()>
 
     let ani_clone = std::sync::Arc::new(ani);
     let field_meta_clone = std::sync::Arc::new(field_meta);
+    let field_order_arc = std::sync::Arc::new(field_order);
     let ani_worker = ani_clone.clone();
     let field_meta_worker = field_meta_clone.clone();
+    let field_order_worker = field_order_arc.clone();
 
     let worker = thread::spawn(move || {
-        worker_thread(read_rx, work_tx, ani_worker, field_meta_worker, num_threads)
+        worker_thread(
+            read_rx,
+            work_tx,
+            ani_worker,
+            field_meta_worker,
+            field_order_worker,
+            num_threads,
+        )
     });
 
     let output_clone = output.to_path_buf();
@@ -356,6 +381,7 @@ fn worker_thread(
     tx: Sender<Vec<String>>,
     ani: std::sync::Arc<AniIndex>,
     field_meta: std::sync::Arc<HashMap<String, FieldNumber>>,
+    field_order: std::sync::Arc<Vec<String>>,
     num_threads: usize,
 ) -> Result<()> {
     use rayon::prelude::*;
@@ -369,7 +395,7 @@ fn worker_thread(
         let annotated: Vec<String> = pool.install(|| {
             batch
                 .par_iter()
-                .map(|line| annotate_line(line, &ani, &field_meta))
+                .map(|line| annotate_line(line, &ani, &field_meta, &field_order))
                 .collect()
         });
 
@@ -441,7 +467,12 @@ fn writer_thread(
     Ok(())
 }
 
-fn annotate_line(line: &str, ani: &AniIndex, field_meta: &HashMap<String, FieldNumber>) -> String {
+fn annotate_line(
+    line: &str,
+    ani: &AniIndex,
+    field_meta: &HashMap<String, FieldNumber>,
+    field_order: &[String],
+) -> String {
     let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
 
     if debug && field_meta.is_empty() {
@@ -472,25 +503,33 @@ fn annotate_line(line: &str, ani: &AniIndex, field_meta: &HashMap<String, FieldN
         info_map.insert(k.to_string(), v.to_string());
     }
 
-    for vcf_alt in &vcf_alt_alleles {
-        let vcf_alt_trimmed = vcf_alt.trim();
-        let bundle = match ani.lookup(rec.chrom, pos, rec.ref_allele.trim(), vcf_alt_trimmed) {
-            Some(b) => b,
-            None => continue,
-        };
+    let mut found_bundles: Vec<(usize, AnnotationBundle)> = Vec::new();
 
+    for (vcf_idx, vcf_alt) in vcf_alt_alleles.iter().enumerate() {
+        let vcf_alt_trimmed = vcf_alt.trim();
+        if let Some(bundle) = ani.lookup(rec.chrom, pos, rec.ref_allele.trim(), vcf_alt_trimmed) {
+            found_bundles.push((vcf_idx, bundle));
+        }
+    }
+
+    if found_bundles.is_empty() {
+        return line.to_string();
+    }
+
+    for (vcf_idx, bundle) in &found_bundles {
         if debug {
             eprintln!(
-                "[DEBUG] VCF ALTs: {:?}, DB ALTs: {:?}",
-                vcf_alt_alleles,
-                bundle.alt.split(',').collect::<Vec<_>>()
+                "[DEBUG] Bundle for vcf_idx={} VCF pos={} ALT={} DB ALT={} SA={:?}",
+                vcf_idx,
+                pos,
+                vcf_alt_alleles[*vcf_idx],
+                bundle.alt,
+                bundle
+                    .info
+                    .iter()
+                    .find(|f| f.key == "SA")
+                    .map(|f| &f.values)
             );
-        }
-
-        let allele_map = bundle.match_alleles(&vcf_alt_alleles);
-
-        if debug {
-            eprintln!("[DEBUG] Allele map: {:?}", allele_map);
         }
 
         if let Some(id) = &bundle.id {
@@ -506,106 +545,159 @@ fn annotate_line(line: &str, ani: &AniIndex, field_meta: &HashMap<String, FieldN
                 updated_filter = filt.clone();
             }
         }
+    }
 
+    let mut per_field_values: HashMap<String, Vec<Option<String>>> = HashMap::new();
+    let mut per_field_ref: HashMap<String, Option<String>> = HashMap::new();
+
+    for (vcf_idx, bundle) in &found_bundles {
         for field in &bundle.info {
             let key = &field.key;
 
             let Some(field_number) = field_meta.get(key.as_str()).copied() else {
                 if debug {
-                    eprintln!(
-                        "[DEBUG] No metadata for field {}, using fallback (values.len={})",
-                        key,
-                        field.values.len()
-                    );
-                }
-
-                if field.values.is_empty() {
-                    info_map.insert(key.clone(), String::new());
-                } else {
-                    info_map.insert(key.clone(), field.values.join(","));
+                    eprintln!("[DEBUG] No metadata for field {}, using fallback", key);
                 }
                 continue;
             };
 
-            if debug {
-                eprintln!(
-                    "[DEBUG] Processing field {} with Number={:?}, values.len={}, allele_map.len={}",
-                    key,
-                    field_number,
-                    field.values.len(),
-                    allele_map.len()
-                );
-            }
-
-            if field.values.is_empty() {
-                match field_number {
-                    FieldNumber::Zero => {
-                        info_map.insert(key.clone(), String::new());
-                    }
-                    FieldNumber::A => {
-                        let missing: Vec<String> =
-                            vcf_alt_alleles.iter().map(|_| ".".to_string()).collect();
-                        info_map.insert(key.clone(), missing.join(","));
-                    }
-                    FieldNumber::R => {
-                        let mut missing = vec![".".to_string()];
-                        for _ in &vcf_alt_alleles {
-                            missing.push(".".to_string());
-                        }
-                        info_map.insert(key.clone(), missing.join(","));
-                    }
-                    _ => {}
-                }
-                continue;
-            }
+            let entry = per_field_values
+                .entry(key.clone())
+                .or_insert_with(|| vec![None; vcf_alt_alleles.len()]);
 
             match field_number {
-                FieldNumber::Zero => {
-                    info_map.insert(key.clone(), String::new());
-                }
-
-                FieldNumber::One => {
-                    if !field.values.is_empty() {
-                        info_map.insert(key.clone(), field.values[0].clone());
+                FieldNumber::A => {
+                    if let Some(val) = field.values.get(0) {
+                        entry[*vcf_idx] = Some(val.clone());
                     }
                 }
-
-                FieldNumber::Many => {
-                    info_map.insert(key.clone(), field.values.join(","));
-                }
-
-                FieldNumber::A | FieldNumber::R => {
-                    let remapped = bundle.remap_field_values(&field, &allele_map);
-
-                    if info_map.contains_key(key.as_str()) {
-                        let existing_val = info_map.get(key.as_str()).unwrap();
-                        let existing_parts: Vec<&str> = existing_val.split(',').collect();
-                        let field_type = infer_field_type(key);
-                        let merged = merge_allele_values(
-                            &existing_parts,
-                            &remapped,
-                            field_number,
-                            field_type,
-                        );
-                        info_map.insert(key.clone(), merged.join(","));
-                    } else {
-                        info_map.insert(key.clone(), remapped.join(","));
+                FieldNumber::R => {
+                    if let Some(ref_val) = field.values.get(0) {
+                        if debug {
+                            eprintln!("[DEBUG] Storing REF for {}: {}", key, ref_val);
+                        }
+                        per_field_ref
+                            .entry(key.clone())
+                            .or_insert_with(|| Some(ref_val.clone()));
                     }
+                    entry[*vcf_idx] = field.values.get(1).cloned();
                 }
-
-                FieldNumber::G => {
-                    info_map.insert(key.clone(), field.values.join(","));
-                }
+                _ => {}
             }
         }
+    }
+
+    if debug {
+        eprintln!("[DEBUG] per_field_ref contents: {:?}", per_field_ref);
+    }
+
+    for (key, vcf_values) in per_field_values {
+        let field_number = field_meta.get(key.as_str()).copied().unwrap();
+
+        let default_val = ".".to_string();
+        let existing_val = info_map.get(key.as_str()).unwrap_or(&default_val);
+        let existing_parts: Vec<&str> = existing_val.split(',').collect();
+
+        let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
+        if debug && !existing_parts.is_empty() && existing_parts[0] != "." {
+            eprintln!(
+                "[DEBUG] Merging field {}: existing_parts={:?}, vcf_values.len={}",
+                key,
+                existing_parts,
+                vcf_values.len()
+            );
+        }
+
+        let final_values: Vec<String> = match field_number {
+            FieldNumber::A => vcf_values
+                .iter()
+                .enumerate()
+                .map(|(i, opt_val)| {
+                    let vcf_val = if i < existing_parts.len() {
+                        existing_parts[i]
+                    } else {
+                        "."
+                    };
+
+                    if vcf_val != "." && !vcf_val.is_empty() {
+                        vcf_val.to_string()
+                    } else if let Some(val) = opt_val {
+                        val.clone()
+                    } else {
+                        ".".to_string()
+                    }
+                })
+                .collect(),
+            FieldNumber::R => {
+                let mut result = vec![];
+
+                let ref_val = per_field_ref
+                    .get(&key)
+                    .and_then(|opt| opt.as_ref())
+                    .cloned()
+                    .or_else(|| {
+                        if !existing_parts.is_empty() && existing_parts[0] != "." {
+                            Some(existing_parts[0].to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| ".".to_string());
+                result.push(ref_val);
+
+                for (i, opt_val) in vcf_values.iter().enumerate() {
+                    let vcf_val = if i + 1 < existing_parts.len() {
+                        existing_parts[i + 1]
+                    } else {
+                        "."
+                    };
+
+                    if vcf_val != "." && !vcf_val.is_empty() {
+                        result.push(vcf_val.to_string());
+                    } else if let Some(val) = opt_val {
+                        result.push(val.clone());
+                    } else {
+                        result.push(".".to_string());
+                    }
+                }
+
+                result
+            }
+            _ => vcf_values.iter().filter_map(|v| v.clone()).collect(),
+        };
+
+        info_map.insert(key, final_values.join(","));
     }
 
     let info_str = if info_map.is_empty() {
         ".".to_string()
     } else {
-        let parts: Vec<String> = info_map
+        let mut ordered_keys: Vec<String> = Vec::new();
+        let mut unordered_keys: Vec<String> = Vec::new();
+
+        for key in info_map.keys() {
+            if field_order.contains(key) {
+                ordered_keys.push(key.clone());
+            } else {
+                unordered_keys.push(key.clone());
+            }
+        }
+
+        ordered_keys.sort_by_key(|k| {
+            field_order
+                .iter()
+                .position(|f| f == k)
+                .unwrap_or(usize::MAX)
+        });
+        unordered_keys.sort();
+
+        let mut all_keys = ordered_keys;
+        all_keys.extend(unordered_keys);
+
+        let parts: Vec<String> = all_keys
             .into_iter()
-            .filter_map(|(k, v)| {
+            .filter_map(|k| {
+                let v = info_map.get(&k)?;
                 if v.is_empty() {
                     Some(k)
                 } else {

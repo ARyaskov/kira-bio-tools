@@ -55,7 +55,13 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
         return Ok(());
     }
 
-    annotate::cpu_v2::annotate_vcf_ani_v2(&ani_path, &args.input, &out)?;
+    let columns: Vec<String> = if let Some(cols_str) = &args.columns {
+        cols_str.split(',').map(|s| s.to_string()).collect()
+    } else {
+        Vec::new()
+    };
+
+    annotate::cpu_v2::annotate_vcf_ani_v2(&ani_path, &args.input, &out, &columns)?;
     Ok(())
 }
 
