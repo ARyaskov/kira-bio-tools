@@ -184,6 +184,60 @@ impl AniIndex {
 
         Some(bundle)
     }
+
+    pub fn lookup_any_alt(&self, chr: &str, pos: u32, rf: &str) -> Option<AnnotationBundle> {
+        use crate::chr_name_to_id;
+
+        let chr_id = chr_name_to_id(chr)? as u8;
+
+        let mut found: Option<&AniEntry> = None;
+
+        for e in &self.entries {
+            if e.chr_id != chr_id || e.pos != pos {
+                continue;
+            }
+
+            let rf_str = read_cstring(&self.strings, e.ref_ofs as usize);
+            if rf_str != rf {
+                continue;
+            }
+
+            if found.is_some() {
+                return None;
+            }
+            found = Some(e);
+        }
+
+        let e = found?;
+
+        let alt_str = read_cstring(&self.strings, e.alt_ofs as usize);
+        let id_str = read_cstring(&self.strings, e.id_ofs as usize);
+        let qual_str = read_cstring(&self.strings, e.qual_ofs as usize);
+        let filter_str = read_cstring(&self.strings, e.filter_ofs as usize);
+        let info_str = read_cstring(&self.strings, e.info_ofs as usize);
+
+        let info_fields = parse_info_field(info_str);
+
+        Some(AnnotationBundle {
+            alt: alt_str.to_string(),
+            id: if id_str == "." || id_str.is_empty() {
+                None
+            } else {
+                Some(id_str.to_string())
+            },
+            qual: if qual_str == "." || qual_str.is_empty() {
+                None
+            } else {
+                Some(qual_str.to_string())
+            },
+            filter: if filter_str == "." || filter_str.is_empty() {
+                None
+            } else {
+                Some(filter_str.to_string())
+            },
+            info: info_fields,
+        })
+    }
 }
 
 pub fn read_cstring<'a>(data: &'a [u8], mut pos: usize) -> &'a str {

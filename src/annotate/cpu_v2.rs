@@ -5,11 +5,13 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
 use super::constants::*;
 use super::reader::{StreamingVcfReader, VcfAnnotationReader};
+use super::structs::annotate_mode::AnnotateMode;
 use super::structs::bundle::{parse_info_field, AnnotationBundle, FieldNumber};
 use super::structs::*;
 use crate::bgzf::BgzfWriter;
@@ -18,6 +20,59 @@ use crate::util::{
     url_decode_info_value, VcfFormat,
 };
 use crate::vcf::VcfParser;
+
+#[derive(Debug, Clone)]
+pub struct ColumnSpec {
+    pub key: String,
+    pub dst_key: String,
+    pub mode: AnnotateMode,
+}
+
+impl ColumnSpec {
+    pub fn parse(spec: &str) -> Self {
+        let (mode, rest) = AnnotateMode::parse(spec);
+
+        let (src_key, dst_key) = if rest.contains(":=") {
+            let parts: Vec<&str> = rest.splitn(2, ":=").collect();
+            if parts.len() == 2 {
+                let dst = parts[0].strip_prefix("INFO/").unwrap_or(parts[0]);
+                let src = parts[1].strip_prefix("INFO/").unwrap_or(parts[1]);
+                (src.to_string(), dst.to_string())
+            } else {
+                let key = rest.strip_prefix("INFO/").unwrap_or(rest).to_string();
+                (key.clone(), key)
+            }
+        } else {
+            let key = rest.strip_prefix("INFO/").unwrap_or(rest).to_string();
+            (key.clone(), key)
+        };
+
+        Self {
+            key: src_key,
+            dst_key,
+            mode,
+        }
+    }
+
+    pub fn parse_all(columns: &[String]) -> Vec<Self> {
+        columns
+            .iter()
+            .filter(|c| {
+                let upper = c.to_uppercase();
+                !upper.starts_with("CHROM")
+                    && !upper.starts_with("POS")
+                    && !upper.starts_with("REF")
+                    && !upper.starts_with("ALT")
+                    && !upper.starts_with("FROM")
+                    && !upper.starts_with("TO")
+                    && !upper.starts_with("BEG")
+                    && !upper.starts_with("END")
+                    && *c != "-"
+            })
+            .map(|c| Self::parse(c))
+            .collect()
+    }
+}
 
 pub fn annotate_vcf_ani_v2(
     db: &Path,
@@ -29,21 +84,21 @@ pub fn annotate_vcf_ani_v2(
     let debug = std::env::var("KIRA_BT_DEBUG").is_ok() || timing;
     let start = Instant::now();
 
-    let field_order: Vec<String> = columns
-        .iter()
-        .filter_map(|c| {
-            if c.starts_with('+') {
-                Some(c[1..].to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
+    let column_specs = ColumnSpec::parse_all(columns);
+
+    let field_order: Vec<String> = column_specs.iter().map(|c| c.dst_key.clone()).collect();
 
     let num_threads = rayon::current_num_threads() / 4;
     if debug {
         eprintln!("[annotate] Using {} CPU threads", num_threads);
         eprintln!("[annotate] Batch size: {} lines", BATCH_SIZE);
+        eprintln!(
+            "[annotate] Column specs: {:?}",
+            column_specs
+                .iter()
+                .map(|c| format!("{}{}", c.mode, c.key))
+                .collect::<Vec<_>>()
+        );
     }
 
     let load_start = Instant::now();
@@ -74,7 +129,7 @@ pub fn annotate_vcf_ani_v2(
                     .filter_map(|kv| kv.split('=').next().map(|k| k.to_string()))
                     .collect::<Vec<_>>()
             })
-            .collect::<std::collections::HashSet<_>>()
+            .collect::<HashSet<_>>()
             .into_iter()
             .collect();
 
@@ -108,12 +163,15 @@ pub fn annotate_vcf_ani_v2(
     let (read_tx, read_rx) = bounded::<Vec<String>>(CHANNEL_DEPTH);
     let (work_tx, work_rx) = bounded::<Vec<String>>(CHANNEL_DEPTH);
 
-    let ani_clone = std::sync::Arc::new(ani);
-    let field_meta_clone = std::sync::Arc::new(field_meta);
-    let field_order_arc = std::sync::Arc::new(field_order);
+    let ani_clone = Arc::new(ani);
+    let field_meta_clone = Arc::new(field_meta);
+    let field_order_arc = Arc::new(field_order);
+    let column_specs_arc = Arc::new(column_specs);
+
     let ani_worker = ani_clone.clone();
     let field_meta_worker = field_meta_clone.clone();
     let field_order_worker = field_order_arc.clone();
+    let column_specs_worker = column_specs_arc.clone();
 
     let worker = thread::spawn(move || {
         worker_thread(
@@ -122,6 +180,7 @@ pub fn annotate_vcf_ani_v2(
             ani_worker,
             field_meta_worker,
             field_order_worker,
+            column_specs_worker,
             num_threads,
         )
     });
@@ -140,10 +199,13 @@ pub fn annotate_vcf_ani_v2(
 
         if batch.len() >= BATCH_SIZE {
             total_lines += batch.len();
-            if let Err(_) = read_tx.send(std::mem::replace(
-                &mut batch,
-                Vec::with_capacity(BATCH_SIZE),
-            )) {
+            if read_tx
+                .send(std::mem::replace(
+                    &mut batch,
+                    Vec::with_capacity(BATCH_SIZE),
+                ))
+                .is_err()
+            {
                 break;
             }
 
@@ -272,7 +334,7 @@ fn infer_field_metadata_from_data(
 
                 candidates
                     .entry(field_name.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(number);
 
                 if debug && entry_idx < 3 {
@@ -291,7 +353,7 @@ fn infer_field_metadata_from_data(
     }
 
     let mut metadata = HashMap::new();
-    for (field_name, numbers) in candidates.into_iter() {
+    for (field_name, numbers) in candidates {
         let best = choose_best_number(&numbers);
 
         if debug {
@@ -316,51 +378,8 @@ fn infer_field_metadata_from_data(
     metadata
 }
 
-fn merge_allele_values(
-    existing: &[&str],
-    database: &[String],
-    number: FieldNumber,
-    field_type: &str,
-) -> Vec<String> {
-    let mut result = Vec::new();
-
-    let all_missing = existing.iter().all(|v| *v == "." || v.is_empty());
-
-    if field_type == "Integer" && !all_missing {
-        return database.to_vec();
-    }
-
-    match number {
-        FieldNumber::A => {
-            for i in 0..database.len() {
-                if let Some(&ex) = existing.get(i) {
-                    if ex == "." || ex.is_empty() {
-                        result.push(database[i].clone());
-                    } else {
-                        result.push(ex.to_string());
-                    }
-                } else {
-                    result.push(database[i].clone());
-                }
-            }
-        }
-        FieldNumber::R => {
-            for i in 0..database.len() {
-                if let Some(&ex) = existing.get(i) {
-                    if ex == "." || ex.is_empty() {
-                        result.push(database[i].clone());
-                    } else {
-                        result.push(ex.to_string());
-                    }
-                } else {
-                    result.push(database[i].clone());
-                }
-            }
-        }
-        _ => result = database.to_vec(),
-    }
-
-    result
+fn is_missing_value(val: &str) -> bool {
+    val.is_empty() || val == "."
 }
 
 fn infer_field_type(key: &str) -> &'static str {
@@ -379,9 +398,10 @@ fn infer_field_type(key: &str) -> &'static str {
 fn worker_thread(
     rx: Receiver<Vec<String>>,
     tx: Sender<Vec<String>>,
-    ani: std::sync::Arc<AniIndex>,
-    field_meta: std::sync::Arc<HashMap<String, FieldNumber>>,
-    field_order: std::sync::Arc<Vec<String>>,
+    ani: Arc<AniIndex>,
+    field_meta: Arc<HashMap<String, FieldNumber>>,
+    field_order: Arc<Vec<String>>,
+    column_specs: Arc<Vec<ColumnSpec>>,
     num_threads: usize,
 ) -> Result<()> {
     use rayon::prelude::*;
@@ -395,7 +415,7 @@ fn worker_thread(
         let annotated: Vec<String> = pool.install(|| {
             batch
                 .par_iter()
-                .map(|line| annotate_line(line, &ani, &field_meta, &field_order))
+                .map(|line| annotate_line(line, &ani, &field_meta, &field_order, &column_specs))
                 .collect()
         });
 
@@ -472,12 +492,9 @@ fn annotate_line(
     ani: &AniIndex,
     field_meta: &HashMap<String, FieldNumber>,
     field_order: &[String],
+    column_specs: &[ColumnSpec],
 ) -> String {
     let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
-
-    if debug && field_meta.is_empty() {
-        eprintln!("[DEBUG] WARNING: field_meta is EMPTY! No metadata loaded from headers!");
-    }
 
     let mut parser = VcfParser::new(line);
     let Some(rec) = parser.parse_standard_fields() else {
@@ -485,7 +502,6 @@ fn annotate_line(
     };
 
     let pos = rec.pos.parse::<u32>().unwrap_or(0);
-
     let vcf_alt_alleles: Vec<&str> = rec.alt.split(',').collect();
 
     let mut updated_id = rec.id.to_string();
@@ -499,7 +515,6 @@ fn annotate_line(
         let mut parts = kv.splitn(2, '=');
         let k = parts.next().unwrap();
         let v = parts.next().unwrap_or("");
-
         info_map.insert(k.to_string(), v.to_string());
     }
 
@@ -512,26 +527,20 @@ fn annotate_line(
         }
     }
 
-    if found_bundles.is_empty() {
+    let multiallelic_bundle: Option<AnnotationBundle> = if found_bundles.is_empty() {
+        ani.lookup_any_alt(rec.chrom, pos, rec.ref_allele.trim())
+    } else {
+        None
+    };
+
+    if found_bundles.is_empty() && multiallelic_bundle.is_none() {
         return line.to_string();
     }
 
-    for (vcf_idx, bundle) in &found_bundles {
-        if debug {
-            eprintln!(
-                "[DEBUG] Bundle for vcf_idx={} VCF pos={} ALT={} DB ALT={} SA={:?}",
-                vcf_idx,
-                pos,
-                vcf_alt_alleles[*vcf_idx],
-                bundle.alt,
-                bundle
-                    .info
-                    .iter()
-                    .find(|f| f.key == "SA")
-                    .map(|f| &f.values)
-            );
-        }
+    let column_spec_map: HashMap<&str, &ColumnSpec> =
+        column_specs.iter().map(|c| (c.key.as_str(), c)).collect();
 
+    for (_vcf_idx, bundle) in &found_bundles {
         if let Some(id) = &bundle.id {
             if updated_id == "." || updated_id.is_empty() {
                 updated_id = id.clone();
@@ -567,15 +576,12 @@ fn annotate_line(
 
             match field_number {
                 FieldNumber::A => {
-                    if let Some(val) = field.values.get(0) {
+                    if let Some(val) = field.values.first() {
                         entry[*vcf_idx] = Some(val.clone());
                     }
                 }
                 FieldNumber::R => {
-                    if let Some(ref_val) = field.values.get(0) {
-                        if debug {
-                            eprintln!("[DEBUG] Storing REF for {}: {}", key, ref_val);
-                        }
+                    if let Some(ref_val) = field.values.first() {
                         per_field_ref
                             .entry(key.clone())
                             .or_insert_with(|| Some(ref_val.clone()));
@@ -587,77 +593,283 @@ fn annotate_line(
         }
     }
 
-    if debug {
-        eprintln!("[DEBUG] per_field_ref contents: {:?}", per_field_ref);
+    if let Some(ref bundle) = multiallelic_bundle {
+        let db_alts: Vec<&str> = bundle.alt.split(',').collect();
+        let mut alt_to_db_idx: HashMap<&str, usize> = HashMap::new();
+        for (i, alt) in db_alts.iter().enumerate() {
+            alt_to_db_idx.insert(*alt, i);
+        }
+
+        if let Some(id) = &bundle.id {
+            if updated_id == "." || updated_id.is_empty() {
+                updated_id = id.clone();
+            }
+        }
+        if let Some(filt) = &bundle.filter {
+            if updated_filter == "." || updated_filter.is_empty() {
+                updated_filter = filt.clone();
+            }
+        }
+
+        for field in &bundle.info {
+            let key = &field.key;
+
+            let Some(field_number) = field_meta.get(key.as_str()).copied() else {
+                continue;
+            };
+
+            let entry = per_field_values
+                .entry(key.clone())
+                .or_insert_with(|| vec![None; vcf_alt_alleles.len()]);
+
+            match field_number {
+                FieldNumber::A => {
+                    for (vcf_idx, vcf_alt) in vcf_alt_alleles.iter().enumerate() {
+                        if let Some(&db_idx) = alt_to_db_idx.get(*vcf_alt) {
+                            if let Some(val) = field.values.get(db_idx) {
+                                entry[vcf_idx] = Some(val.clone());
+                            }
+                        }
+                    }
+                }
+                FieldNumber::R => {
+                    if let Some(ref_val) = field.values.first() {
+                        per_field_ref
+                            .entry(key.clone())
+                            .or_insert_with(|| Some(ref_val.clone()));
+                    }
+                    for (vcf_idx, vcf_alt) in vcf_alt_alleles.iter().enumerate() {
+                        if let Some(&db_idx) = alt_to_db_idx.get(*vcf_alt) {
+                            if let Some(val) = field.values.get(db_idx + 1) {
+                                entry[vcf_idx] = Some(val.clone());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     for (key, vcf_values) in per_field_values {
-        let field_number = field_meta.get(key.as_str()).copied().unwrap();
+        let field_number = match field_meta.get(key.as_str()).copied() {
+            Some(n) => n,
+            None => continue,
+        };
 
-        let default_val = ".".to_string();
-        let existing_val = info_map.get(key.as_str()).unwrap_or(&default_val);
-        let existing_parts: Vec<&str> = existing_val.split(',').collect();
+        let spec = column_spec_map.get(key.as_str()).copied();
+        let mode = spec
+            .map(|s| s.mode)
+            .unwrap_or_else(AnnotateMode::default_mode);
+        let dst_key = spec.map(|s| s.dst_key.as_str()).unwrap_or(&key);
 
-        let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
-        if debug && !existing_parts.is_empty() && existing_parts[0] != "." {
-            eprintln!(
-                "[DEBUG] Merging field {}: existing_parts={:?}, vcf_values.len={}",
-                key,
-                existing_parts,
-                vcf_values.len()
-            );
-        }
+        let vcf_has_field = info_map.contains_key(dst_key);
+        let existing_val = info_map.get(dst_key).map(|s| s.as_str()).unwrap_or("");
+        let existing_parts: Vec<&str> = if !existing_val.is_empty() && existing_val != "." {
+            existing_val.split(',').collect()
+        } else {
+            vec![]
+        };
+
+        let field_type = infer_field_type(&key);
+        let is_integer = field_type == "Integer";
 
         let final_values: Vec<String> = match field_number {
-            FieldNumber::A => vcf_values
-                .iter()
-                .enumerate()
-                .map(|(i, opt_val)| {
-                    let vcf_val = if i < existing_parts.len() {
-                        existing_parts[i]
-                    } else {
-                        "."
-                    };
-
-                    if vcf_val != "." && !vcf_val.is_empty() {
-                        vcf_val.to_string()
-                    } else if let Some(val) = opt_val {
-                        val.clone()
-                    } else {
-                        ".".to_string()
+            FieldNumber::A => {
+                if mode.replace_missing && is_integer {
+                    vcf_values
+                        .iter()
+                        .map(|opt| opt.clone().unwrap_or_else(|| ".".to_string()))
+                        .collect()
+                } else if mode.replace_missing {
+                    vcf_values
+                        .iter()
+                        .enumerate()
+                        .map(|(i, opt_val)| {
+                            let vcf_val = existing_parts.get(i).copied().unwrap_or(".");
+                            if !is_missing_value(vcf_val) {
+                                vcf_val.to_string()
+                            } else if let Some(val) = opt_val {
+                                if !is_missing_value(val) || mode.carry_over_missing {
+                                    val.clone()
+                                } else {
+                                    ".".to_string()
+                                }
+                            } else {
+                                ".".to_string()
+                            }
+                        })
+                        .collect()
+                } else if mode.should_append() && vcf_has_field {
+                    let mut result = existing_parts
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>();
+                    for (i, opt_val) in vcf_values.iter().enumerate() {
+                        if let Some(val) = opt_val {
+                            if !is_missing_value(val) {
+                                if i < result.len() {
+                                    if is_missing_value(&result[i]) {
+                                        result[i] = val.clone();
+                                    } else {
+                                        result[i] = format!("{},{}", result[i], val);
+                                    }
+                                } else {
+                                    result.push(val.clone());
+                                }
+                            }
+                        }
                     }
-                })
-                .collect(),
+                    result
+                } else if mode.replace_non_missing {
+                    if !vcf_has_field {
+                        continue;
+                    }
+                    vcf_values
+                        .iter()
+                        .enumerate()
+                        .map(|(i, opt_val)| {
+                            let vcf_val = existing_parts.get(i).copied().unwrap_or(".");
+                            if is_missing_value(vcf_val) {
+                                vcf_val.to_string()
+                            } else if let Some(val) = opt_val {
+                                if !is_missing_value(val) || mode.carry_over_missing {
+                                    val.clone()
+                                } else {
+                                    vcf_val.to_string()
+                                }
+                            } else {
+                                vcf_val.to_string()
+                            }
+                        })
+                        .collect()
+                } else {
+                    vcf_values
+                        .iter()
+                        .enumerate()
+                        .map(|(i, opt_val)| {
+                            if let Some(val) = opt_val {
+                                if !is_missing_value(val) || mode.carry_over_missing {
+                                    val.clone()
+                                } else {
+                                    existing_parts
+                                        .get(i)
+                                        .map(|s| s.to_string())
+                                        .unwrap_or_else(|| ".".to_string())
+                                }
+                            } else {
+                                existing_parts
+                                    .get(i)
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| ".".to_string())
+                            }
+                        })
+                        .collect()
+                }
+            }
             FieldNumber::R => {
                 let mut result = vec![];
 
-                let ref_val = per_field_ref
+                let db_ref_val = per_field_ref
                     .get(&key)
                     .and_then(|opt| opt.as_ref())
-                    .cloned()
-                    .or_else(|| {
-                        if !existing_parts.is_empty() && existing_parts[0] != "." {
-                            Some(existing_parts[0].to_string())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_else(|| ".".to_string());
+                    .cloned();
+                let vcf_ref_val = existing_parts.first().copied().unwrap_or(".");
+
+                let ref_val = if mode.replace_missing && is_integer {
+                    db_ref_val.unwrap_or_else(|| ".".to_string())
+                } else if mode.replace_missing {
+                    if !is_missing_value(vcf_ref_val) {
+                        vcf_ref_val.to_string()
+                    } else {
+                        db_ref_val.unwrap_or_else(|| ".".to_string())
+                    }
+                } else if mode.replace_non_missing {
+                    if is_missing_value(vcf_ref_val) {
+                        vcf_ref_val.to_string()
+                    } else {
+                        db_ref_val.unwrap_or_else(|| vcf_ref_val.to_string())
+                    }
+                } else {
+                    db_ref_val.unwrap_or_else(|| vcf_ref_val.to_string())
+                };
                 result.push(ref_val);
 
-                for (i, opt_val) in vcf_values.iter().enumerate() {
-                    let vcf_val = if i + 1 < existing_parts.len() {
-                        existing_parts[i + 1]
-                    } else {
-                        "."
-                    };
-
-                    if vcf_val != "." && !vcf_val.is_empty() {
-                        result.push(vcf_val.to_string());
-                    } else if let Some(val) = opt_val {
-                        result.push(val.clone());
-                    } else {
-                        result.push(".".to_string());
+                if mode.replace_missing && is_integer {
+                    for opt_val in vcf_values.iter() {
+                        result.push(opt_val.clone().unwrap_or_else(|| ".".to_string()));
+                    }
+                } else if mode.replace_missing {
+                    for (i, opt_val) in vcf_values.iter().enumerate() {
+                        let vcf_val = existing_parts.get(i + 1).copied().unwrap_or(".");
+                        if !is_missing_value(vcf_val) {
+                            result.push(vcf_val.to_string());
+                        } else if let Some(val) = opt_val {
+                            if !is_missing_value(val) || mode.carry_over_missing {
+                                result.push(val.clone());
+                            } else {
+                                result.push(".".to_string());
+                            }
+                        } else {
+                            result.push(".".to_string());
+                        }
+                    }
+                } else if mode.should_append() && vcf_has_field {
+                    for (i, opt_val) in vcf_values.iter().enumerate() {
+                        let existing = existing_parts.get(i + 1).copied().unwrap_or(".");
+                        if let Some(val) = opt_val {
+                            if !is_missing_value(val) {
+                                if is_missing_value(existing) {
+                                    result.push(val.clone());
+                                } else {
+                                    result.push(format!("{},{}", existing, val));
+                                }
+                            } else {
+                                result.push(existing.to_string());
+                            }
+                        } else {
+                            result.push(existing.to_string());
+                        }
+                    }
+                } else if mode.replace_non_missing {
+                    if !vcf_has_field {
+                        continue;
+                    }
+                    for (i, opt_val) in vcf_values.iter().enumerate() {
+                        let vcf_val = existing_parts.get(i + 1).copied().unwrap_or(".");
+                        if is_missing_value(vcf_val) {
+                            result.push(vcf_val.to_string());
+                        } else if let Some(val) = opt_val {
+                            if !is_missing_value(val) || mode.carry_over_missing {
+                                result.push(val.clone());
+                            } else {
+                                result.push(vcf_val.to_string());
+                            }
+                        } else {
+                            result.push(vcf_val.to_string());
+                        }
+                    }
+                } else {
+                    for (i, opt_val) in vcf_values.iter().enumerate() {
+                        if let Some(val) = opt_val {
+                            if !is_missing_value(val) || mode.carry_over_missing {
+                                result.push(val.clone());
+                            } else {
+                                result.push(
+                                    existing_parts
+                                        .get(i + 1)
+                                        .map(|s| s.to_string())
+                                        .unwrap_or_else(|| ".".to_string()),
+                                );
+                            }
+                        } else {
+                            result.push(
+                                existing_parts
+                                    .get(i + 1)
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| ".".to_string()),
+                            );
+                        }
                     }
                 }
 
@@ -666,7 +878,7 @@ fn annotate_line(
             _ => vcf_values.iter().filter_map(|v| v.clone()).collect(),
         };
 
-        info_map.insert(key, final_values.join(","));
+        info_map.insert(dst_key.to_string(), final_values.join(","));
     }
 
     let info_str = if info_map.is_empty() {

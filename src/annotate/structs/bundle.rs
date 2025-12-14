@@ -26,7 +26,7 @@ pub struct StructuredInfoField {
     pub values: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AnnotationBundle {
     pub alt: String,
     pub id: Option<String>,
@@ -41,7 +41,7 @@ impl AnnotationBundle {
 
         let mut db_map: HashMap<&str, Vec<usize>> = HashMap::new();
         for (idx, alt) in db_alts.iter().enumerate() {
-            db_map.entry(*alt).or_insert_with(Vec::new).push(idx);
+            db_map.entry(*alt).or_default().push(idx);
         }
 
         vcf_alt_alleles
