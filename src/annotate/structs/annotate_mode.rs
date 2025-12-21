@@ -74,37 +74,19 @@ impl AnnotateMode {
         }
 
         if self.set_or_append {
-            return true;
+            return !src_is_missing || self.carry_over_missing;
         }
 
         if self.replace_non_missing {
-            if !dst_exists {
-                return false;
-            }
-            if dst_is_missing {
-                return false;
-            }
-            if src_is_missing && !self.carry_over_missing {
-                return false;
-            }
-            return true;
+            return dst_exists && !dst_is_missing && (!src_is_missing || self.carry_over_missing);
         }
 
         if self.replace_missing {
-            if dst_exists && !dst_is_missing {
-                return false;
-            }
-            if src_is_missing && !self.carry_over_missing {
-                return false;
-            }
-            return true;
+            return (!dst_exists || dst_is_missing) && (!src_is_missing || self.carry_over_missing);
         }
 
         if self.replace_all {
-            if src_is_missing && !self.carry_over_missing {
-                return false;
-            }
-            return true;
+            return !src_is_missing || self.carry_over_missing;
         }
 
         false

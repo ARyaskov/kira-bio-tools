@@ -79,15 +79,11 @@ impl AnnotationBundle {
                 }
 
                 for opt_idx in allele_map {
-                    if let Some(idx) = opt_idx {
-                        if let Some(val) = field.values.get(idx + 1) {
-                            result.push(val.clone());
-                        } else {
-                            result.push(".".to_string());
-                        }
-                    } else {
-                        result.push(".".to_string());
-                    }
+                    let val = opt_idx
+                        .and_then(|idx| field.values.get(idx + 1))
+                        .cloned()
+                        .unwrap_or_else(|| ".".to_string());
+                    result.push(val);
                 }
 
                 result
@@ -97,30 +93,29 @@ impl AnnotationBundle {
     }
 }
 
-pub fn parse_info_field(info: &str) -> Vec<StructuredInfoField> {
-    use crate::util::url_decode_info_value;
-
-    let decoded_info = url_decode_info_value(info);
+pub fn parse_info_field(info_str: &str) -> Vec<StructuredInfoField> {
     let mut fields = Vec::new();
 
-    for kv in decoded_info.split(';') {
-        if kv.is_empty() || kv == "." {
-            continue;
-        }
+    if info_str == "." || info_str.is_empty() {
+        return fields;
+    }
 
-        if let Some(eq_pos) = kv.find('=') {
-            let key = &kv[..eq_pos];
-            let value_part = &kv[eq_pos + 1..];
+    // URL-decode the info string first
+    let decoded_info = url_decode_info_value(info_str);
 
-            let values: Vec<String> = value_part.split(',').map(|s| s.to_string()).collect();
+    for pair in decoded_info.split(';') {
+        if let Some(eq_pos) = pair.find('=') {
+            let key = &pair[..eq_pos];
+            let value = &pair[eq_pos + 1..];
+            let values: Vec<String> = value.split(',').map(|s| s.to_string()).collect();
+
+            let number = if values.len() == 1 {
+                FieldNumber::One
+            } else {
+                FieldNumber::Many
+            };
 
             let ty = infer_field_type(key);
-
-            let number = match values.len() {
-                0 => FieldNumber::Zero,
-                1 => FieldNumber::One,
-                _ => FieldNumber::Many,
-            };
 
             fields.push(StructuredInfoField {
                 key: key.to_string(),
@@ -130,7 +125,7 @@ pub fn parse_info_field(info: &str) -> Vec<StructuredInfoField> {
             });
         } else {
             fields.push(StructuredInfoField {
-                key: kv.to_string(),
+                key: pair.to_string(),
                 number: FieldNumber::Zero,
                 ty: FieldType::Flag,
                 values: vec![],
@@ -139,6 +134,66 @@ pub fn parse_info_field(info: &str) -> Vec<StructuredInfoField> {
     }
 
     fields
+}
+
+pub fn infer_structured_info_fields(
+    alt_alleles: &[&str],
+    info_str: &str,
+) -> Vec<StructuredInfoField> {
+    let mut fields = Vec::new();
+
+    if info_str == "." || info_str.is_empty() {
+        return fields;
+    }
+
+    // URL-decode the info string first
+    let decoded_info = url_decode_info_value(info_str);
+
+    for pair in decoded_info.split(';') {
+        if let Some(eq_pos) = pair.find('=') {
+            let key = &pair[..eq_pos];
+            let value = &pair[eq_pos + 1..];
+            let values: Vec<String> = value.split(',').map(|s| s.to_string()).collect();
+
+            let number = if values.len() == alt_alleles.len() {
+                FieldNumber::A
+            } else if values.len() == alt_alleles.len() + 1 {
+                FieldNumber::R
+            } else if values.len() == 1 {
+                FieldNumber::One
+            } else {
+                FieldNumber::Many
+            };
+
+            let ty = infer_field_type(key);
+
+            fields.push(StructuredInfoField {
+                key: key.to_string(),
+                number,
+                ty,
+                values,
+            });
+        } else {
+            fields.push(StructuredInfoField {
+                key: pair.to_string(),
+                number: FieldNumber::Zero,
+                ty: FieldType::Flag,
+                values: vec![],
+            });
+        }
+    }
+
+    fields
+}
+
+fn url_decode_info_value(encoded: &str) -> String {
+    encoded
+        .replace("%3D", "=")
+        .replace("%2C", ",")
+        .replace("%3B", ";")
+        .replace("%2F", "/")
+        .replace("%20", " ")
+        .replace("%25", "%")
 }
 
 fn infer_field_type(key: &str) -> FieldType {
