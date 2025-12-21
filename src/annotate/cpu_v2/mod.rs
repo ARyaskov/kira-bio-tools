@@ -40,7 +40,7 @@ pub fn annotate_vcf_ani_v2(
     let column_specs = ColumnSpec::parse_all(columns);
     let field_order: Vec<String> = column_specs.iter().map(|c| c.dst_key.clone()).collect();
 
-    let num_threads = rayon::current_num_threads() / 4;
+    let num_threads = rayon::current_num_threads() / 2;
     if debug {
         eprintln!("[annotate] Using {} CPU threads", num_threads);
         eprintln!("[annotate] Batch size: {} lines", BATCH_SIZE);
