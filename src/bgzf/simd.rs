@@ -149,6 +149,7 @@ pub fn compute_crc32(data: &[u8]) -> u32 {
         return unsafe { arm_simd::crc32_hw(0, data) };
     }
 
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "crc")))]
     crc32_fallback(0, data)
 }
 
@@ -166,6 +167,7 @@ pub unsafe fn fast_memcpy(dst: *mut u8, src: *const u8, len: usize) {
         return arm_simd::memcpy_neon(dst, src, len);
     }
 
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     std::ptr::copy_nonoverlapping(src, dst, len);
 }
 
@@ -183,5 +185,6 @@ pub unsafe fn fast_copy_bgzf_header(dst: *mut u8) {
         return arm_simd::copy_bgzf_header(dst);
     }
 
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     std::ptr::copy_nonoverlapping(BGZF_HEADER.as_ptr(), dst, 18);
 }

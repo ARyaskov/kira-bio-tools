@@ -91,14 +91,6 @@ pub unsafe fn parse_vcf_fields_neon(line: &[u8]) -> Option<VcfFields<'_>> {
     let line_str = std::str::from_utf8_unchecked(line);
     let line_len = line.len();
 
-    let info_end = tabs.get(7).copied().unwrap_or(line_len);
-    let info_start = tabs[6] + 1;
-    let info = if info_start < info_end {
-        &line_str[info_start..info_end]
-    } else {
-        ""
-    };
-
     let info_start = tabs[6] + 1;
     let info_end = if n >= 8 { tabs[7] } else { line_str.len() };
 

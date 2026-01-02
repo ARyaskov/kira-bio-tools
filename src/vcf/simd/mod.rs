@@ -8,20 +8,13 @@ pub mod arm_neon;
 
 pub mod fallback;
 
+#[cfg(target_arch = "x86_64")]
 static SIMD_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 #[inline(always)]
+#[cfg(target_arch = "x86_64")]
 fn is_simd_available() -> bool {
-    *SIMD_AVAILABLE.get_or_init(|| {
-        #[cfg(target_arch = "x86_64")]
-        {
-            is_x86_feature_detected!("avx2")
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            true
-        }
-    })
+    *SIMD_AVAILABLE.get_or_init(|| is_x86_feature_detected!("avx2"))
 }
 
 pub struct SimdVcfParser;
@@ -41,6 +34,7 @@ impl SimdVcfParser {
             return unsafe { arm_neon::parse_vcf_line_simd(line) };
         }
 
+        #[cfg(not(target_arch = "aarch64"))]
         fallback::parse_vcf_line_scalar(line)
     }
 
@@ -58,6 +52,7 @@ impl SimdVcfParser {
             return unsafe { arm_neon::parse_vcf_fields_neon(line) };
         }
 
+        #[cfg(not(target_arch = "aarch64"))]
         fallback::parse_vcf_fields_scalar(line)
     }
 
@@ -75,6 +70,7 @@ impl SimdVcfParser {
             return unsafe { arm_neon::parse_chr_pos_neon(line) };
         }
 
+        #[cfg(not(target_arch = "aarch64"))]
         fallback::parse_chr_pos_scalar(line)
     }
 }
@@ -93,5 +89,6 @@ pub fn parse_u32_bytes(bytes: &[u8]) -> Option<u32> {
         return Some(unsafe { arm_neon::parse_u32_fast(bytes.as_ptr(), bytes.len()) });
     }
 
+    #[cfg(not(target_arch = "aarch64"))]
     fallback::parse_u32_scalar(bytes)
 }
