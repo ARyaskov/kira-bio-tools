@@ -1,4 +1,3 @@
-use crate::util::chr_name_to_id;
 use crate::vcf::structs::{VcfFields, VcfFieldsFull};
 
 const MAX_TABS: usize = 138;
@@ -24,7 +23,8 @@ pub fn parse_vcf_line_scalar(line: &[u8]) -> Option<VcfFieldsFull<'_>> {
     let alt = &line_str[tabs[3] + 1..tabs[4]];
     let qual = &line_str[tabs[4] + 1..tabs[5]];
     let filter = &line_str[tabs[5] + 1..tabs[6]];
-    let info = &line_str[tabs[6] + 1..tabs.get(7).copied().unwrap_or(line.len())];
+    let info_end = if found >= 8 { tabs[7] } else { line_str.len() };
+    let info = &line_str[tabs[6] + 1..info_end];
 
     let (format, samples) = if found >= 8 {
         let format_field = &line_str[tabs[7] + 1..tabs.get(8).copied().unwrap_or(line.len())];

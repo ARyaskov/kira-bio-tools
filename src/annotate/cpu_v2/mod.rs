@@ -77,7 +77,9 @@ pub fn annotate_vcf_ani_v2(
     }
 
     let input_format = detect_format(input)?;
-    let use_bgzf = matches!(input_format, VcfFormat::Bgzf);
+    let output_ext = output.extension().and_then(|s| s.to_str()).unwrap_or("");
+    let output_wants_bgzf = matches!(output_ext, "gz" | "bgz" | "bgzf");
+    let use_bgzf = matches!(input_format, VcfFormat::Bgzf) || output_wants_bgzf;
     if debug {
         eprintln!(
             "[annotate] Input: {:?}, Output BGZF: {}",
@@ -184,7 +186,7 @@ fn read_batches(
     Ok(())
 }
 
-fn merge_annotation_headers(
+pub(crate) fn merge_annotation_headers(
     vcf_headers: &[String],
     ani_headers: &[String],
     column_specs: &[ColumnSpec],
@@ -292,7 +294,7 @@ fn merge_annotation_headers(
     Ok(merged)
 }
 
-fn expand_column_specs(
+pub(crate) fn expand_column_specs(
     column_specs: &[ColumnSpec],
     ani_headers: &[String],
     field_meta: &std::collections::HashMap<String, FieldNumber>,
@@ -350,7 +352,7 @@ fn extract_header_id(line: &str) -> Option<String> {
     crate::util::extract_info_key(line)
 }
 
-fn extract_samples_from_headers(headers: &[String]) -> Vec<String> {
+pub(crate) fn extract_samples_from_headers(headers: &[String]) -> Vec<String> {
     for h in headers {
         if h.starts_with("#CHROM") {
             let parts: Vec<&str> = h.trim().split('\t').collect();
@@ -363,7 +365,10 @@ fn extract_samples_from_headers(headers: &[String]) -> Vec<String> {
     Vec::new()
 }
 
-fn build_sample_map(input_samples: &[String], db_samples: &[String]) -> Vec<Option<usize>> {
+pub(crate) fn build_sample_map(
+    input_samples: &[String],
+    db_samples: &[String],
+) -> Vec<Option<usize>> {
     let mut map = Vec::with_capacity(input_samples.len());
     let mut db_index = std::collections::HashMap::new();
     for (i, name) in db_samples.iter().enumerate() {

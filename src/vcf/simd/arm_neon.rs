@@ -30,7 +30,7 @@ pub unsafe fn parse_vcf_line_simd(line: &[u8]) -> Option<VcfFieldsFull<'_>> {
     let qual = &line_str[tabs[4] + 1..tabs[5]];
     let filter = &line_str[tabs[5] + 1..tabs[6]];
 
-    let info_end = tabs.get(7).copied().unwrap_or(line_len);
+    let info_end = if found >= 8 { tabs[7] } else { line_len };
     let info_start = tabs[6] + 1;
     let info = if info_start < info_end {
         &line_str[info_start..info_end]

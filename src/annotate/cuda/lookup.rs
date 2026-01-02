@@ -39,7 +39,7 @@ impl GpuAni {
             d_entries,
             m: ani.mph.m,
             n_entries: ani.entries.len(),
-            string_block: ani.strings.clone(),
+            string_block: ani.strings_owned(),
         })
     }
 

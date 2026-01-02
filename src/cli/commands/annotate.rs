@@ -46,20 +46,20 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
         return Ok(());
     }
 
-    #[cfg(feature = "opencl")]
-    if args.opencl {
-        eprintln!("[annotate] Using OpenCL backend…");
-        let ani = annotate::AniIndex::open(&ani_path)?;
-        let gpu = annotate::opencl::OpenCLv2::new(&ani, 200_000)?;
-        annotate::opencl::annotate_vcf_opencl_v2(&gpu, &ani, &args.input, &out)?;
-        return Ok(());
-    }
-
     let columns: Vec<String> = if let Some(cols_str) = &args.columns {
         cols_str.split(',').map(|s| s.to_string()).collect()
     } else {
         Vec::new()
     };
+
+    #[cfg(feature = "opencl")]
+    if args.opencl {
+        eprintln!("[annotate] Using OpenCL backend…");
+        let ani = annotate::AniIndex::open(&ani_path)?;
+        let gpu = annotate::opencl::OpenCLv2::new(&ani, 200_000)?;
+        annotate::opencl::annotate_vcf_opencl_v2(&gpu, &ani, &args.input, &out, &columns)?;
+        return Ok(());
+    }
 
     annotate::cpu_v2::annotate_vcf_ani_v2(&ani_path, &args.input, &out, &columns)?;
     Ok(())

@@ -23,7 +23,7 @@ pub fn load_and_infer_metadata(
             .iter()
             .take(10)
             .flat_map(|e| {
-                let info_str = read_cstring(&ani.strings, e.info_ofs as usize);
+                let info_str = read_cstring(ani.strings_slice(), e.info_ofs as usize);
                 let decoded = url_decode_info_value(info_str);
                 decoded
                     .split(';')
@@ -85,7 +85,7 @@ pub fn iter_ani_header_lines(ani: &AniIndex) -> Vec<String> {
     let mut headers = Vec::new();
     let mut saw_header = false;
     let mut idx = 0usize;
-    let bytes = &ani.strings;
+    let bytes = ani.strings_slice();
 
     while idx < bytes.len() {
         let end = match bytes[idx..].iter().position(|&b| b == 0) {
@@ -131,7 +131,7 @@ fn infer_field_metadata_from_data(
     let mut candidates: HashMap<String, Vec<FieldNumber>> = HashMap::new();
 
     for e in ani.entries.iter().take(1000) {
-        let info = read_cstring(&ani.strings, e.info_ofs as usize);
+        let info = read_cstring(ani.strings_slice(), e.info_ofs as usize);
         let decoded = url_decode_info_value(info);
 
         for kv in decoded.split(';') {

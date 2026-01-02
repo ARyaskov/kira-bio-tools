@@ -86,3 +86,4 @@ Drop-in compatible alternative to bcftools with strict Tabix compatibility.
 ## Reference
 - bcftools annotate implementation: vcfannotate.c
 - Official bcftools behavior is the ground truth
+- there are sources for bcftools and htslib in bcftools-sources/ and htslib-sources/ dirs 

@@ -43,7 +43,7 @@ pub unsafe fn parse_vcf_line_simd(line: &[u8]) -> Option<VcfFieldsFull<'_>> {
 
     // INFO: may be empty
     let info_start = tabs[6] + 1;
-    let info_end = tabs.get(7).copied().unwrap_or(line_str.len());
+    let info_end = if found >= 8 { tabs[7] } else { line_str.len() };
     let info = slice(line_str, info_start, info_end);
 
     // FORMAT + samples
@@ -104,7 +104,7 @@ pub unsafe fn parse_vcf_fields_avx2(line: &[u8]) -> Option<VcfFields<'_>> {
     }
 
     let info_start = tabs[6] + 1;
-    let info_end = tabs.get(7).copied().unwrap_or(line_str.len());
+    let info_end = if found >= 8 { tabs[7] } else { line_str.len() };
 
     Some(VcfFields {
         chrom: slice(line_str, 0, tabs[0]),

@@ -7,11 +7,32 @@ use std::path::Path;
 
 use super::header::{AniEntry, AniEntryV2, AniHeader, ANI_STR_NONE};
 
+pub enum StringStorage {
+    Owned(Vec<u8>),
+    Mmap { offset: usize, len: usize },
+}
+
+impl StringStorage {
+    pub fn as_slice<'a>(&'a self, mmap: &'a Mmap) -> &'a [u8] {
+        match self {
+            StringStorage::Owned(v) => v.as_slice(),
+            StringStorage::Mmap { offset, len } => &mmap[*offset..(*offset + *len)],
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            StringStorage::Owned(v) => v.len(),
+            StringStorage::Mmap { len, .. } => *len,
+        }
+    }
+}
+
 pub struct AniIndex {
     pub header: AniHeader,
     pub mph: Mphf,
     pub entries: Vec<AniEntry>,
-    pub strings: Vec<u8>,
+    pub strings: StringStorage,
     pub mmap: Mmap,
 }
 
@@ -38,6 +59,14 @@ impl AniIndex {
             strings,
             mmap,
         })
+    }
+
+    pub fn strings_slice(&self) -> &[u8] {
+        self.strings.as_slice(&self.mmap)
+    }
+
+    pub fn strings_owned(&self) -> Vec<u8> {
+        self.strings_slice().to_vec()
     }
 }
 
@@ -105,7 +134,11 @@ fn load_entries_v3(mmap: &Mmap, ent_start: usize, n_entries: usize) -> Result<Ve
     Ok(entries)
 }
 
-fn load_strings(mmap: &Mmap, header: &AniHeader) -> Vec<u8> {
+fn load_strings(mmap: &Mmap, header: &AniHeader) -> StringStorage {
     let str_start = header.off_strings as usize;
-    mmap[str_start..].to_vec()
+    let len = mmap.len().saturating_sub(str_start);
+    StringStorage::Mmap {
+        offset: str_start,
+        len,
+    }
 }

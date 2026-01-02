@@ -23,7 +23,7 @@ pub struct BgzfWriter {
 
 impl BgzfWriter {
     pub fn create<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        Self::with_compression(path, Compression::new(3))
+        Self::with_compression(path, Compression::new(9))
     }
 
     pub fn with_compression<P: AsRef<Path>>(path: P, compression: Compression) -> io::Result<Self> {
@@ -159,13 +159,13 @@ impl BgzfWriter {
             fast_copy_bgzf_header(block.as_mut_ptr());
         }
 
-        let bound = compressor.gzip_compress_bound(data.len());
+        let bound = compressor.deflate_compress_bound(data.len());
         if scratch_buf.len() < bound {
             scratch_buf.resize(bound, 0);
         }
 
         let comp_len = compressor
-            .gzip_compress(data, scratch_buf)
+            .deflate_compress(data, scratch_buf)
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "Compression failed"))?;
 
         unsafe {

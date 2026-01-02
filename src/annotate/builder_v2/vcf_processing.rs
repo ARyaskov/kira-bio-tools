@@ -5,16 +5,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::entry_processing::{insert_or_update_entry, make_position_key, parse_chrom_and_pos};
 use super::multiallelic::split_info_for_allele;
+use crate::annotate::builder_v2::StringPool;
 use crate::annotate::structs::ani::AniEntry;
 use crate::annotate::structs::ani::ANI_STR_NONE;
 use crate::annotate::structs::bundle::FieldNumber;
-use crate::util::{append_cstr, url_encode_info_value};
+use crate::util::url_encode_info_value;
 use crate::vcf::simd::SimdVcfParser;
 
 pub fn process_vcf_line_multiallelic_simd(
     line: &[u8],
     entries_map: &mut FxHashMap<u64, (AniEntry, usize)>,
-    pool: &mut Vec<u8>,
+    pool: &mut StringPool,
     insertion_order: &mut usize,
     duplicates_skipped: &AtomicUsize,
     multiallelic_count: &AtomicUsize,
@@ -37,10 +38,10 @@ pub fn process_vcf_line_multiallelic_simd(
         multiallelic_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    let ref_ofs = append_cstr(pool, parsed.ref_allele.trim());
-    let id_ofs = append_cstr(pool, parsed.id);
-    let qual_ofs = append_cstr(pool, parsed.qual);
-    let filter_ofs = append_cstr(pool, parsed.filter);
+    let ref_ofs = pool.append_cstr(parsed.ref_allele.trim());
+    let id_ofs = pool.append_cstr(parsed.id);
+    let qual_ofs = pool.append_cstr(parsed.qual);
+    let filter_ofs = pool.append_cstr(parsed.filter);
 
     let mut samples = parsed.samples.clone();
     if expected_sample_count > 0
@@ -60,11 +61,11 @@ pub fn process_vcf_line_multiallelic_simd(
         (ANI_STR_NONE, ANI_STR_NONE)
     } else {
         let fmt_ofs = match parsed.format {
-            Some(fmt) if fmt != "." => append_cstr(pool, fmt) as u32,
+            Some(fmt) if fmt != "." => pool.append_cstr(fmt) as u32,
             _ => ANI_STR_NONE,
         };
         let joined = samples.join("\t");
-        let samp_ofs = append_cstr(pool, &joined) as u32;
+        let samp_ofs = pool.append_cstr(&joined) as u32;
         (fmt_ofs, samp_ofs)
     };
 
@@ -72,7 +73,7 @@ pub fn process_vcf_line_multiallelic_simd(
         let alt_single = alt_single.trim();
         let key = make_position_key(chr_id, pos, parsed.ref_allele.trim(), alt_single);
 
-        let alt_ofs = append_cstr(pool, alt_single);
+        let alt_ofs = pool.append_cstr(alt_single);
 
         let info_ofs = if !parsed.info.is_empty() && parsed.info != "." {
             let final_info = if alt_alleles.len() > 1 {
@@ -81,9 +82,9 @@ pub fn process_vcf_line_multiallelic_simd(
                 parsed.info.to_string()
             };
             let encoded = url_encode_info_value(&final_info);
-            append_cstr(pool, &encoded) as u32
+            pool.append_cstr(&encoded) as u32
         } else {
-            append_cstr(pool, ".") as u32
+            pool.append_cstr(".") as u32
         };
 
         let entry = AniEntry {
@@ -120,11 +121,13 @@ pub fn process_vcf_line_multiallelic_simd(
 #[cfg(test)]
 mod tests {
     use super::process_vcf_line_multiallelic_simd;
+    use crate::annotate::builder_v2::StringPool;
     use crate::annotate::structs::ani::ANI_STR_NONE;
     use crate::annotate::structs::bundle::FieldNumber;
     use crate::util::read_cstring;
     use fxhash::FxHashMap;
     use std::collections::HashMap;
+    use std::io::{Read, Seek, SeekFrom};
     use std::sync::atomic::AtomicUsize;
 
     #[test]
@@ -132,7 +135,7 @@ mod tests {
         let line = b"1\t3000002\tid\tC\tT\t99\tq99\tFLAG;IINT=88,99;IFLT=8.8,9.9;ISTR=888,999\tGT:FINT:FFLT:FSTR\t1|1:88,99:8.8,9.9:888,999\t0|1:77:7.7:77";
         let mut entries_map: FxHashMap<u64, (crate::annotate::structs::ani::AniEntry, usize)> =
             FxHashMap::default();
-        let mut pool = Vec::<u8>::new();
+        let mut pool = StringPool::new();
         let mut insertion_order = 0usize;
         let duplicates_skipped = AtomicUsize::new(0);
         let multiallelic_count = AtomicUsize::new(0);
@@ -154,7 +157,12 @@ mod tests {
         assert_eq!(processed, 1);
         let entry = entries_map.values().next().unwrap().0;
         assert_ne!(entry.samples_ofs, ANI_STR_NONE);
-        let samples = read_cstring(&pool, entry.samples_ofs as usize);
+        let mut pool_bytes = Vec::new();
+        let mut file = tempfile::tempfile().unwrap();
+        pool.write_to(&mut file).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.read_to_end(&mut pool_bytes).unwrap();
+        let samples = read_cstring(&pool_bytes, entry.samples_ofs as usize);
         assert_eq!(samples, "1|1:88,99:8.8,9.9:888,999\t0|1:77:7.7:77");
     }
 }

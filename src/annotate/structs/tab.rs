@@ -6,7 +6,7 @@ use std::path::Path;
 
 use super::annotate_mode::AnnotateMode;
 use super::bundle::FieldNumber;
-use crate::util::{choose_best_number, extract_info_key, extract_info_number};
+use crate::util::{extract_info_key, extract_info_number};
 
 #[derive(Debug, Clone)]
 pub struct TabColumn {

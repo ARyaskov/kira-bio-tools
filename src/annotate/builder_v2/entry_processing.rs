@@ -5,11 +5,11 @@ use crate::annotate::structs::ani::AniEntry;
 use crate::util::chr_name_to_id;
 
 pub fn make_position_key(chr_id: u8, pos: u32, ref_allele: &str, alt: &str) -> u64 {
-    use fxhash::hash64;
+    use crate::util::fast_hash64;
 
     let mut h = (chr_id as u64) << 32 | (pos as u64);
-    h ^= hash64(ref_allele.as_bytes());
-    h ^= hash64(alt.as_bytes());
+    h ^= fast_hash64(ref_allele.as_bytes());
+    h ^= fast_hash64(alt.as_bytes());
     h
 }
 

@@ -4,15 +4,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::entry_processing::{insert_or_update_entry, make_position_key};
 use super::multiallelic::split_info_for_allele;
+use crate::annotate::builder_v2::StringPool;
 use crate::annotate::structs::ani::{AniEntry, ANI_STR_NONE};
 use crate::annotate::structs::tab::TabSchema;
-use crate::util::{append_cstr, chr_name_to_id, url_encode_info_value};
+use crate::util::{chr_name_to_id, url_encode_info_value};
 
 pub fn process_tab_line_multiallelic(
     line: &str,
     schema: &TabSchema,
     entries_map: &mut FxHashMap<u64, (AniEntry, usize)>,
-    pool: &mut Vec<u8>,
+    pool: &mut StringPool,
     insertion_order: &mut usize,
     duplicates_skipped: &AtomicUsize,
     multiallelic_count: &AtomicUsize,
@@ -75,10 +76,10 @@ pub fn process_tab_line_multiallelic(
         .filter(|s| !s.is_empty() && *s != ".")
         .unwrap_or(".");
 
-    let ref_ofs = append_cstr(pool, rf);
-    let id_ofs = append_cstr(pool, id);
-    let qual_ofs = append_cstr(pool, qual);
-    let filter_ofs = append_cstr(pool, filt);
+    let ref_ofs = pool.append_cstr(rf);
+    let id_ofs = pool.append_cstr(id);
+    let qual_ofs = pool.append_cstr(qual);
+    let filter_ofs = pool.append_cstr(filt);
 
     let mut base_info_str = String::new();
 
@@ -116,7 +117,7 @@ pub fn process_tab_line_multiallelic(
             );
         }
 
-        let alt_ofs = append_cstr(pool, alt_single);
+        let alt_ofs = pool.append_cstr(alt_single);
 
         let info_ofs = if !base_info_str.is_empty() && base_info_str != "." {
             let final_info = if alt_alleles.len() > 1 {
@@ -141,9 +142,9 @@ pub fn process_tab_line_multiallelic(
                 );
             }
             let encoded = url_encode_info_value(&final_info);
-            append_cstr(pool, &encoded) as u32
+            pool.append_cstr(&encoded) as u32
         } else {
-            append_cstr(pool, ".") as u32
+            pool.append_cstr(".") as u32
         };
 
         let entry = AniEntry {

@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
 use crate::annotate::cpu_v2::field_metadata::is_missing_value;
-use crate::annotate::cpu_v2::vcf_parsing::{parse_vcf_record, ParsedVcfRecord};
+use crate::annotate::cpu_v2::vcf_parsing::{parse_vcf_record_simd, ParsedVcfRecord};
 use crate::annotate::structs::ani::AniIndex;
 use crate::annotate::structs::annotate_mode::AnnotateMode;
 use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber};
+use crate::util::{chr_name_to_id, fast_hash64};
 
 pub fn annotate_line(
     line: &str,
@@ -17,8 +18,23 @@ pub fn annotate_line(
 ) -> String {
     let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
 
-    let Some(parsed) = parse_vcf_record(line) else {
+    let want_format = format_overwrite_all
+        || column_modes
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("FMT") || k.eq_ignore_ascii_case("FORMAT"));
+
+    let Some(parsed) = parse_vcf_record_simd(line, want_format) else {
         return line.to_string();
+    };
+
+    let raw_samples = if want_format && sample_map.iter().any(|v| v.is_none()) {
+        let mut fields = line.split('\t');
+        for _ in 0..9 {
+            let _ = fields.next();
+        }
+        Some(fields.collect::<Vec<&str>>())
+    } else {
+        None
     };
 
     let chrom = &parsed.chrom;
@@ -33,9 +49,15 @@ pub fn annotate_line(
         );
     }
 
-    let mut bundles = Vec::new();
+    let chr_id = match chr_name_to_id(chrom) {
+        Some(id) => id,
+        None => return line.to_string(),
+    };
+    let ref_hash = fast_hash64(ref_allele.as_bytes());
+
+    let mut bundles = Vec::with_capacity(alt_alleles.len());
     for (vcf_idx, alt) in alt_alleles.iter().enumerate() {
-        if let Some(bundle) = ani.lookup_exact(chrom, pos, ref_allele, alt) {
+        if let Some(bundle) = ani.lookup_exact_by_chr_id(chr_id, pos, ref_allele, ref_hash, alt) {
             if debug {
                 eprintln!(
                     "[ANNOTATE] Found bundle for ALT {}: INFO fields={}",
@@ -47,12 +69,18 @@ pub fn annotate_line(
         }
     }
 
-    annotate_record(
+    if bundles.is_empty() {
+        return line.to_string();
+    }
+
+    annotate_record_with_alts(
         &parsed,
+        &alt_alleles,
         &bundles,
         field_meta,
         column_modes,
         sample_map,
+        raw_samples.as_deref(),
         info_overwrite_all,
         format_overwrite_all,
         debug,
@@ -69,19 +97,44 @@ fn annotate_record(
     format_overwrite_all: bool,
     debug: bool,
 ) -> String {
+    let alt_alleles: Vec<&str> = parsed.alt.split(',').collect();
+    annotate_record_with_alts(
+        parsed,
+        &alt_alleles,
+        bundles,
+        field_meta,
+        column_modes,
+        sample_map,
+        None,
+        info_overwrite_all,
+        format_overwrite_all,
+        debug,
+    )
+}
+
+fn annotate_record_with_alts(
+    parsed: &ParsedVcfRecord,
+    alt_alleles: &[&str],
+    bundles: &[(usize, AnnotationBundle)],
+    field_meta: &HashMap<String, FieldNumber>,
+    column_modes: &[(String, AnnotateMode)],
+    sample_map: &[Option<usize>],
+    raw_samples: Option<&[&str]>,
+    info_overwrite_all: bool,
+    format_overwrite_all: bool,
+    debug: bool,
+) -> String {
     use crate::annotate::cpu_v2::merge_info::merge_info_fields;
 
     let mut new_id = parsed.id.clone();
     let mut new_qual = parsed.qual.clone();
     let mut new_filter = parsed.filter.clone();
-    let mut new_format: Option<String> = parsed.format.as_ref().map(|f| f.keys.join(":"));
+    let mut new_format: Option<String> = parsed.format.as_ref().map(|f| join_keys(&f.keys));
     let mut new_samples: Vec<String> = parsed
         .samples
         .iter()
         .map(|s| normalize_sample_values(&s.raw))
         .collect();
-
-    let alt_alleles: Vec<&str> = parsed.alt.split(',').collect();
 
     let base_info = if info_overwrite_all && !bundles.is_empty() {
         "."
@@ -101,17 +154,28 @@ fn annotate_record(
     let new_info = if info_map.is_empty() {
         ".".to_string()
     } else {
-        info_map
-            .iter()
-            .map(|(k, v)| {
-                if v.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{}={}", k, v)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(";")
+        let mut len = 0usize;
+        for (k, v) in info_map.iter() {
+            len += k.len();
+            if !v.is_empty() {
+                len += 1 + v.len();
+            }
+        }
+        len += info_map.len().saturating_sub(1);
+        let mut out = String::with_capacity(len);
+        for (i, (k, v)) in info_map.iter().enumerate() {
+            if i > 0 {
+                out.push(';');
+            }
+            if v.is_empty() {
+                out.push_str(k);
+            } else {
+                out.push_str(k);
+                out.push('=');
+                out.push_str(v);
+            }
+        }
+        out
     };
 
     if !bundles.is_empty() {
@@ -146,6 +210,7 @@ fn annotate_record(
                         bundle,
                         *mode,
                         sample_map,
+                        raw_samples,
                         format_overwrite_all,
                         debug,
                     );
@@ -177,13 +242,35 @@ fn annotate_record(
     if let Some(fmt) = new_format {
         out.push('\t');
         out.push_str(&fmt);
-        for s in new_samples {
+        for s in &new_samples {
             out.push('\t');
             out.push_str(&s);
         }
     }
 
     out
+}
+
+pub fn annotate_record_with_bundles(
+    parsed: &ParsedVcfRecord,
+    bundles: &[(usize, AnnotationBundle)],
+    field_meta: &HashMap<String, FieldNumber>,
+    column_modes: &[(String, AnnotateMode)],
+    sample_map: &[Option<usize>],
+    info_overwrite_all: bool,
+    format_overwrite_all: bool,
+    debug: bool,
+) -> String {
+    annotate_record(
+        parsed,
+        bundles,
+        field_meta,
+        column_modes,
+        sample_map,
+        info_overwrite_all,
+        format_overwrite_all,
+        debug,
+    )
 }
 
 fn should_replace(existing: &str, new_val: &str, mode: AnnotateMode) -> bool {
@@ -214,6 +301,7 @@ fn merge_all_format(
     bundle: &AnnotationBundle,
     mode: AnnotateMode,
     sample_map: &[Option<usize>],
+    raw_samples: Option<&[&str]>,
     overwrite_all: bool,
     debug: bool,
 ) -> (Option<String>, Vec<String>) {
@@ -226,13 +314,13 @@ fn merge_all_format(
         None => {
             if overwrite_all {
                 return (
-                    parsed.format.as_ref().map(|f| f.keys.join(":")),
-                    parsed.samples.iter().map(|s| s.raw.join(":")).collect(),
+                    parsed.format.as_ref().map(|f| join_keys(&f.keys)),
+                    parsed.samples.iter().map(|s| join_values(&s.raw)).collect(),
                 );
             }
             return (
-                parsed.format.as_ref().map(|f| f.keys.join(":")),
-                parsed.samples.iter().map(|s| s.raw.join(":")).collect(),
+                parsed.format.as_ref().map(|f| join_keys(&f.keys)),
+                parsed.samples.iter().map(|s| join_values(&s.raw)).collect(),
             );
         }
     };
@@ -244,25 +332,44 @@ fn merge_all_format(
         .map(|f| f.keys.clone())
         .unwrap_or_default();
 
+    const MISSING_IDX: usize = usize::MAX;
     let mut final_keys: Vec<String> = Vec::new();
-    let mut key_set = std::collections::HashSet::new();
+    let mut input_idx_of_final: Vec<usize> = Vec::new();
+    let mut db_idx_of_final: Vec<usize> = Vec::new();
 
     if overwrite_all {
-        for k in &db_keys {
-            if key_set.insert(k.to_string()) {
-                final_keys.push(k.to_string());
-            }
+        final_keys.reserve(db_keys.len());
+        input_idx_of_final.reserve(db_keys.len());
+        db_idx_of_final.reserve(db_keys.len());
+        for (i, k) in db_keys.iter().enumerate() {
+            final_keys.push((*k).to_string());
+            let input_idx = input_keys
+                .iter()
+                .position(|ik| ik == k)
+                .unwrap_or(MISSING_IDX);
+            input_idx_of_final.push(input_idx);
+            db_idx_of_final.push(i);
         }
     } else {
-        for k in &input_keys {
-            if key_set.insert(k.clone()) {
-                final_keys.push(k.clone());
-            }
+        final_keys.reserve(input_keys.len() + db_keys.len());
+        input_idx_of_final.reserve(input_keys.len() + db_keys.len());
+        db_idx_of_final.reserve(input_keys.len() + db_keys.len());
+        for (i, k) in input_keys.iter().enumerate() {
+            final_keys.push(k.clone());
+            input_idx_of_final.push(i);
+            let db_idx = db_keys
+                .iter()
+                .position(|dk| *dk == k)
+                .unwrap_or(MISSING_IDX);
+            db_idx_of_final.push(db_idx);
         }
-        for k in &db_keys {
-            if key_set.insert(k.to_string()) {
-                final_keys.push(k.to_string());
+        for (db_i, k) in db_keys.iter().enumerate() {
+            if input_keys.iter().any(|ik| ik == k) {
+                continue;
             }
+            final_keys.push((*k).to_string());
+            input_idx_of_final.push(MISSING_IDX);
+            db_idx_of_final.push(db_i);
         }
     }
 
@@ -274,59 +381,155 @@ fn merge_all_format(
         eprintln!("[FORMAT] db samples: {:?}", bundle.format_samples);
     }
 
-    let db_sample_values: Vec<Vec<&str>> = bundle
-        .format_samples
-        .iter()
-        .map(|s| s.split(':').collect())
-        .collect();
+    let mut sample_order_identity = false;
+    if overwrite_all && parsed.samples.len() == bundle.format_samples.len() {
+        sample_order_identity = sample_map
+            .iter()
+            .enumerate()
+            .all(|(i, v)| v.map(|idx| idx == i).unwrap_or(false));
+    }
 
-    let input_index: std::collections::HashMap<&str, usize> = input_keys
-        .iter()
-        .enumerate()
-        .map(|(i, k)| (k.as_str(), i))
-        .collect();
-    let db_index: std::collections::HashMap<&str, usize> =
-        db_keys.iter().enumerate().map(|(i, k)| (*k, i)).collect();
+    let final_keys_is_input = !overwrite_all
+        && final_keys.len() == input_keys.len()
+        && final_keys
+            .iter()
+            .zip(input_keys.iter())
+            .all(|(a, b)| a == b);
+    let final_keys_is_db = overwrite_all
+        && final_keys.len() == db_keys.len()
+        && final_keys.iter().zip(db_keys.iter()).all(|(a, b)| *a == *b);
 
-    let mut result_samples: Vec<String> = Vec::new();
+    if final_keys_is_input {
+        for i in 0..final_keys.len() {
+            input_idx_of_final[i] = i;
+        }
+    }
+    if final_keys_is_db {
+        for i in 0..final_keys.len() {
+            db_idx_of_final[i] = i;
+        }
+    }
+
+    let mut result_samples: Vec<String> = Vec::with_capacity(parsed.samples.len());
 
     for (input_idx, input_sample) in parsed.samples.iter().enumerate() {
-        let db_idx = sample_map.get(input_idx).and_then(|v| *v);
+        let mut db_idx = if sample_order_identity {
+            Some(input_idx)
+        } else {
+            sample_map.get(input_idx).and_then(|v| *v)
+        };
+        if let Some(idx) = db_idx {
+            if idx >= bundle.format_samples.len() {
+                db_idx = None;
+            }
+        }
 
         if debug {
             eprintln!("[FORMAT] Sample {} -> DB idx {:?}", input_idx, db_idx);
         }
 
-        let mut sample_values: Vec<String> = Vec::new();
+        let raw_split = if db_idx.is_none() {
+            raw_samples
+                .and_then(|rs| rs.get(input_idx))
+                .map(|raw| raw.split(':').collect::<Vec<&str>>())
+        } else {
+            None
+        };
 
-        for key in &final_keys {
-            let input_val = input_index
-                .get(key.as_str())
-                .and_then(|idx| input_sample.raw.get(*idx).map(|s| s.as_str()));
-            let db_val = db_idx.and_then(|idx| {
-                db_sample_values.get(idx).and_then(|vals| {
-                    let key_idx = db_index.get(key.as_str())?;
-                    vals.get(*key_idx).map(|&s| s)
-                })
-            });
+        if !overwrite_all && final_keys_is_input && db_idx.is_none() {
+            result_samples.push(normalize_sample_values(&input_sample.raw));
+            continue;
+        }
 
-            if overwrite_all {
-                let final_val = if db_idx.is_some() {
-                    db_val.unwrap_or(".").to_string()
-                } else {
-                    input_val.unwrap_or(".").to_string()
-                };
-                sample_values.push(final_val);
+        let mut sample_values: Vec<&str> = Vec::with_capacity(final_keys.len());
+
+        if overwrite_all && final_keys_is_db {
+            if let Some(idx) = db_idx {
+                let mut it = bundle
+                    .format_samples
+                    .get(idx)
+                    .map(|s| s.split(':'))
+                    .into_iter()
+                    .flatten();
+                for _ in 0..final_keys.len() {
+                    let v = it.next().unwrap_or(".");
+                    sample_values.push(v);
+                }
             } else {
-                let final_val = merge_format_value(input_val, db_val, mode);
-                sample_values.push(final_val);
+                for k_i in 0..final_keys.len() {
+                    let key_idx = input_idx_of_final[k_i];
+                    let mut v = match key_idx {
+                        MISSING_IDX => None,
+                        idx => {
+                            if let Some(raw_vals) = raw_split.as_ref() {
+                                raw_vals.get(idx).copied()
+                            } else {
+                                input_sample.raw.get(idx).map(|s| s.as_str())
+                            }
+                        }
+                    };
+                    if v.map_or(true, |s| s.is_empty()) && key_idx != MISSING_IDX {
+                        v = if let Some(raw_vals) = raw_split.as_ref() {
+                            raw_vals.get(key_idx).copied()
+                        } else {
+                            input_value_from_raw(raw_samples, input_idx, key_idx)
+                        };
+                    }
+                    sample_values.push(v.unwrap_or("."));
+                }
+            }
+        } else {
+            for (k_i, _) in final_keys.iter().enumerate() {
+                let key_idx = input_idx_of_final[k_i];
+                let mut input_val = match key_idx {
+                    MISSING_IDX => None,
+                    idx => {
+                        if let Some(raw_vals) = raw_split.as_ref() {
+                            raw_vals.get(idx).copied()
+                        } else {
+                            input_sample.raw.get(idx).map(|s| s.as_str())
+                        }
+                    }
+                };
+                if input_val.map_or(true, |s| s.is_empty()) && key_idx != MISSING_IDX {
+                    input_val = if let Some(raw_vals) = raw_split.as_ref() {
+                        raw_vals.get(key_idx).copied()
+                    } else {
+                        input_value_from_raw(raw_samples, input_idx, key_idx)
+                    };
+                }
+                let db_val = db_idx.and_then(|idx| {
+                    let vals = bundle.format_samples.get(idx)?;
+                    let key_idx = db_idx_of_final[k_i];
+                    if key_idx == MISSING_IDX {
+                        return None;
+                    }
+                    vals.split(':').nth(key_idx)
+                });
+
+                if overwrite_all {
+                    let final_val = if db_idx.is_some() {
+                        db_val.unwrap_or(".")
+                    } else {
+                        input_val.unwrap_or(".")
+                    };
+                    sample_values.push(final_val);
+                } else {
+                    let final_val = merge_format_value_str(input_val, db_val, mode);
+                    sample_values.push(final_val);
+                }
             }
         }
 
-        result_samples.push(normalize_sample_values(&sample_values));
+        result_samples.push(normalize_sample_values_strs(&sample_values));
     }
 
-    (Some(final_keys.join(":")), result_samples)
+    let format_out = if final_keys_is_db {
+        db_format.clone()
+    } else {
+        join_keys(&final_keys)
+    };
+    (Some(format_out), result_samples)
 }
 
 fn merge_format_value(input: Option<&str>, db: Option<&str>, mode: AnnotateMode) -> String {
@@ -357,6 +560,38 @@ fn merge_format_value(input: Option<&str>, db: Option<&str>, mode: AnnotateMode)
     input_val.to_string()
 }
 
+fn merge_format_value_str<'a>(
+    input: Option<&'a str>,
+    db: Option<&'a str>,
+    mode: AnnotateMode,
+) -> &'a str {
+    let input_val = match input {
+        Some(v) if !v.is_empty() => v,
+        _ => ".",
+    };
+    let db_val = match db {
+        Some(v) if !v.is_empty() => v,
+        _ => ".",
+    };
+
+    let input_missing = is_missing_value(input_val);
+    let db_missing = is_missing_value(db_val);
+
+    if mode.replace_all {
+        if !db_missing || mode.carry_over_missing {
+            return db_val;
+        }
+    }
+
+    if mode.replace_missing && input_missing {
+        if !db_missing || mode.carry_over_missing {
+            return db_val;
+        }
+    }
+
+    input_val
+}
+
 fn normalize_sample_values(values: &[String]) -> String {
     if values.is_empty() {
         return ".".to_string();
@@ -372,6 +607,54 @@ fn normalize_sample_values(values: &[String]) -> String {
         } else {
             out.push_str(v);
         }
+    }
+    out
+}
+
+fn normalize_sample_values_strs(values: &[&str]) -> String {
+    if values.is_empty() {
+        return ".".to_string();
+    }
+
+    let mut out = String::new();
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(':');
+        }
+        if v.is_empty() {
+            out.push('.');
+        } else {
+            out.push_str(v);
+        }
+    }
+    out
+}
+
+fn input_value_from_raw<'a>(
+    raw_samples: Option<&'a [&'a str]>,
+    input_idx: usize,
+    key_idx: usize,
+) -> Option<&'a str> {
+    let raw = raw_samples?.get(input_idx)?;
+    raw.split(':').nth(key_idx)
+}
+
+fn join_keys(values: &[String]) -> String {
+    join_values(values)
+}
+
+fn join_values(values: &[String]) -> String {
+    if values.is_empty() {
+        return String::new();
+    }
+    let mut len = values.iter().map(|v| v.len()).sum::<usize>();
+    len += values.len().saturating_sub(1);
+    let mut out = String::with_capacity(len);
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(':');
+        }
+        out.push_str(v);
     }
     out
 }
@@ -471,6 +754,7 @@ mod tests {
             &bundle,
             AnnotateMode::default_mode(),
             &sample_map,
+            None,
             true,
             false,
         );

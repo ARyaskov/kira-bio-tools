@@ -22,6 +22,8 @@ pub struct ParsedVcfRecord {
     pub samples: Vec<ParsedSample>,
 }
 
+use crate::vcf::simd::SimdVcfParser;
+
 pub fn parse_vcf_record(line: &str) -> Option<ParsedVcfRecord> {
     let mut fields = line.split('\t');
 
@@ -66,6 +68,53 @@ pub fn parse_vcf_record(line: &str) -> Option<ParsedVcfRecord> {
         info,
         format,
         samples,
+    })
+}
+
+pub fn parse_vcf_record_simd(line: &str, want_format: bool) -> Option<ParsedVcfRecord> {
+    let bytes = line.as_bytes();
+
+    if want_format {
+        let parsed = SimdVcfParser::parse_line(bytes)?;
+
+        let format = parsed.format.map(|fmt_str| ParsedFormat {
+            keys: fmt_str.split(':').map(|s| s.to_string()).collect(),
+        });
+
+        let samples = parsed
+            .samples
+            .iter()
+            .map(|sample_data| ParsedSample {
+                raw: sample_data.split(':').map(|s| s.to_string()).collect(),
+            })
+            .collect();
+
+        return Some(ParsedVcfRecord {
+            chrom: parsed.chrom.to_string(),
+            pos: parsed.position()?,
+            id: parsed.id.to_string(),
+            ref_allele: parsed.ref_allele.to_string(),
+            alt: parsed.alt.to_string(),
+            qual: parsed.qual.to_string(),
+            filter: parsed.filter.to_string(),
+            info: parsed.info.to_string(),
+            format,
+            samples,
+        });
+    }
+
+    let parsed = SimdVcfParser::parse_fields(bytes)?;
+    Some(ParsedVcfRecord {
+        chrom: parsed.chrom.to_string(),
+        pos: parsed.position()?,
+        id: parsed.id.to_string(),
+        ref_allele: parsed.ref_allele.to_string(),
+        alt: parsed.alt.to_string(),
+        qual: parsed.qual.to_string(),
+        filter: parsed.filter.to_string(),
+        info: parsed.info.to_string(),
+        format: None,
+        samples: Vec::new(),
     })
 }
 

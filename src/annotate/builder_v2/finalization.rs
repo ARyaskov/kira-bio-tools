@@ -5,11 +5,12 @@ use std::io::Write;
 use std::mem;
 use std::path::Path;
 
+use crate::annotate::builder_v2::StringPool;
 use crate::annotate::structs::ani::{AniEntry, AniHeader, ANI_MAGIC, ANI_VERSION};
 
 pub fn finalize_ani_index(
     rows: Vec<(u64, AniEntry)>,
-    pool: Vec<u8>,
+    mut pool: StringPool,
     output: &Path,
     timing: bool,
 ) -> Result<()> {
@@ -53,7 +54,8 @@ pub fn finalize_ani_index(
         verify_mph_correctness(&mph, &keys_bytes, &entries);
     }
 
-    write_ani_file(output, &mph, &entries, &pool, timing)?;
+    write_ani_file(output, &mph, &entries, &mut pool, timing)?;
+    pool.cleanup();
 
     Ok(())
 }
@@ -151,7 +153,7 @@ fn write_ani_file(
     output: &Path,
     mph: &kira_kv_engine::Mphf,
     entries: &[AniEntry],
-    pool: &[u8],
+    pool: &mut StringPool,
     timing: bool,
 ) -> Result<()> {
     let n = entries.len();
@@ -188,7 +190,7 @@ fn write_ani_file(
         file.write_all(e_bytes)?;
     }
 
-    file.write_all(pool)?;
+    pool.write_to(&mut file)?;
 
     if timing {
         eprintln!(

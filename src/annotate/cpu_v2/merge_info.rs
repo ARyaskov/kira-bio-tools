@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use super::field_metadata::{infer_field_type, is_missing_value};
 use super::merge_info_helpers::*;
 use crate::annotate::structs::annotate_mode::AnnotateMode;
-use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber, StructuredInfoField};
+use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber};
 
 pub fn merge_info_fields(
     existing_info: &str,
@@ -64,7 +64,19 @@ pub fn merge_info_fields(
 
         let field_number = field_meta.get(key).copied().unwrap_or(FieldNumber::One);
         let vcf_has_field = info_map.contains_key(key);
-        let existing_val = info_map.get(key).cloned().unwrap_or_default();
+        let existing_val = info_map.get(key).map(|s| s.as_str()).unwrap_or("");
+        let mut existing_parts: Vec<&str> = if !existing_val.is_empty() && existing_val != "." {
+            existing_val.split(',').collect()
+        } else {
+            Vec::new()
+        };
+        let field_type = infer_field_type(key);
+        let is_integer = field_type == "Integer";
+        if is_integer {
+            if let Some(idx) = existing_parts.iter().position(|v| is_missing_value(v)) {
+                existing_parts.truncate(idx + 1);
+            }
+        }
 
         if field_number == FieldNumber::Zero {
             let has_flag = bundles
@@ -97,11 +109,20 @@ pub fn merge_info_fields(
             continue;
         }
 
-        if field_number != FieldNumber::A && field_number != FieldNumber::R {
+        let mut effective_number = field_number;
+        if effective_number != FieldNumber::A && effective_number != FieldNumber::R {
+            if existing_parts.len() == vcf_alt_alleles.len() {
+                effective_number = FieldNumber::A;
+            } else if existing_parts.len() == vcf_alt_alleles.len() + 1 {
+                effective_number = FieldNumber::R;
+            }
+        }
+
+        if effective_number != FieldNumber::A && effective_number != FieldNumber::R {
             let mut annotated_val: Option<String> = None;
             for (_vcf_idx, bundle) in bundles {
                 if let Some(field) = bundle.info.iter().find(|f| f.key == key) {
-                    let joined = field.values.join(",");
+                    let joined = join_values_commas(&field.values);
                     if !is_missing_value(&joined) {
                         annotated_val = Some(joined);
                         break;
@@ -186,40 +207,22 @@ pub fn merge_info_fields(
             continue;
         }
 
-        let existing_parts: Vec<&str> = if !existing_val.is_empty() && existing_val != "." {
-            existing_val.split(',').collect()
-        } else {
-            vec![]
-        };
-
-        let field_type = infer_field_type(key);
-        let is_integer = field_type == "Integer";
-
         if debug {
             eprintln!(
                 "[MERGE] Field {}: field_number={:?}, existing_parts={:?}",
-                key, field_number, existing_parts
+                key, effective_number, existing_parts
             );
         }
 
-        let final_values: Vec<String> = match field_number {
-            FieldNumber::A => merge_field_number_a(
-                &vcf_values,
-                &existing_parts,
-                *mode,
-                is_integer,
-                vcf_has_field,
-            ),
-            FieldNumber::R => merge_field_number_r(
-                &vcf_values,
-                &bundle_ref_values,
-                key,
-                &existing_parts,
-                *mode,
-                is_integer,
-                vcf_has_field,
-            ),
-            _ => vcf_values.iter().filter_map(|v| v.clone()).collect(),
+        let final_values: Vec<String> = match effective_number {
+            FieldNumber::A => merge_field_number_a(&vcf_values, &existing_parts, *mode),
+            FieldNumber::R => {
+                merge_field_number_r(&vcf_values, &bundle_ref_values, key, &existing_parts, *mode)
+            }
+            _ => vcf_values
+                .iter()
+                .filter_map(|v| v.map(|s| s.to_string()))
+                .collect(),
         };
 
         if debug {
@@ -227,7 +230,7 @@ pub fn merge_info_fields(
         }
 
         if !final_values.is_empty() && !final_values.iter().all(|v| is_missing_value(v)) {
-            info_map.insert(key.to_string(), final_values.join(","));
+            info_map.insert(key.to_string(), join_values_commas(&final_values));
             if debug {
                 eprintln!("[MERGE] Field {}: inserted into info_map", key);
             }
@@ -243,13 +246,13 @@ pub fn merge_info_fields(
     info_map
 }
 
-fn collect_annotations_for_field(
+fn collect_annotations_for_field<'a>(
     key: &str,
-    bundles: &[(usize, AnnotationBundle)],
-    multiallelic_bundle: &Option<AnnotationBundle>,
+    bundles: &'a [(usize, AnnotationBundle)],
+    multiallelic_bundle: &'a Option<AnnotationBundle>,
     vcf_alt_alleles: &[&str],
     field_meta: &HashMap<String, FieldNumber>,
-) -> Vec<Option<String>> {
+) -> Vec<Option<&'a str>> {
     let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
     let mut values = vec![None; vcf_alt_alleles.len()];
     let field_number = field_meta.get(key).copied().unwrap_or(FieldNumber::One);
@@ -274,14 +277,14 @@ fn collect_annotations_for_field(
                 FieldNumber::A => {
                     if let Some(val) = field.values.first() {
                         if *vcf_idx < values.len() {
-                            values[*vcf_idx] = Some(val.clone());
+                            values[*vcf_idx] = Some(val.as_str());
                         }
                     }
                 }
                 FieldNumber::R => {
                     if let Some(alt_val) = field.values.get(1) {
                         if *vcf_idx < values.len() {
-                            values[*vcf_idx] = Some(alt_val.clone());
+                            values[*vcf_idx] = Some(alt_val.as_str());
 
                             if debug {
                                 eprintln!(
@@ -297,7 +300,7 @@ fn collect_annotations_for_field(
                 _ => {
                     if let Some(val) = field.values.first() {
                         if *vcf_idx < values.len() {
-                            values[*vcf_idx] = Some(val.clone());
+                            values[*vcf_idx] = Some(val.as_str());
                         }
                     }
                 }
@@ -324,7 +327,7 @@ fn collect_annotations_for_field(
                                 db_alts.iter().position(|&db_alt| db_alt == *vcf_alt)
                             {
                                 if let Some(val) = field.values.get(db_idx) {
-                                    values[vcf_idx] = Some(val.clone());
+                                    values[vcf_idx] = Some(val.as_str());
                                     if debug {
                                         eprintln!("[COLLECT] Multiallelic A match: VCF[{}]={} -> DB[{}]={}", vcf_idx, vcf_alt, db_idx, val);
                                     }
@@ -340,7 +343,7 @@ fn collect_annotations_for_field(
                                 db_alts.iter().position(|&db_alt| db_alt == *vcf_alt)
                             {
                                 if let Some(val) = field.values.get(db_idx + 1) {
-                                    values[vcf_idx] = Some(val.clone());
+                                    values[vcf_idx] = Some(val.as_str());
                                     if debug {
                                         eprintln!("[COLLECT] Multiallelic R match: VCF[{}]={} -> DB[{}]={}", vcf_idx, vcf_alt, db_idx + 1, val);
                                     }
@@ -353,7 +356,7 @@ fn collect_annotations_for_field(
                     if let Some(val) = field.values.first() {
                         for i in 0..values.len() {
                             if values[i].is_none() {
-                                values[i] = Some(val.clone());
+                                values[i] = Some(val.as_str());
                             }
                         }
                     }
@@ -370,11 +373,9 @@ fn collect_annotations_for_field(
 }
 
 fn merge_field_number_a(
-    vcf_values: &[Option<String>],
+    vcf_values: &[Option<&str>],
     existing_parts: &[&str],
     mode: AnnotateMode,
-    is_integer: bool,
-    _vcf_has_field: bool,
 ) -> Vec<String> {
     let mut result = Vec::with_capacity(vcf_values.len());
 
@@ -391,28 +392,49 @@ fn merge_field_number_a(
             continue;
         }
 
-        let annotated = vcf_val.as_ref().filter(|v| !is_missing_value(v));
+        let annotated = vcf_val.filter(|v| !is_missing_value(v));
+        let existing_missing = is_missing_value(existing);
+        let annotated_missing = annotated.is_none();
 
-        let overwrite = annotated.is_some() && (is_missing_value(existing) || is_integer);
-
-        if overwrite {
-            result.push(annotated.unwrap().clone());
-        } else {
-            result.push(existing.to_string());
+        if mode.replace_all {
+            if !annotated_missing || mode.carry_over_missing {
+                result.push(annotated.unwrap_or(".").to_string());
+            } else {
+                result.push(existing.to_string());
+            }
+            continue;
         }
+
+        if mode.replace_missing {
+            if existing_missing && (!annotated_missing || mode.carry_over_missing) {
+                result.push(annotated.unwrap_or(".").to_string());
+            } else {
+                result.push(existing.to_string());
+            }
+            continue;
+        }
+
+        if mode.replace_non_missing {
+            if !existing_missing && (!annotated_missing || mode.carry_over_missing) {
+                result.push(annotated.unwrap_or(".").to_string());
+            } else {
+                result.push(existing.to_string());
+            }
+            continue;
+        }
+
+        result.push(existing.to_string());
     }
 
     result
 }
 
 fn merge_field_number_r(
-    vcf_values: &[Option<String>],
+    vcf_values: &[Option<&str>],
     bundle_ref_values: &HashMap<String, String>,
     key: &str,
     existing_parts: &[&str],
     mode: AnnotateMode,
-    is_integer: bool,
-    _vcf_has_field: bool,
 ) -> Vec<String> {
     let mut result = Vec::with_capacity(vcf_values.len() + 1);
 
@@ -436,15 +458,38 @@ fn merge_field_number_r(
             continue;
         }
 
-        let annotated = vcf_val.as_ref().filter(|v| !is_missing_value(v));
+        let annotated = vcf_val.filter(|v| !is_missing_value(v));
+        let existing_missing = is_missing_value(existing);
+        let annotated_missing = annotated.is_none();
 
-        let overwrite = annotated.is_some() && (is_missing_value(existing) || is_integer);
-
-        if overwrite {
-            result.push(annotated.unwrap().clone());
-        } else {
-            result.push(existing.to_string());
+        if mode.replace_all {
+            if !annotated_missing || mode.carry_over_missing {
+                result.push(annotated.unwrap_or(".").to_string());
+            } else {
+                result.push(existing.to_string());
+            }
+            continue;
         }
+
+        if mode.replace_missing {
+            if existing_missing && (!annotated_missing || mode.carry_over_missing) {
+                result.push(annotated.unwrap_or(".").to_string());
+            } else {
+                result.push(existing.to_string());
+            }
+            continue;
+        }
+
+        if mode.replace_non_missing {
+            if !existing_missing && (!annotated_missing || mode.carry_over_missing) {
+                result.push(annotated.unwrap_or(".").to_string());
+            } else {
+                result.push(existing.to_string());
+            }
+            continue;
+        }
+
+        result.push(existing.to_string());
     }
 
     result
@@ -474,43 +519,66 @@ pub fn format_info_string(info_map: &IndexMap<String, String>, field_order: &[St
         return ".".to_string();
     }
 
-    let mut ordered_keys: Vec<String> = Vec::new();
-    let mut unordered_keys: Vec<String> = Vec::new();
+    let mut ordered_keys: Vec<&str> = Vec::new();
+    let mut unordered_keys: Vec<&str> = Vec::new();
 
     for key in info_map.keys() {
         if field_order.contains(key) {
-            ordered_keys.push(key.clone());
+            ordered_keys.push(key);
         } else {
-            unordered_keys.push(key.clone());
+            unordered_keys.push(key);
         }
     }
 
     ordered_keys.sort_by_key(|k| {
         field_order
             .iter()
-            .position(|f| f == k)
+            .position(|f| f == *k)
             .unwrap_or(usize::MAX)
     });
     unordered_keys.sort();
 
-    let mut all_keys = ordered_keys;
-    all_keys.extend(unordered_keys);
+    let mut out = String::new();
+    let mut first = true;
 
-    let parts: Vec<String> = all_keys
-        .into_iter()
-        .filter_map(|k| {
-            let v = info_map.get(&k)?;
-            if v.is_empty() {
-                Some(k)
-            } else {
-                Some(format!("{}={}", k, v))
-            }
-        })
-        .collect();
+    for k in ordered_keys.into_iter().chain(unordered_keys) {
+        let v = match info_map.get(k) {
+            Some(val) => val,
+            None => continue,
+        };
+        if first {
+            first = false;
+        } else {
+            out.push(';');
+        }
+        if v.is_empty() {
+            out.push_str(k);
+        } else {
+            out.push_str(k);
+            out.push('=');
+            out.push_str(v);
+        }
+    }
 
-    if parts.is_empty() {
+    if out.is_empty() {
         ".".to_string()
     } else {
-        parts.join(";")
+        out
     }
+}
+
+fn join_values_commas(values: &[String]) -> String {
+    if values.is_empty() {
+        return String::new();
+    }
+    let mut len = values.iter().map(|v| v.len()).sum::<usize>();
+    len += values.len().saturating_sub(1);
+    let mut out = String::with_capacity(len);
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(v);
+    }
+    out
 }
