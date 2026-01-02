@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use crate::annotate::structs::ani::{AniIndex, ANI_HEADER_END};
 use crate::annotate::structs::bundle::FieldNumber;
 use crate::util::{
-    choose_best_number, extract_info_key, extract_info_number, read_cstring, url_decode_info_value,
+    choose_best_number, extract_info_key, extract_info_number, url_decode_info_value,
 };
 
 pub fn load_and_infer_metadata(
@@ -23,8 +23,8 @@ pub fn load_and_infer_metadata(
             .iter()
             .take(10)
             .flat_map(|e| {
-                let info_str = read_cstring(ani.strings_slice(), e.info_ofs as usize);
-                let decoded = url_decode_info_value(info_str);
+                let info_str = ani.read_cstring(e.info_ofs as usize);
+                let decoded = url_decode_info_value(info_str.as_ref());
                 decoded
                     .split(';')
                     .filter_map(|kv| kv.split('=').next().map(|k| k.to_string()))
@@ -45,7 +45,7 @@ fn load_field_metadata(ani: &AniIndex, debug: bool) -> Result<HashMap<String, Fi
     let headers = iter_ani_header_lines(ani);
 
     if debug {
-        eprintln!("[DEBUG] ANI strings total length: {}", ani.strings.len());
+        eprintln!("[DEBUG] ANI strings total length: {}", ani.strings_len());
         eprintln!(
             "[DEBUG] Found {} header lines in ANI strings",
             headers.len()
@@ -85,20 +85,14 @@ pub fn iter_ani_header_lines(ani: &AniIndex) -> Vec<String> {
     let mut headers = Vec::new();
     let mut saw_header = false;
     let mut idx = 0usize;
-    let bytes = ani.strings_slice();
+    while idx < ani.strings_len() {
+        let line_ref = ani.read_cstring(idx);
+        let line = line_ref.as_ref();
 
-    while idx < bytes.len() {
-        let end = match bytes[idx..].iter().position(|&b| b == 0) {
-            Some(pos) => idx + pos,
-            None => bytes.len(),
-        };
-
-        if end == idx {
-            idx = end + 1;
+        if line.is_empty() {
+            idx += 1;
             continue;
         }
-
-        let line = std::str::from_utf8(&bytes[idx..end]).unwrap_or("");
 
         if line == ANI_HEADER_END {
             break;
@@ -116,7 +110,7 @@ pub fn iter_ani_header_lines(ani: &AniIndex) -> Vec<String> {
             break;
         }
 
-        idx = end + 1;
+        idx += line.len() + 1;
     }
 
     headers
@@ -131,8 +125,8 @@ fn infer_field_metadata_from_data(
     let mut candidates: HashMap<String, Vec<FieldNumber>> = HashMap::new();
 
     for e in ani.entries.iter().take(1000) {
-        let info = read_cstring(ani.strings_slice(), e.info_ofs as usize);
-        let decoded = url_decode_info_value(info);
+        let info = ani.read_cstring(e.info_ofs as usize);
+        let decoded = url_decode_info_value(info.as_ref());
 
         for kv in decoded.split(';') {
             if kv.is_empty() || !kv.contains('=') {

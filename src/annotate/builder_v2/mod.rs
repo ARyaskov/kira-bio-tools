@@ -33,20 +33,7 @@ pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
     let headers = reader.header()?;
 
     let mut entries_map: FxHashMap<u64, (AniEntry, usize)> = FxHashMap::default();
-    let pool_limit = pool_limit_bytes();
-    let spill_path = output.with_extension("ani.pool");
-    let mut pool = StringPool::with_limit(pool_limit, Some(spill_path.clone()));
-    if debug {
-        if let Some(limit) = pool_limit {
-            eprintln!(
-                "[ani-build] Pool memory limit: {} MB",
-                limit / (1024 * 1024)
-            );
-        } else {
-            eprintln!("[ani-build] Pool memory limit: unlimited");
-        }
-    }
-    let mut pool_spill_logged = false;
+    let mut pool = StringPool::new();
 
     let field_meta = extract_info_metadata(&headers);
     let expected_sample_count = extract_sample_count_from_headers(&headers);
@@ -82,11 +69,6 @@ pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
         )?;
 
         count += processed;
-        if debug && pool.spilled() && !pool_spill_logged {
-            eprintln!("[ani-build] Pool spilled to {}", spill_path.display());
-            pool_spill_logged = true;
-        }
-
         if count > 0 && count % report_interval == 0 {
             report_progress(&total_variants, &entries_map, &duplicates_skipped);
         }
@@ -171,20 +153,7 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
     let reader = BufReader::new(file);
 
     let mut entries_map: FxHashMap<u64, (AniEntry, usize)> = FxHashMap::default();
-    let pool_limit = pool_limit_bytes();
-    let spill_path = output.with_extension("ani.pool");
-    let mut pool = StringPool::with_limit(pool_limit, Some(spill_path.clone()));
-    if debug {
-        if let Some(limit) = pool_limit {
-            eprintln!(
-                "[ani-build] Pool memory limit: {} MB",
-                limit / (1024 * 1024)
-            );
-        } else {
-            eprintln!("[ani-build] Pool memory limit: unlimited");
-        }
-    }
-    let mut pool_spill_logged = false;
+    let mut pool = StringPool::new();
 
     save_tab_headers_to_pool(&schema, &mut pool)?;
     append_header_end_marker(&mut pool);
@@ -217,11 +186,6 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
         )?;
 
         count += processed;
-        if debug && pool.spilled() && !pool_spill_logged {
-            eprintln!("[ani-build] Pool spilled to {}", spill_path.display());
-            pool_spill_logged = true;
-        }
-
         if count > 0 && count % report_interval == 0 {
             report_progress(&total_variants, &entries_map, &duplicates_skipped);
         }
@@ -445,17 +409,6 @@ fn extract_sample_count_from_headers(headers: &[String]) -> usize {
         }
     }
     0
-}
-
-fn pool_limit_bytes() -> Option<usize> {
-    if let Ok(val) = std::env::var("KIRA_BT_POOL_LIMIT_MB") {
-        if let Ok(mb) = val.parse::<u64>() {
-            return Some((mb.saturating_mul(1024) * 1024) as usize);
-        }
-    }
-
-    let max_cap = 8_u64 * 1024 * 1024 * 1024;
-    Some(max_cap as usize)
 }
 
 #[cfg(test)]

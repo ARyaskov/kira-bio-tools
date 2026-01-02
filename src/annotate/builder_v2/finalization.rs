@@ -6,7 +6,7 @@ use std::mem;
 use std::path::Path;
 
 use crate::annotate::builder_v2::StringPool;
-use crate::annotate::structs::ani::{AniEntry, AniHeader, ANI_MAGIC, ANI_VERSION};
+use crate::annotate::structs::ani::{AniBlockEntry, AniEntry, AniHeaderV4, ANI_MAGIC, ANI_VERSION};
 
 pub fn finalize_ani_index(
     rows: Vec<(u64, AniEntry)>,
@@ -157,12 +157,21 @@ fn write_ani_file(
     timing: bool,
 ) -> Result<()> {
     let n = entries.len();
-    let hdr_size = mem::size_of::<AniHeader>();
+    let hdr_size = mem::size_of::<AniHeaderV4>();
     let g_size = mph.g.len() * 4;
     let ent_size = n * mem::size_of::<AniEntry>();
-    let str_size = pool.len();
+    let block_size = pool.block_size();
+    let blocks = pool.blocks();
+    let block_index_size = blocks.len() * mem::size_of::<AniBlockEntry>();
+    let mut blocks_size = 0usize;
+    for b in blocks {
+        blocks_size += b.data.len();
+    }
 
-    let header = AniHeader {
+    let block_index_off = (hdr_size + g_size + ent_size) as u64;
+    let block_data_off = block_index_off + block_index_size as u64;
+
+    let header = AniHeaderV4 {
         magic: ANI_MAGIC,
         version: ANI_VERSION,
         n_entries: n as u64,
@@ -170,7 +179,11 @@ fn write_ani_file(
         mph_salt: mph.salt,
         off_mph_g: hdr_size as u64,
         off_entries: (hdr_size + g_size) as u64,
-        off_strings: (hdr_size + g_size + ent_size) as u64,
+        off_strings: block_index_off,
+        off_block_index: block_index_off,
+        n_blocks: blocks.len() as u64,
+        block_size: block_size as u32,
+        _pad: 0,
     };
 
     let write_start = std::time::Instant::now();
@@ -190,7 +203,27 @@ fn write_ani_file(
         file.write_all(e_bytes)?;
     }
 
-    pool.write_to(&mut file)?;
+    let mut block_entries = Vec::with_capacity(blocks.len());
+    let mut cur_off = block_data_off;
+    for b in blocks {
+        block_entries.push(AniBlockEntry {
+            raw_start: b.raw_start,
+            raw_len: b.raw_len,
+            data_len: b.data.len() as u32,
+            data_off: cur_off,
+        });
+        cur_off += b.data.len() as u64;
+    }
+
+    for e in &block_entries {
+        let e_bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(e as *const _ as *const u8, mem::size_of_val(e)) };
+        file.write_all(e_bytes)?;
+    }
+
+    for b in blocks {
+        file.write_all(&b.data)?;
+    }
 
     if timing {
         eprintln!(
@@ -199,7 +232,7 @@ fn write_ani_file(
         );
         eprintln!(
             "[ani-build] Total ANI size: {} bytes",
-            hdr_size + g_size + ent_size + str_size
+            hdr_size + g_size + ent_size + block_index_size + blocks_size
         );
     }
 

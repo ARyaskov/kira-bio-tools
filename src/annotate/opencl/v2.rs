@@ -21,7 +21,7 @@ use crate::annotate::structs::ani::AniIndex;
 use crate::annotate::structs::annotate_mode::AnnotateMode;
 use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber};
 use crate::bgzf::BgzfWriter;
-use crate::util::{chr_name_to_id, detect_format, read_cstring, VcfFormat};
+use crate::util::{chr_name_to_id, detect_format, VcfFormat};
 
 const LINE_BATCH: usize = 200_000;
 
@@ -357,9 +357,9 @@ fn make_key(chr_id: u8, pos: u32, ref_allele: &str, alt: &str) -> u64 {
 fn build_entry_keys(ani: &AniIndex) -> Vec<u64> {
     let mut keys = Vec::with_capacity(ani.entries.len());
     for entry in &ani.entries {
-        let ref_str = read_cstring(ani.strings_slice(), entry.ref_ofs as usize);
-        let alt_str = read_cstring(ani.strings_slice(), entry.alt_ofs as usize);
-        let key = make_key(entry.chr_id, entry.pos, ref_str, alt_str);
+        let ref_str = ani.read_cstring(entry.ref_ofs as usize);
+        let alt_str = ani.read_cstring(entry.alt_ofs as usize);
+        let key = make_key(entry.chr_id, entry.pos, ref_str.as_ref(), alt_str.as_ref());
         keys.push(key);
     }
     keys

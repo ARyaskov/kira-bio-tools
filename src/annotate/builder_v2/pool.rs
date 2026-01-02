@@ -1,126 +1,144 @@
 use anyhow::Result;
-use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
+use libdeflater::{CompressionLvl, Compressor, Decompressor};
+use std::fs::File;
+use std::io::Write;
+use std::path::PathBuf;
+
+const DEFAULT_BLOCK_SIZE: usize = 1024 * 1024;
+
+pub struct CompressedBlock {
+    pub raw_start: u64,
+    pub raw_len: u32,
+    pub data: Vec<u8>,
+}
 
 pub struct StringPool {
-    mem: Vec<u8>,
-    file: Option<BufWriter<File>>,
-    path: Option<PathBuf>,
-    size: u64,
-    limit: Option<usize>,
-    spilled: bool,
+    blocks: Vec<CompressedBlock>,
+    current: Vec<u8>,
+    current_start: u64,
+    total_len: u64,
+    block_size: usize,
+    compressor: Compressor,
+    scratch: Vec<u8>,
+    finished: bool,
 }
 
 impl StringPool {
     pub fn new() -> Self {
+        let lvl = CompressionLvl::new(4).unwrap();
         Self {
-            mem: Vec::new(),
-            file: None,
-            path: None,
-            size: 0,
-            limit: None,
-            spilled: false,
+            blocks: Vec::new(),
+            current: Vec::with_capacity(DEFAULT_BLOCK_SIZE),
+            current_start: 0,
+            total_len: 0,
+            block_size: DEFAULT_BLOCK_SIZE,
+            compressor: Compressor::new(lvl),
+            scratch: Vec::new(),
+            finished: false,
         }
     }
 
-    pub fn with_limit(limit: Option<usize>, spill_path: Option<PathBuf>) -> Self {
-        Self {
-            mem: Vec::new(),
-            file: None,
-            path: spill_path,
-            size: 0,
-            limit,
-            spilled: false,
-        }
+    pub fn with_limit(_limit: Option<usize>, _spill_path: Option<PathBuf>) -> Self {
+        Self::new()
     }
 
     pub fn len(&self) -> usize {
-        self.size as usize
+        self.total_len as usize
+    }
+
+    pub fn block_size(&self) -> usize {
+        self.block_size
     }
 
     pub fn is_in_memory(&self) -> bool {
-        self.file.is_none()
+        true
     }
 
     pub fn append_cstr(&mut self, s: &str) -> usize {
-        let ofs = self.size as usize;
-        if self.file.is_none() {
-            if let Some(limit) = self.limit {
-                let need = self.size as usize + s.len() + 1;
-                if need > limit {
-                    if let Some(ref path) = self.path {
-                        let path = path.clone();
-                        let _ = self.spill_to_file(&path);
-                        self.spilled = true;
-                    }
-                }
-            }
+        let ofs = self.total_len as usize;
+        let needed = s.len() + 1;
+
+        if !self.current.is_empty() && self.current.len() + needed > self.block_size {
+            self.flush_block();
         }
-        if let Some(ref mut file) = self.file {
-            let _ = file.write_all(s.as_bytes());
-            let _ = file.write_all(&[0]);
-            self.size += (s.len() + 1) as u64;
-        } else {
-            self.mem.extend_from_slice(s.as_bytes());
-            self.mem.push(0);
-            self.size += (s.len() + 1) as u64;
+
+        self.current.extend_from_slice(s.as_bytes());
+        self.current.push(0);
+        self.total_len += needed as u64;
+
+        if self.current.len() >= self.block_size {
+            self.flush_block();
         }
+
         ofs
     }
 
     pub fn spilled(&self) -> bool {
-        self.spilled
+        false
     }
 
-    pub fn spill_to_file(&mut self, path: &Path) -> Result<()> {
-        if self.file.is_some() {
-            return Ok(());
+    pub fn finish(&mut self) {
+        if !self.finished {
+            self.flush_block();
+            self.finished = true;
+        }
+    }
+
+    pub fn blocks(&mut self) -> &[CompressedBlock] {
+        self.finish();
+        &self.blocks
+    }
+
+    pub fn materialize(&mut self) -> Result<Vec<u8>> {
+        self.finish();
+        let mut out = Vec::with_capacity(self.total_len as usize);
+        let mut decompressor = Decompressor::new();
+
+        for block in &self.blocks {
+            let mut buf = vec![0u8; block.raw_len as usize];
+            decompressor
+                .deflate_decompress(&block.data, &mut buf)
+                .map_err(|_| anyhow::anyhow!("String pool decompression failed"))?;
+            out.extend_from_slice(&buf);
         }
 
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)?;
-        let mut writer = BufWriter::new(file);
-        writer.write_all(&self.mem)?;
-        writer.flush()?;
-
-        self.size = self.mem.len() as u64;
-        self.mem.clear();
-        self.mem.shrink_to_fit();
-
-        self.path = Some(path.to_path_buf());
-        self.file = Some(writer);
-        Ok(())
+        Ok(out)
     }
 
     pub fn write_to(&mut self, out: &mut File) -> Result<()> {
-        if let Some(ref mut file) = self.file {
-            file.flush()?;
-            let path = self
-                .path
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("String pool file path missing"))?;
-            let mut input = File::open(path)?;
-            let mut buf = vec![0u8; 8 * 1024 * 1024];
-            loop {
-                let n = input.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                out.write_all(&buf[..n])?;
-            }
-        } else {
-            out.write_all(&self.mem)?;
-        }
+        let raw = self.materialize()?;
+        out.write_all(&raw)?;
         Ok(())
     }
 
-    pub fn cleanup(&mut self) {
-        if let Some(ref path) = self.path {
-            let _ = std::fs::remove_file(path);
+    pub fn cleanup(&mut self) {}
+
+    fn flush_block(&mut self) {
+        if self.current.is_empty() {
+            return;
         }
+
+        let raw_len = self.current.len();
+        let bound = self.compressor.deflate_compress_bound(raw_len);
+        if self.scratch.len() < bound {
+            self.scratch.resize(bound, 0);
+        }
+
+        let comp_len = self
+            .compressor
+            .deflate_compress(&self.current, &mut self.scratch)
+            .expect("String pool compression failed");
+
+        let mut data = vec![0u8; comp_len];
+        data.copy_from_slice(&self.scratch[..comp_len]);
+
+        self.blocks.push(CompressedBlock {
+            raw_start: self.current_start,
+            raw_len: raw_len as u32,
+            data,
+        });
+
+        self.current_start += raw_len as u64;
+        self.current.clear();
     }
 }

@@ -1,43 +1,46 @@
 use crate::util::fast_hash64;
 
 use crate::annotate::structs::ani::header::{AniEntry, ANI_STR_NONE};
-use crate::annotate::structs::ani::index::AniIndex;
+use crate::annotate::structs::ani::index::{AniIndex, CStrRef};
 use crate::annotate::structs::bundle::{parse_info_field, AnnotationBundle};
-use crate::util::{chr_name_to_id, read_cstring};
+use crate::util::chr_name_to_id;
 
 impl AniIndex {
     pub fn build_bundle_from_entry(&self, e: &AniEntry) -> AnnotationBundle {
-        let strings = self.strings_slice();
-        let alt_str = read_cstring(strings, e.alt_ofs as usize);
-        let id_str = read_cstring(strings, e.id_ofs as usize);
-        let qual_str = read_cstring(strings, e.qual_ofs as usize);
-        let filter_str = read_cstring(strings, e.filter_ofs as usize);
-        let info_str = read_cstring(strings, e.info_ofs as usize);
+        let alt_str = self.read_cstring(e.alt_ofs as usize);
+        let id_str = self.read_cstring(e.id_ofs as usize);
+        let qual_str = self.read_cstring(e.qual_ofs as usize);
+        let filter_str = self.read_cstring(e.filter_ofs as usize);
+        let info_str = self.read_cstring(e.info_ofs as usize);
         let format_str = if e.format_ofs != ANI_STR_NONE {
-            read_cstring(strings, e.format_ofs as usize)
+            self.read_cstring(e.format_ofs as usize)
         } else {
-            ""
+            CStrRef::empty()
         };
         let samples_str = if e.samples_ofs != ANI_STR_NONE {
-            read_cstring(strings, e.samples_ofs as usize)
+            self.read_cstring(e.samples_ofs as usize)
         } else {
-            ""
+            CStrRef::empty()
         };
 
-        let info = parse_info_field(info_str);
+        let info = parse_info_field(info_str.as_ref());
 
-        let format_opt = parse_optional(format_str);
-        let samples = if format_opt.is_some() && !samples_str.is_empty() {
-            samples_str.split('\t').map(|s| s.to_string()).collect()
+        let format_opt = parse_optional(format_str.as_ref());
+        let samples = if format_opt.is_some() && !samples_str.as_ref().is_empty() {
+            samples_str
+                .as_ref()
+                .split('\t')
+                .map(|s| s.to_string())
+                .collect()
         } else {
             Vec::new()
         };
 
         AnnotationBundle {
             alt: alt_str.to_string(),
-            id: parse_optional(id_str),
-            qual: parse_optional(qual_str),
-            filter: parse_optional(filter_str),
+            id: parse_optional(id_str.as_ref()),
+            qual: parse_optional(qual_str.as_ref()),
+            filter: parse_optional(filter_str.as_ref()),
             info,
             format_str: format_opt,
             format_samples: samples,
@@ -103,16 +106,16 @@ impl AniIndex {
             return None;
         }
 
-        let rf_str = read_cstring(self.strings_slice(), e.ref_ofs as usize);
-        if rf_str != rf {
+        let rf_str = self.read_cstring(e.ref_ofs as usize);
+        if rf_str.as_ref() != rf {
             if debug {
                 eprintln!("[LOOKUP] REF mismatch: expected {}, got {}", rf, rf_str);
             }
             return None;
         }
 
-        let alt_str = read_cstring(self.strings_slice(), e.alt_ofs as usize);
-        if alt_str != alt {
+        let alt_str = self.read_cstring(e.alt_ofs as usize);
+        if alt_str.as_ref() != alt {
             if debug {
                 eprintln!("[LOOKUP] ALT mismatch: expected {}, got {}", alt, alt_str);
             }
@@ -137,8 +140,8 @@ impl AniIndex {
                 continue;
             }
 
-            let rf_str = read_cstring(self.strings_slice(), e.ref_ofs as usize);
-            if rf_str != rf {
+            let rf_str = self.read_cstring(e.ref_ofs as usize);
+            if rf_str.as_ref() != rf {
                 continue;
             }
 
@@ -158,7 +161,7 @@ impl AniIndex {
         let entry = found?;
 
         if debug {
-            let alt = read_cstring(self.strings_slice(), entry.alt_ofs as usize);
+            let alt = self.read_cstring(entry.alt_ofs as usize);
             eprintln!(
                 "[LOOKUP] Using single-alt fallback: {}:{} {}>{}",
                 chr, pos, rf, alt

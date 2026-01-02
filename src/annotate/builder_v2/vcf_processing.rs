@@ -127,7 +127,6 @@ mod tests {
     use crate::util::read_cstring;
     use fxhash::FxHashMap;
     use std::collections::HashMap;
-    use std::io::{Read, Seek, SeekFrom};
     use std::sync::atomic::AtomicUsize;
 
     #[test]
@@ -157,11 +156,7 @@ mod tests {
         assert_eq!(processed, 1);
         let entry = entries_map.values().next().unwrap().0;
         assert_ne!(entry.samples_ofs, ANI_STR_NONE);
-        let mut pool_bytes = Vec::new();
-        let mut file = tempfile::tempfile().unwrap();
-        pool.write_to(&mut file).unwrap();
-        file.seek(SeekFrom::Start(0)).unwrap();
-        file.read_to_end(&mut pool_bytes).unwrap();
+        let pool_bytes = pool.materialize().unwrap();
         let samples = read_cstring(&pool_bytes, entry.samples_ofs as usize);
         assert_eq!(samples, "1|1:88,99:8.8,9.9:888,999\t0|1:77:7.7:77");
     }
