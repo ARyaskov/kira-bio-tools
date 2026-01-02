@@ -215,6 +215,10 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
 }
 
 fn save_tab_headers_to_pool(schema: &TabSchema, pool: &mut StringPool) -> Result<()> {
+    if schema.ref_idx.is_none() && schema.alt_idx.is_none() && schema.to_idx.is_some() {
+        pool.append_cstr("##KIRA_BT_ANI_INTERVALS");
+    }
+
     for col in &schema.info_cols {
         let number_str = match col.number {
             Some(FieldNumber::Zero) => "0",

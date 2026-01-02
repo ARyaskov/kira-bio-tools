@@ -1,0 +1,1 @@
+kira-bt annotate -a db.tab -c CHROM,FROM,TO,T_STR -o out.kira.vcf in.vcf

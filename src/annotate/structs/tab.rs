@@ -67,6 +67,7 @@ impl TabColumn {
 pub struct TabSchema {
     pub chrom_idx: usize,
     pub pos_idx: usize,
+    pub to_idx: Option<usize>,
     pub ref_idx: Option<usize>,
     pub alt_idx: Option<usize>,
     pub id_idx: Option<usize>,
@@ -152,6 +153,7 @@ impl TabSchema {
 
         let mut chrom_idx = None;
         let mut pos_idx = None;
+        let mut to_idx = None;
         let mut ref_idx = None;
         let mut alt_idx = None;
         let mut id_idx = None;
@@ -222,7 +224,9 @@ impl TabSchema {
                         pos_idx = Some(i);
                     }
                 }
-                "TO" | "END" => {}
+                "TO" | "END" => {
+                    to_idx = Some(i);
+                }
                 "REF" => ref_idx = Some(i),
                 "ALT" => alt_idx = Some(i),
                 "ID" => {
@@ -272,6 +276,7 @@ impl TabSchema {
         Ok(Self {
             chrom_idx,
             pos_idx,
+            to_idx,
             ref_idx,
             alt_idx,
             id_idx,

@@ -18,10 +18,23 @@ pub fn annotate_line(
 ) -> String {
     let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
 
-    let want_format = format_overwrite_all
+    let mut want_format = format_overwrite_all
         || column_modes
             .iter()
             .any(|(k, _)| k.eq_ignore_ascii_case("FMT") || k.eq_ignore_ascii_case("FORMAT"));
+
+    if !want_format {
+        let mut tabs = 0;
+        for &b in line.as_bytes() {
+            if b == b'\t' {
+                tabs += 1;
+                if tabs >= 8 {
+                    want_format = true;
+                    break;
+                }
+            }
+        }
+    }
 
     let Some(parsed) = parse_vcf_record_simd(line, want_format) else {
         return line.to_string();

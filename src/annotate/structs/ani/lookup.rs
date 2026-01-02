@@ -103,6 +103,9 @@ impl AniIndex {
                     e.chr_id, e.pos
                 );
             }
+            if let Some(idx) = self.find_interval_entry(chr_id, pos) {
+                return Some(self.build_bundle_from_entry(&self.entries[idx]));
+            }
             return None;
         }
 
@@ -111,6 +114,9 @@ impl AniIndex {
             if debug {
                 eprintln!("[LOOKUP] REF mismatch: expected {}, got {}", rf, rf_str);
             }
+            if let Some(idx) = self.find_interval_entry(chr_id, pos) {
+                return Some(self.build_bundle_from_entry(&self.entries[idx]));
+            }
             return None;
         }
 
@@ -118,6 +124,9 @@ impl AniIndex {
         if alt_str.as_ref() != alt {
             if debug {
                 eprintln!("[LOOKUP] ALT mismatch: expected {}, got {}", alt, alt_str);
+            }
+            if let Some(idx) = self.find_interval_entry(chr_id, pos) {
+                return Some(self.build_bundle_from_entry(&self.entries[idx]));
             }
             return None;
         }

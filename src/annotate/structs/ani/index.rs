@@ -133,10 +133,18 @@ impl std::fmt::Display for CStrRef<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct IntervalEntry {
+    pub start: u32,
+    pub end: u32,
+    pub entry_idx: usize,
+}
+
 pub struct AniIndex {
     pub header: AniHeader,
     pub mph: Mphf,
     pub entries: Vec<AniEntry>,
+    intervals: Vec<Vec<IntervalEntry>>,
     strings: StringSource,
     mmap: Mmap,
 }
@@ -157,13 +165,17 @@ impl AniIndex {
         let entries = load_entries(&mmap, &header)?;
         let strings = load_strings(&mmap, &header)?;
 
-        Ok(Self {
+        let mut ani = Self {
             header,
             mph,
             entries,
+            intervals: Vec::new(),
             strings,
             mmap,
-        })
+        };
+        ani.build_interval_index();
+
+        Ok(ani)
     }
 
     pub fn strings_len(&self) -> usize {
@@ -263,6 +275,50 @@ impl AniIndex {
         }
     }
 
+    pub fn find_interval_entry(&self, chr_id: u8, pos: u32) -> Option<usize> {
+        if self.intervals.is_empty() {
+            return None;
+        }
+        let list = match self.intervals.get(chr_id as usize) {
+            Some(v) => v,
+            None => return None,
+        };
+        if list.is_empty() {
+            return None;
+        }
+
+        let mut lo = 0usize;
+        let mut hi = list.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if list[mid].start > pos {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        if lo == 0 {
+            return None;
+        }
+
+        let mut idx = lo - 1;
+        loop {
+            let ent = &list[idx];
+            if pos < ent.start {
+                break;
+            }
+            if pos <= ent.end {
+                return Some(ent.entry_idx);
+            }
+            if idx == 0 {
+                break;
+            }
+            idx -= 1;
+        }
+
+        None
+    }
+
     fn decompress_block(&self, idx: usize, block: &AniBlockEntry) -> Result<Vec<u8>> {
         let start = block.data_off as usize;
         let end = start + block.data_len as usize;
@@ -277,6 +333,58 @@ impl AniIndex {
             .deflate_decompress(compressed, &mut out)
             .map_err(|_| anyhow!("ANI block {} decompression failed", idx))?;
         Ok(out)
+    }
+
+    fn build_interval_index(&mut self) {
+        if !self.has_interval_headers() {
+            return;
+        }
+
+        let mut per_chr: Vec<Vec<IntervalEntry>> = vec![Vec::new(); 256];
+        for (idx, entry) in self.entries.iter().enumerate() {
+            let rf = self.read_cstring(entry.ref_ofs as usize);
+            if rf.as_ref() != "." {
+                continue;
+            }
+            let alt = self.read_cstring(entry.alt_ofs as usize);
+            let end = match alt.as_ref().parse::<u32>() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            per_chr[entry.chr_id as usize].push(IntervalEntry {
+                start: entry.pos,
+                end,
+                entry_idx: idx,
+            });
+        }
+
+        for list in &mut per_chr {
+            if list.len() > 1 {
+                list.sort_by_key(|e| e.start);
+            }
+        }
+
+        self.intervals = per_chr;
+    }
+
+    fn has_interval_headers(&self) -> bool {
+        let mut idx = 0usize;
+        while idx < self.strings_len() {
+            let line = self.read_cstring(idx);
+            let s = line.as_ref();
+            if s.is_empty() {
+                idx += 1;
+                continue;
+            }
+            if s == "##KIRA_BT_ANI_INTERVALS" {
+                return true;
+            }
+            if s == "##KIRA_BT_ANI_HEADER_END" {
+                break;
+            }
+            idx += s.len() + 1;
+        }
+        false
     }
 }
 

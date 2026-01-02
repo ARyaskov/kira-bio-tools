@@ -29,18 +29,34 @@ pub fn process_tab_line_multiallelic(
         .ok_or_else(|| anyhow::anyhow!("Missing POS"))?;
     let pos = pos_str.parse::<u32>().unwrap_or(0);
 
-    let rf = schema
-        .ref_idx
-        .and_then(|i| parts.get(i))
-        .unwrap_or(&".")
-        .trim();
-    let alt = schema
-        .alt_idx
-        .and_then(|i| parts.get(i))
-        .unwrap_or(&".")
-        .trim();
+    let interval_mode = schema.ref_idx.is_none() && schema.alt_idx.is_none() && schema.to_idx.is_some();
+    let rf = if interval_mode {
+        "."
+    } else {
+        schema
+            .ref_idx
+            .and_then(|i| parts.get(i))
+            .unwrap_or(&".")
+            .trim()
+    };
+    let alt = if interval_mode {
+        schema
+            .to_idx
+            .and_then(|i| parts.get(i))
+            .unwrap_or(&".")
+            .trim()
+    } else {
+        schema
+            .alt_idx
+            .and_then(|i| parts.get(i))
+            .unwrap_or(&".")
+            .trim()
+    };
 
-    if rf.is_empty() || rf == "." || alt.is_empty() || alt == "." {
+    if !interval_mode && (rf.is_empty() || rf == "." || alt.is_empty() || alt == ".") {
+        return Ok(0);
+    }
+    if interval_mode && (alt.is_empty() || alt == ".") {
         return Ok(0);
     }
 
@@ -49,7 +65,11 @@ pub fn process_tab_line_multiallelic(
         None => return Ok(0),
     };
 
-    let alt_alleles: Vec<&str> = alt.split(',').collect();
+    let alt_alleles: Vec<&str> = if interval_mode {
+        vec![alt]
+    } else {
+        alt.split(',').collect()
+    };
 
     if alt_alleles.len() > 1 {
         multiallelic_count.fetch_add(1, Ordering::Relaxed);
