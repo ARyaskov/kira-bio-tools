@@ -1,0 +1,1 @@
+kira-bt annotate -a db.vcf -c ID,QUAL,FILTER,INFO,FMT in.vcf -o out.kira.vcf

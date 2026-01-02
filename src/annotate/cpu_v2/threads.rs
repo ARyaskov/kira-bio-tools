@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -7,10 +8,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::super::constants::*;
-use super::annotation::annotate_line;
-use super::column_spec::ColumnSpec;
+use crate::annotate::constants::OUTPUT_BUFFER_SIZE;
+use crate::annotate::cpu_v2::annotation::annotate_line;
+use crate::annotate::cpu_v2::column_spec::ColumnSpec;
 use crate::annotate::structs::ani::AniIndex;
+use crate::annotate::structs::annotate_mode::AnnotateMode;
 use crate::annotate::structs::bundle::FieldNumber;
 use crate::bgzf::BgzfWriter;
 
@@ -19,11 +21,18 @@ pub fn worker_thread(
     tx: Sender<Vec<String>>,
     ani: Arc<AniIndex>,
     field_meta: Arc<HashMap<String, FieldNumber>>,
-    field_order: Arc<Vec<String>>,
     column_specs: Arc<Vec<ColumnSpec>>,
+    sample_map: Arc<Vec<Option<usize>>>,
+    info_overwrite_all: bool,
+    format_overwrite_all: bool,
     num_threads: usize,
 ) -> Result<()> {
-    use rayon::prelude::*;
+    let column_modes: Arc<Vec<(String, AnnotateMode)>> = Arc::new(
+        column_specs
+            .iter()
+            .map(|c| (c.key.clone(), c.mode))
+            .collect(),
+    );
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
@@ -34,7 +43,17 @@ pub fn worker_thread(
         let annotated: Vec<String> = pool.install(|| {
             batch
                 .par_iter()
-                .map(|line| annotate_line(line, &ani, &field_meta, &field_order, &column_specs))
+                .map(|line| {
+                    annotate_line(
+                        line,
+                        &ani,
+                        &field_meta,
+                        &column_modes,
+                        &sample_map,
+                        info_overwrite_all,
+                        format_overwrite_all,
+                    )
+                })
                 .collect()
         });
 

@@ -10,6 +10,7 @@ pub use vcf_processing::process_vcf_line_multiallelic_simd;
 
 use anyhow::Result;
 use fxhash::FxHashMap;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -18,6 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::annotate::structs::ani::AniEntry;
 use crate::annotate::structs::bundle::FieldNumber;
 use crate::annotate::structs::tab::TabSchema;
+use crate::util::{extract_info_key, extract_info_number};
 use crate::vcf::UnifiedVcfReader;
 
 pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
@@ -31,7 +33,11 @@ pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
     let mut entries_map: FxHashMap<u64, (AniEntry, usize)> = FxHashMap::default();
     let mut pool = Vec::<u8>::new();
 
-    save_vcf_info_headers_to_pool(&headers, &mut pool)?;
+    let field_meta = extract_info_metadata(&headers);
+    let expected_sample_count = extract_sample_count_from_headers(&headers);
+
+    save_vcf_headers_to_pool(&headers, &mut pool)?;
+    append_header_end_marker(&mut pool);
 
     let total_variants = AtomicUsize::new(0);
     let duplicates_skipped = AtomicUsize::new(0);
@@ -55,6 +61,8 @@ pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
             &mut insertion_order,
             &duplicates_skipped,
             &multiallelic_count,
+            &field_meta,
+            expected_sample_count,
             debug,
         )?;
 
@@ -115,6 +123,13 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
                     col.number = Some(number);
                 }
             }
+
+            if let Some(number) = col.number {
+                schema
+                    .field_metadata
+                    .entry(col.key.clone())
+                    .or_insert(number);
+            }
         }
     }
 
@@ -140,6 +155,7 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
     let mut pool = Vec::<u8>::new();
 
     save_tab_headers_to_pool(&schema, &mut pool)?;
+    append_header_end_marker(&mut pool);
 
     let total_variants = AtomicUsize::new(0);
     let duplicates_skipped = AtomicUsize::new(0);
@@ -350,14 +366,94 @@ fn infer_number_from_data(
     }
 }
 
-fn save_vcf_info_headers_to_pool(headers: &[String], pool: &mut Vec<u8>) -> Result<()> {
+fn save_vcf_headers_to_pool(headers: &[String], pool: &mut Vec<u8>) -> Result<()> {
     use crate::util::append_cstr;
 
     for h in headers {
-        if h.starts_with("##INFO=") {
+        if h.starts_with("##INFO=")
+            || h.starts_with("##FORMAT=")
+            || h.starts_with("##FILTER=")
+            || h.starts_with("#CHROM")
+        {
             append_cstr(pool, h);
         }
     }
 
     Ok(())
+}
+
+fn append_header_end_marker(pool: &mut Vec<u8>) {
+    use crate::annotate::structs::ani::ANI_HEADER_END;
+    use crate::util::append_cstr;
+
+    append_cstr(pool, ANI_HEADER_END);
+}
+
+fn extract_info_metadata(headers: &[String]) -> HashMap<String, FieldNumber> {
+    let mut meta = HashMap::new();
+    for h in headers {
+        if !h.starts_with("##INFO=") {
+            continue;
+        }
+        if let Some(key) = extract_info_key(h) {
+            if let Some(number) = extract_info_number(h) {
+                meta.insert(key, number);
+            }
+        }
+    }
+    meta
+}
+
+fn extract_sample_count_from_headers(headers: &[String]) -> usize {
+    for h in headers {
+        if h.starts_with("#CHROM") {
+            let parts: Vec<&str> = h.split('\t').collect();
+            if parts.len() > 9 {
+                return parts.len() - 9;
+            }
+            break;
+        }
+    }
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_ani_index_from_tab;
+    use crate::annotate::structs::ani::AniIndex;
+    use std::fs;
+
+    #[test]
+    fn test_tab_infers_numbers_for_split_info() {
+        let dir = std::env::temp_dir();
+        let tab_path = dir.join("kira_tab_infer_test.tab");
+        let ani_path = dir.join("kira_tab_infer_test.ani");
+
+        let tab = "1\t1\tC\tA,T\t0,1.1\t1.1,0,2.2\n";
+        fs::write(&tab_path, tab).unwrap();
+
+        build_ani_index_from_tab(&tab_path, &ani_path, Some("CHROM,POS,REF,ALT,FA,FR")).unwrap();
+
+        let ani = AniIndex::open(&ani_path).unwrap();
+        let bundle = ani.lookup_exact("1", 1, "C", "T").unwrap();
+
+        let fa = bundle
+            .info
+            .iter()
+            .find(|f| f.key == "FA")
+            .map(|f| f.values.clone())
+            .unwrap();
+        let fr = bundle
+            .info
+            .iter()
+            .find(|f| f.key == "FR")
+            .map(|f| f.values.clone())
+            .unwrap();
+
+        assert_eq!(fa, vec!["1.1"]);
+        assert_eq!(fr, vec!["1.1", "2.2"]);
+
+        let _ = fs::remove_file(&tab_path);
+        let _ = fs::remove_file(&ani_path);
+    }
 }

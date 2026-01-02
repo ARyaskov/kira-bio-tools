@@ -1,20 +1,21 @@
 use std::collections::HashMap;
+use url::form_urlencoded;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FieldNumber {
     Zero,
     One,
-    Many,
     A,
     R,
     G,
+    Many,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FieldType {
-    Int,
+    Integer,
     Float,
-    Str,
+    String,
     Flag,
 }
 
@@ -33,6 +34,8 @@ pub struct AnnotationBundle {
     pub qual: Option<String>,
     pub filter: Option<String>,
     pub info: Vec<StructuredInfoField>,
+    pub format_str: Option<String>,
+    pub format_samples: Vec<String>,
 }
 
 impl AnnotationBundle {
@@ -46,11 +49,7 @@ impl AnnotationBundle {
 
         vcf_alt_alleles
             .iter()
-            .map(|vcf_alt| {
-                db_map
-                    .get(vcf_alt)
-                    .and_then(|indices| indices.first().copied())
-            })
+            .map(|vcf_alt| db_map.get(vcf_alt).and_then(|v| v.first().copied()))
             .collect()
     }
 
@@ -60,85 +59,21 @@ impl AnnotationBundle {
         allele_map: &[Option<usize>],
     ) -> Vec<String> {
         match field.number {
-            FieldNumber::A => allele_map
-                .iter()
-                .map(|opt_idx| {
-                    opt_idx
-                        .and_then(|idx| field.values.get(idx))
-                        .cloned()
-                        .unwrap_or_else(|| ".".to_string())
-                })
-                .collect(),
-            FieldNumber::R => {
-                let mut result = Vec::new();
-
-                if let Some(ref_val) = field.values.first() {
-                    result.push(ref_val.clone());
-                } else {
-                    result.push(".".to_string());
-                }
-
-                for opt_idx in allele_map {
-                    let val = opt_idx
-                        .and_then(|idx| field.values.get(idx + 1))
-                        .cloned()
-                        .unwrap_or_else(|| ".".to_string());
-                    result.push(val);
-                }
-
-                result
-            }
+            FieldNumber::A => remap_a(&field.values, allele_map),
+            FieldNumber::R => remap_r(&field.values, allele_map),
+            FieldNumber::G => remap_g_diploid(&field.values, allele_map),
             _ => field.values.clone(),
         }
     }
 }
 
 pub fn parse_info_field(info_str: &str) -> Vec<StructuredInfoField> {
-    let mut fields = Vec::new();
-
-    if info_str == "." || info_str.is_empty() {
-        return fields;
-    }
-
-    // URL-decode the info string first
-    let decoded_info = url_decode_info_value(info_str);
-
-    for pair in decoded_info.split(';') {
-        if let Some(eq_pos) = pair.find('=') {
-            let key = &pair[..eq_pos];
-            let value = &pair[eq_pos + 1..];
-            let values: Vec<String> = value.split(',').map(|s| s.to_string()).collect();
-
-            let number = if values.len() == 1 {
-                FieldNumber::One
-            } else {
-                FieldNumber::Many
-            };
-
-            let ty = infer_field_type(key);
-
-            fields.push(StructuredInfoField {
-                key: key.to_string(),
-                number,
-                ty,
-                values,
-            });
-        } else {
-            fields.push(StructuredInfoField {
-                key: pair.to_string(),
-                number: FieldNumber::Zero,
-                ty: FieldType::Flag,
-                values: vec![],
-            });
-        }
-    }
-
-    fields
+    infer_structured_info_fields(info_str, &HashMap::new())
 }
 
 pub fn infer_structured_info_fields(
-    alt_alleles: &[&str],
     info_str: &str,
+    field_meta: &HashMap<String, FieldNumber>,
 ) -> Vec<StructuredInfoField> {
     let mut fields = Vec::new();
 
@@ -146,24 +81,23 @@ pub fn infer_structured_info_fields(
         return fields;
     }
 
-    // URL-decode the info string first
     let decoded_info = url_decode_info_value(info_str);
 
     for pair in decoded_info.split(';') {
-        if let Some(eq_pos) = pair.find('=') {
-            let key = &pair[..eq_pos];
-            let value = &pair[eq_pos + 1..];
+        if pair.is_empty() {
+            continue;
+        }
+
+        if let Some((key, value)) = pair.split_once('=') {
             let values: Vec<String> = value.split(',').map(|s| s.to_string()).collect();
 
-            let number = if values.len() == alt_alleles.len() {
-                FieldNumber::A
-            } else if values.len() == alt_alleles.len() + 1 {
-                FieldNumber::R
-            } else if values.len() == 1 {
-                FieldNumber::One
-            } else {
-                FieldNumber::Many
-            };
+            let number = field_meta.get(key).copied().unwrap_or_else(|| {
+                if values.len() == 1 {
+                    FieldNumber::One
+                } else {
+                    FieldNumber::Many
+                }
+            });
 
             let ty = infer_field_type(key);
 
@@ -174,9 +108,12 @@ pub fn infer_structured_info_fields(
                 values,
             });
         } else {
+            let key = pair;
+            let number = field_meta.get(key).copied().unwrap_or(FieldNumber::Zero);
+
             fields.push(StructuredInfoField {
-                key: pair.to_string(),
-                number: FieldNumber::Zero,
+                key: key.to_string(),
+                number,
                 ty: FieldType::Flag,
                 values: vec![],
             });
@@ -186,31 +123,105 @@ pub fn infer_structured_info_fields(
     fields
 }
 
-fn url_decode_info_value(encoded: &str) -> String {
-    encoded
-        .replace("%3D", "=")
-        .replace("%2C", ",")
-        .replace("%3B", ";")
-        .replace("%2F", "/")
-        .replace("%20", " ")
-        .replace("%25", "%")
+fn url_decode_info_value(s: &str) -> String {
+    if s.contains('%') {
+        let decoded: String = form_urlencoded::parse(s.as_bytes())
+            .map(|(k, v)| {
+                if v.is_empty() {
+                    k.into_owned()
+                } else {
+                    format!("{}={}", k, v)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+        decoded.replace('&', ";")
+    } else {
+        s.to_string()
+    }
 }
 
 fn infer_field_type(key: &str) -> FieldType {
-    if key.ends_with("_AF") || key.ends_with("_FREQ") || key == "AF" || key == "FREQ" {
-        return FieldType::Float;
+    match key {
+        k if k.starts_with("I") && k.chars().nth(1).map_or(false, |c| c.is_uppercase()) => {
+            FieldType::Integer
+        }
+        k if k.starts_with("F") && k.chars().nth(1).map_or(false, |c| c.is_uppercase()) => {
+            FieldType::Float
+        }
+        _ => FieldType::String,
+    }
+}
+
+fn remap_a(values: &[String], allele_map: &[Option<usize>]) -> Vec<String> {
+    allele_map
+        .iter()
+        .map(|opt_idx| match opt_idx {
+            Some(db_idx) => values
+                .get(*db_idx)
+                .cloned()
+                .unwrap_or_else(|| ".".to_string()),
+            None => ".".to_string(),
+        })
+        .collect()
+}
+
+fn remap_r(values: &[String], allele_map: &[Option<usize>]) -> Vec<String> {
+    let mut result = Vec::new();
+
+    result.push(values.first().cloned().unwrap_or_else(|| ".".to_string()));
+
+    for opt_idx in allele_map {
+        match opt_idx {
+            Some(db_idx) => {
+                let alt_val = values
+                    .get(*db_idx + 1)
+                    .cloned()
+                    .unwrap_or_else(|| ".".to_string());
+                result.push(alt_val);
+            }
+            None => result.push(".".to_string()),
+        }
     }
 
-    if key.ends_with("_AC")
-        || key.ends_with("_AN")
-        || key.ends_with("_DP")
-        || key == "AC"
-        || key == "AN"
-        || key == "DP"
-        || key == "NS"
-    {
-        return FieldType::Int;
+    result
+}
+
+fn remap_g_diploid(values: &[String], allele_map: &[Option<usize>]) -> Vec<String> {
+    let mut result = Vec::new();
+    let max_alt = allele_map.len();
+
+    for i in 0..=max_alt {
+        for j in i..=max_alt {
+            let db_i = if i == 0 {
+                Some(0)
+            } else {
+                allele_map.get(i - 1).copied().flatten().map(|x| x + 1)
+            };
+            let db_j = if j == 0 {
+                Some(0)
+            } else {
+                allele_map.get(j - 1).copied().flatten().map(|x| x + 1)
+            };
+
+            match (db_i, db_j) {
+                (Some(a), Some(b)) => {
+                    let g_idx = if a <= b {
+                        b * (b + 1) / 2 + a
+                    } else {
+                        a * (a + 1) / 2 + b
+                    };
+                    result.push(
+                        values
+                            .get(g_idx)
+                            .cloned()
+                            .unwrap_or_else(|| ".".to_string()),
+                    );
+                }
+                _ => result.push(".".to_string()),
+            }
+        }
     }
 
-    FieldType::Str
+    result
 }

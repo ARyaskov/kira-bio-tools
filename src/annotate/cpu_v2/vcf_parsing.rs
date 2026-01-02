@@ -1,71 +1,98 @@
-use crate::vcf::VcfParser;
-use indexmap::IndexMap;
+#[derive(Debug, Clone)]
+pub struct ParsedFormat {
+    pub keys: Vec<String>,
+}
 
-pub struct ParsedVcfRecord<'a> {
-    pub chrom: &'a str,
+#[derive(Debug, Clone)]
+pub struct ParsedSample {
+    pub raw: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedVcfRecord {
+    pub chrom: String,
     pub pos: u32,
-    pub ref_allele: &'a str,
-    pub vcf_alt_alleles: Vec<&'a str>,
-    pub updated_id: String,
-    pub updated_filter: String,
-    pub info_map: IndexMap<String, String>,
-    pub rest: &'a str,
+    pub id: String,
+    pub ref_allele: String,
+    pub alt: String,
+    pub qual: String,
+    pub filter: String,
+    pub info: String,
+    pub format: Option<ParsedFormat>,
+    pub samples: Vec<ParsedSample>,
 }
 
 pub fn parse_vcf_record(line: &str) -> Option<ParsedVcfRecord> {
-    let mut parser = VcfParser::new(line);
-    let rec = parser.parse_standard_fields()?;
+    let mut fields = line.split('\t');
 
-    let pos = rec.pos.parse::<u32>().unwrap_or(0);
-    let vcf_alt_alleles: Vec<&str> = rec.alt.split(',').collect();
+    let chrom = fields.next()?.to_string();
+    let pos = fields.next()?.parse::<u32>().ok()?;
+    let id = fields.next()?.to_string();
+    let ref_allele = fields.next()?.to_string();
+    let alt = fields.next()?.to_string();
+    let qual = fields.next()?.to_string();
+    let filter = fields.next()?.to_string();
+    let info = fields.next()?.to_string();
 
-    let mut info_map: IndexMap<String, String> = IndexMap::new();
-    for kv in rec.info.split(';') {
-        if kv.is_empty() || kv == "." {
-            continue;
-        }
-        let mut parts = kv.splitn(2, '=');
-        let k = parts.next().unwrap();
-        let v = parts.next().unwrap_or("");
-        info_map.insert(k.to_string(), v.to_string());
-    }
+    let format_str = fields.next();
+    let sample_fields: Vec<&str> = fields.collect();
+
+    let (format, samples) = if let Some(fmt_str) = format_str {
+        let format_keys: Vec<String> = fmt_str.split(':').map(|s| s.to_string()).collect();
+        let format_obj = ParsedFormat { keys: format_keys };
+
+        let parsed_samples: Vec<ParsedSample> = sample_fields
+            .iter()
+            .map(|sample_data| {
+                let sample_values: Vec<String> =
+                    sample_data.split(':').map(|s| s.to_string()).collect();
+                ParsedSample { raw: sample_values }
+            })
+            .collect();
+
+        (Some(format_obj), parsed_samples)
+    } else {
+        (None, Vec::new())
+    };
 
     Some(ParsedVcfRecord {
-        chrom: rec.chrom,
+        chrom,
         pos,
-        ref_allele: rec.ref_allele,
-        vcf_alt_alleles,
-        updated_id: rec.id.to_string(),
-        updated_filter: rec.filter.to_string(),
-        info_map,
-        rest: parser.rest(),
+        id,
+        ref_allele,
+        alt,
+        qual,
+        filter,
+        info,
+        format,
+        samples,
     })
 }
 
-pub fn format_vcf_output(
-    chrom: &str,
-    pos: u32,
-    ref_allele: &str,
-    vcf_alt_alleles: &[&str],
-    rest: &str,
-    updated_id: String,
-    updated_filter: String,
-    info_str: String,
-) -> String {
-    let mut fields = vec![
-        chrom.to_string(),
-        pos.to_string(),
-        updated_id,
-        ref_allele.to_string(),
-        vcf_alt_alleles.join(","),
-        ".".to_string(),
-        updated_filter,
-        info_str,
-    ];
+impl ParsedVcfRecord {
+    pub fn to_line(&self) -> String {
+        let mut result = format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            self.chrom,
+            self.pos,
+            self.id,
+            self.ref_allele,
+            self.alt,
+            self.qual,
+            self.filter,
+            self.info
+        );
 
-    if !rest.is_empty() {
-        fields.push(rest.to_string());
+        if let Some(format) = &self.format {
+            result.push('\t');
+            result.push_str(&format.keys.join(":"));
+
+            for sample in &self.samples {
+                result.push('\t');
+                result.push_str(&sample.raw.join(":"));
+            }
+        }
+
+        result
     }
-
-    fields.join("\t")
 }

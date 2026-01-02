@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::entry_processing::{insert_or_update_entry, make_position_key};
 use super::multiallelic::split_info_for_allele;
-use crate::annotate::structs::ani::AniEntry;
+use crate::annotate::structs::ani::{AniEntry, ANI_STR_NONE};
 use crate::annotate::structs::tab::TabSchema;
 use crate::util::{append_cstr, chr_name_to_id, url_encode_info_value};
 
@@ -120,7 +120,12 @@ pub fn process_tab_line_multiallelic(
 
         let info_ofs = if !base_info_str.is_empty() && base_info_str != "." {
             let final_info = if alt_alleles.len() > 1 {
-                split_info_for_allele(&base_info_str, alt_idx, alt_alleles.len())
+                split_info_for_allele(
+                    &base_info_str,
+                    alt_idx,
+                    alt_alleles.len(),
+                    &schema.field_metadata,
+                )
             } else {
                 base_info_str.clone()
             };
@@ -151,6 +156,8 @@ pub fn process_tab_line_multiallelic(
             filter_ofs: filter_ofs as u32,
             info_ofs,
             info_len: 0,
+            format_ofs: ANI_STR_NONE,
+            samples_ofs: ANI_STR_NONE,
         };
 
         insert_or_update_entry(

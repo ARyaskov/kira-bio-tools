@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 
-use crate::annotate::structs::ani::AniIndex;
+use crate::annotate::structs::ani::{AniIndex, ANI_HEADER_END};
 use crate::annotate::structs::bundle::FieldNumber;
 use crate::util::{
     choose_best_number, extract_info_key, extract_info_number, read_cstring, url_decode_info_value,
@@ -42,33 +42,23 @@ pub fn load_and_infer_metadata(
 
 fn load_field_metadata(ani: &AniIndex, debug: bool) -> Result<HashMap<String, FieldNumber>> {
     let mut metadata = HashMap::new();
-    let strings_str = std::str::from_utf8(&ani.strings).unwrap_or("");
+    let headers = iter_ani_header_lines(ani);
 
     if debug {
         eprintln!("[DEBUG] ANI strings total length: {}", ani.strings.len());
-        let preview_len = strings_str.len().min(500);
         eprintln!(
-            "[DEBUG] First {} chars of strings: {:?}",
-            preview_len,
-            &strings_str[..preview_len]
-        );
-        let header_count = strings_str
-            .split('\0')
-            .filter(|s| s.starts_with("##INFO="))
-            .count();
-        eprintln!(
-            "[DEBUG] Found {} ##INFO headers in ANI strings",
-            header_count
+            "[DEBUG] Found {} header lines in ANI strings",
+            headers.len()
         );
     }
 
-    for line in strings_str.split('\0') {
+    for line in headers {
         if !line.starts_with("##INFO=") {
             continue;
         }
 
-        if let Some(key) = extract_info_key(line) {
-            if let Some(number) = extract_info_number(line) {
+        if let Some(key) = extract_info_key(&line) {
+            if let Some(number) = extract_info_number(&line) {
                 metadata.insert(key.clone(), number);
 
                 if debug {
@@ -91,19 +81,61 @@ fn load_field_metadata(ani: &AniIndex, debug: bool) -> Result<HashMap<String, Fi
     Ok(metadata)
 }
 
+pub fn iter_ani_header_lines(ani: &AniIndex) -> Vec<String> {
+    let mut headers = Vec::new();
+    let mut saw_header = false;
+    let mut idx = 0usize;
+    let bytes = &ani.strings;
+
+    while idx < bytes.len() {
+        let end = match bytes[idx..].iter().position(|&b| b == 0) {
+            Some(pos) => idx + pos,
+            None => bytes.len(),
+        };
+
+        if end == idx {
+            idx = end + 1;
+            continue;
+        }
+
+        let line = std::str::from_utf8(&bytes[idx..end]).unwrap_or("");
+
+        if line == ANI_HEADER_END {
+            break;
+        }
+
+        let is_header = line.starts_with("##INFO=")
+            || line.starts_with("##FORMAT=")
+            || line.starts_with("##FILTER=")
+            || line.starts_with("#CHROM");
+
+        if is_header {
+            headers.push(line.to_string());
+            saw_header = true;
+        } else if saw_header {
+            break;
+        }
+
+        idx = end + 1;
+    }
+
+    headers
+}
+
 fn infer_field_metadata_from_data(
     ani: &AniIndex,
     field_names: &[String],
     debug: bool,
 ) -> HashMap<String, FieldNumber> {
+    let field_set: HashSet<&str> = field_names.iter().map(|s| s.as_str()).collect();
     let mut candidates: HashMap<String, Vec<FieldNumber>> = HashMap::new();
 
-    for entry in ani.entries.iter().take(1000) {
-        let info_str = read_cstring(&ani.strings, entry.info_ofs as usize);
-        let decoded = url_decode_info_value(info_str);
+    for e in ani.entries.iter().take(1000) {
+        let info = read_cstring(&ani.strings, e.info_ofs as usize);
+        let decoded = url_decode_info_value(info);
 
         for kv in decoded.split(';') {
-            if kv.is_empty() || kv == "." {
+            if kv.is_empty() || !kv.contains('=') {
                 continue;
             }
 
@@ -114,7 +146,7 @@ fn infer_field_metadata_from_data(
                 None => continue,
             };
 
-            if !field_names.contains(&key.to_string()) {
+            if !field_set.contains(key) {
                 continue;
             }
 
@@ -129,7 +161,7 @@ fn infer_field_metadata_from_data(
 
             candidates
                 .entry(key.to_string())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(inferred);
         }
     }

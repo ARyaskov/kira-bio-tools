@@ -24,18 +24,13 @@ pub fn merge_info_fields(
     }
 
     let mut info_map = parse_existing_info(existing_info);
-    let per_field_ref: HashMap<String, String> = info_map
-        .iter()
-        .map(|(k, v)| (k.clone(), extract_ref_value_for_r_field(v)))
-        .collect();
 
-    // Collect REF values from annotation bundles for Number=R fields
     let mut bundle_ref_values: HashMap<String, String> = HashMap::new();
     for (_vcf_idx, bundle) in bundles {
         for field in &bundle.info {
             if let Some(field_number) = field_meta.get(&field.key) {
                 if *field_number == FieldNumber::R {
-                    if let Some(ref_val) = field.values.get(0) {
+                    if let Some(ref_val) = field.values.first() {
                         bundle_ref_values.insert(field.key.clone(), ref_val.clone());
                     }
                 }
@@ -43,12 +38,11 @@ pub fn merge_info_fields(
         }
     }
 
-    // Also check multiallelic bundle
     if let Some(ref bundle) = multiallelic_bundle {
         for field in &bundle.info {
             if let Some(field_number) = field_meta.get(&field.key) {
                 if *field_number == FieldNumber::R && !bundle_ref_values.contains_key(&field.key) {
-                    if let Some(ref_val) = field.values.get(0) {
+                    if let Some(ref_val) = field.values.first() {
                         bundle_ref_values.insert(field.key.clone(), ref_val.clone());
                     }
                 }
@@ -58,9 +52,6 @@ pub fn merge_info_fields(
 
     if debug {
         eprintln!("[MERGE] Bundle REF values: {:?}", bundle_ref_values);
-    }
-
-    if debug {
         eprintln!("[MERGE] Parsed existing info: {:?}", info_map);
     }
 
@@ -71,6 +62,85 @@ pub fn merge_info_fields(
             eprintln!("[MERGE] Processing field: {} (mode: {})", key, mode);
         }
 
+        let field_number = field_meta.get(key).copied().unwrap_or(FieldNumber::One);
+        let vcf_has_field = info_map.contains_key(key);
+        let existing_val = info_map.get(key).cloned().unwrap_or_default();
+
+        if field_number == FieldNumber::Zero {
+            let has_flag = bundles
+                .iter()
+                .any(|(_, bundle)| bundle.info.iter().any(|f| f.key == key));
+            let has_annotation_data = has_flag;
+
+            if debug {
+                eprintln!(
+                    "[MERGE] Field {} (Flag): vcf_has_field={}, existing_val='{}', has_annotation_data={}",
+                    key, vcf_has_field, existing_val, has_annotation_data
+                );
+            }
+
+            let should_transfer =
+                if mode.replace_missing && !mode.replace_non_missing && !mode.replace_all {
+                    has_annotation_data
+                } else {
+                    mode.should_transfer(
+                        !has_annotation_data,
+                        vcf_has_field,
+                        is_missing_value(&existing_val),
+                    )
+                };
+
+            if should_transfer && has_flag {
+                info_map.insert(key.to_string(), String::new());
+            }
+
+            continue;
+        }
+
+        if field_number != FieldNumber::A && field_number != FieldNumber::R {
+            let mut annotated_val: Option<String> = None;
+            for (_vcf_idx, bundle) in bundles {
+                if let Some(field) = bundle.info.iter().find(|f| f.key == key) {
+                    let joined = field.values.join(",");
+                    if !is_missing_value(&joined) {
+                        annotated_val = Some(joined);
+                        break;
+                    }
+                }
+            }
+
+            let has_annotation_data = annotated_val
+                .as_ref()
+                .map(|v| !is_missing_value(v))
+                .unwrap_or(false);
+
+            if debug {
+                eprintln!(
+                    "[MERGE] Field {} (Record): vcf_has_field={}, existing_val='{}', annotated_val={:?}",
+                    key, vcf_has_field, existing_val, annotated_val
+                );
+            }
+
+            let should_transfer =
+                if mode.replace_missing && !mode.replace_non_missing && !mode.replace_all {
+                    has_annotation_data
+                } else {
+                    mode.should_transfer(
+                        !has_annotation_data,
+                        vcf_has_field,
+                        is_missing_value(&existing_val),
+                    )
+                };
+
+            if should_transfer {
+                if let Some(val) = annotated_val {
+                    info_map.insert(key.to_string(), val);
+                }
+            }
+
+            continue;
+        }
+
         let vcf_values = collect_annotations_for_field(
             key,
             bundles,
@@ -78,9 +148,6 @@ pub fn merge_info_fields(
             vcf_alt_alleles,
             field_meta,
         );
-
-        let vcf_has_field = info_map.contains_key(key);
-        let existing_val = info_map.get(key).cloned().unwrap_or_default();
 
         let has_annotation_data = vcf_values.iter().any(|v| {
             if let Some(val) = v {
@@ -91,14 +158,12 @@ pub fn merge_info_fields(
         });
 
         if debug {
-            eprintln!("[MERGE] Field {}: vcf_values={:?}, vcf_has_field={}, existing_val='{}', has_annotation_data={}", 
-                key, vcf_values, vcf_has_field, existing_val, has_annotation_data);
+            eprintln!("[MERGE] Field {}: vcf_values={:?}, vcf_has_field={}, existing_val='{}', has_annotation_data={}",
+                      key, vcf_values, vcf_has_field, existing_val, has_annotation_data);
         }
 
-        // For +TAG mode, we need to process even if field exists to replace missing values
         let should_transfer =
             if mode.replace_missing && !mode.replace_non_missing && !mode.replace_all {
-                // This is +TAG mode - always process if we have annotation data
                 has_annotation_data
             } else {
                 mode.should_transfer(
@@ -121,7 +186,6 @@ pub fn merge_info_fields(
             continue;
         }
 
-        let field_number = field_meta.get(key).copied().unwrap_or(FieldNumber::One);
         let existing_parts: Vec<&str> = if !existing_val.is_empty() && existing_val != "." {
             existing_val.split(',').collect()
         } else {
@@ -148,7 +212,7 @@ pub fn merge_info_fields(
             ),
             FieldNumber::R => merge_field_number_r(
                 &vcf_values,
-                &bundle_ref_values, // Use bundle REF values instead of per_field_ref
+                &bundle_ref_values,
                 key,
                 &existing_parts,
                 *mode,
@@ -197,7 +261,6 @@ fn collect_annotations_for_field(
         );
     }
 
-    // Process exact matches first
     for (vcf_idx, bundle) in bundles {
         if let Some(field) = bundle.info.iter().find(|f| f.key == key) {
             if debug {
@@ -209,7 +272,6 @@ fn collect_annotations_for_field(
 
             match field_number {
                 FieldNumber::A => {
-                    // For Number=A, direct mapping vcf_idx -> field value
                     if let Some(val) = field.values.first() {
                         if *vcf_idx < values.len() {
                             values[*vcf_idx] = Some(val.clone());
@@ -217,19 +279,14 @@ fn collect_annotations_for_field(
                     }
                 }
                 FieldNumber::R => {
-                    // For Number=R, we need both REF and ALT values
-                    // field.values = [REF_val, ALT_val] for exact match
-                    // We want to store ALT_val at vcf_idx, and later add REF_val at position 0
                     if let Some(alt_val) = field.values.get(1) {
-                        // ALT value
                         if *vcf_idx < values.len() {
                             values[*vcf_idx] = Some(alt_val.clone());
 
-                            // Also store REF value for later use (we'll handle this in merge function)
                             if debug {
                                 eprintln!(
                                     "[COLLECT] R field exact match: REF={:?}, ALT[{}]={}",
-                                    field.values.get(0),
+                                    field.values.first(),
                                     vcf_idx,
                                     alt_val
                                 );
@@ -248,7 +305,6 @@ fn collect_annotations_for_field(
         }
     }
 
-    // Process multiallelic bundle for missing values
     if let Some(ref bundle) = multiallelic_bundle {
         if let Some(field) = bundle.info.iter().find(|f| f.key == key) {
             if debug {
@@ -262,7 +318,6 @@ fn collect_annotations_for_field(
 
             match field_number {
                 FieldNumber::A => {
-                    // For Number=A, we try to match each VCF allele to the DB alleles
                     for (vcf_idx, vcf_alt) in vcf_alt_alleles.iter().enumerate() {
                         if values[vcf_idx].is_none() {
                             if let Some(db_idx) =
@@ -279,7 +334,6 @@ fn collect_annotations_for_field(
                     }
                 }
                 FieldNumber::R => {
-                    // For Number=R, index 0 is REF, index i+1 is ALT[i]
                     for (vcf_idx, vcf_alt) in vcf_alt_alleles.iter().enumerate() {
                         if values[vcf_idx].is_none() {
                             if let Some(db_idx) =
@@ -296,7 +350,6 @@ fn collect_annotations_for_field(
                     }
                 }
                 _ => {
-                    // For other types, use the first value for all missing positions
                     if let Some(val) = field.values.first() {
                         for i in 0..values.len() {
                             if values[i].is_none() {
@@ -397,14 +450,6 @@ fn merge_field_number_r(
     result
 }
 
-fn is_numeric_value(s: &str, is_integer: bool) -> bool {
-    if is_integer {
-        true
-    } else {
-        s.parse::<f64>().is_ok()
-    }
-}
-
 fn parse_existing_info(info: &str) -> IndexMap<String, String> {
     let mut map = IndexMap::new();
     if info == "." || info.is_empty() {
@@ -422,14 +467,6 @@ fn parse_existing_info(info: &str) -> IndexMap<String, String> {
     }
 
     map
-}
-
-fn extract_ref_value_for_r_field(value: &str) -> String {
-    if value.is_empty() || value == "." {
-        ".".to_string()
-    } else {
-        value.split(',').next().unwrap_or(".").to_string()
-    }
 }
 
 pub fn format_info_string(info_map: &IndexMap<String, String>, field_order: &[String]) -> String {

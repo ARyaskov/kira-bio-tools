@@ -5,7 +5,13 @@ struct AniEntry {
     unsigned int pos;
     unsigned int ref_ofs;
     unsigned int alt_ofs;
+    unsigned int id_ofs;
+    unsigned int qual_ofs;
+    unsigned int filter_ofs;
     unsigned int info_ofs;
+    unsigned int info_len;
+    unsigned int format_ofs;
+    unsigned int samples_ofs;
 };
 
 __device__ __forceinline__

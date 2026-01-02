@@ -5,7 +5,13 @@ typedef struct {
     uint  pos;
     uint  ref_ofs;
     uint  alt_ofs;
+    uint  id_ofs;
+    uint  qual_ofs;
+    uint  filter_ofs;
     uint  info_ofs;
+    uint  info_len;
+    uint  format_ofs;
+    uint  samples_ofs;
 } AniEntry;
 
 __kernel void ani_lookup(

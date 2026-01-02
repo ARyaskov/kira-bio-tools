@@ -41,6 +41,9 @@ itoa = "1.0"
 libdeflater = "0.12"
 num_cpus = "1.17"
 libz-ng-sys = { version = "1.1", features = [], default-features = false }
+percent-encoding = "2.3.2"
+url = "2.5.7"
+form_urlencoded = "1.2.2"
 
 [dev-dependencies]
 tempfile = "3.15"
@@ -70,15 +73,7 @@ name = "query_bench"
 harness = false
 
 [[bench]]
-name = "norm_bench"
-harness = false
-
-[[bench]]
 name = "annotate_bench"
-harness = false
-
-[[bench]]
-name = "bgzf_parallel_bench"
 harness = false
 
 [profile.release]
