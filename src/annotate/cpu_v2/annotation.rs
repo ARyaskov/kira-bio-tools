@@ -545,34 +545,6 @@ fn merge_all_format(
     (Some(format_out), result_samples)
 }
 
-fn merge_format_value(input: Option<&str>, db: Option<&str>, mode: AnnotateMode) -> String {
-    let input_val = match input {
-        Some(v) if !v.is_empty() => v,
-        _ => ".",
-    };
-    let db_val = match db {
-        Some(v) if !v.is_empty() => v,
-        _ => ".",
-    };
-
-    let input_missing = is_missing_value(input_val);
-    let db_missing = is_missing_value(db_val);
-
-    if mode.replace_all {
-        if !db_missing || mode.carry_over_missing {
-            return db_val.to_string();
-        }
-    }
-
-    if mode.replace_missing && input_missing {
-        if !db_missing || mode.carry_over_missing {
-            return db_val.to_string();
-        }
-    }
-
-    input_val.to_string()
-}
-
 fn merge_format_value_str<'a>(
     input: Option<&'a str>,
     db: Option<&'a str>,

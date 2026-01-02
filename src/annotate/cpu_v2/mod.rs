@@ -160,7 +160,9 @@ fn read_batches(
         batch.push(line);
 
         if batch.len() >= BATCH_SIZE {
-            total_lines += batch.len();
+            if timing {
+                total_lines += batch.len();
+            }
             if read_tx
                 .send(std::mem::replace(
                     &mut batch,
@@ -179,7 +181,6 @@ fn read_batches(
     }
 
     if !batch.is_empty() {
-        total_lines += batch.len();
         let _ = read_tx.send(batch);
     }
 

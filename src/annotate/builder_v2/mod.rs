@@ -105,15 +105,11 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
     let mut schema = TabSchema::parse(input, columns)?;
 
     if schema.ref_idx.is_some() && schema.alt_idx.is_some() {
-        let chrom_idx = schema.chrom_idx;
-        let pos_idx = schema.pos_idx;
-        let ref_idx = schema.ref_idx;
         let alt_idx = schema.alt_idx;
 
         for col in schema.info_cols.iter_mut() {
             if col.number.is_none() {
-                let inferred =
-                    infer_number_from_data(input, chrom_idx, pos_idx, ref_idx, alt_idx, col.index);
+                let inferred = infer_number_from_data(input, alt_idx, col.index);
                 if let Some(number) = inferred {
                     if debug {
                         eprintln!(
@@ -299,9 +295,6 @@ fn print_final_stats(
 
 fn infer_number_from_data(
     file_path: &Path,
-    chrom_idx: usize,
-    pos_idx: usize,
-    ref_idx: Option<usize>,
     alt_idx: Option<usize>,
     col_idx: usize,
 ) -> Option<FieldNumber> {

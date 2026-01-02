@@ -158,6 +158,7 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 #[inline]
+#[allow(dead_code)]
 fn parse_chromosome_fast(bytes: &[u8]) -> Option<ChrId> {
     let bytes = if bytes.len() > 3 && &bytes[..3] == b"chr" {
         &bytes[3..]
@@ -185,6 +186,7 @@ fn parse_chromosome_fast(bytes: &[u8]) -> Option<ChrId> {
 }
 
 #[inline]
+#[allow(dead_code)]
 fn parse_u32_fast(bytes: &[u8]) -> Option<u32> {
     if bytes.is_empty() || bytes.len() > 10 {
         return None;

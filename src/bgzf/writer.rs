@@ -17,8 +17,8 @@ pub struct BgzfWriter {
     tx: Sender<(Vec<u8>, usize)>,
     writer_thread: Option<thread::JoinHandle<io::Result<()>>>,
     sequence: AtomicUsize,
-    num_workers: usize,
-    write_pool: WritePool,
+    _num_workers: usize,
+    _write_pool: WritePool,
 }
 
 impl BgzfWriter {
@@ -61,8 +61,8 @@ impl BgzfWriter {
             tx: chunk_tx,
             writer_thread: Some(writer_thread),
             sequence: AtomicUsize::new(0),
-            num_workers,
-            write_pool: pool,
+            _num_workers: num_workers,
+            _write_pool: pool,
         })
     }
 

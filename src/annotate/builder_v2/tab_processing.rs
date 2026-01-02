@@ -29,7 +29,8 @@ pub fn process_tab_line_multiallelic(
         .ok_or_else(|| anyhow::anyhow!("Missing POS"))?;
     let pos = pos_str.parse::<u32>().unwrap_or(0);
 
-    let interval_mode = schema.ref_idx.is_none() && schema.alt_idx.is_none() && schema.to_idx.is_some();
+    let interval_mode =
+        schema.ref_idx.is_none() && schema.alt_idx.is_none() && schema.to_idx.is_some();
     let rf = if interval_mode {
         "."
     } else {

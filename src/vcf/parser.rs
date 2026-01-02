@@ -55,12 +55,11 @@ impl<'a> VcfParser<'a> {
 
 pub struct InfoParser<'a> {
     data: &'a str,
-    pos: usize,
 }
 
 impl<'a> InfoParser<'a> {
     pub fn new(data: &'a str) -> Self {
-        Self { data, pos: 0 }
+        Self { data }
     }
 
     pub fn iter(&self) -> InfoIterator<'a> {
