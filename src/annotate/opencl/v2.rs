@@ -11,7 +11,6 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,7 +19,7 @@ use std::time::Instant;
 
 use crate::annotate::constants::CHANNEL_DEPTH;
 use crate::annotate::cpu_v2::field_metadata::{iter_ani_header_lines, load_and_infer_metadata};
-use crate::annotate::cpu_v2::vcf_parsing::{parse_vcf_record, ParsedVcfRecord};
+use crate::annotate::cpu_v2::vcf_parsing::parse_vcf_record;
 use crate::annotate::cpu_v2::{
     annotate_record_with_bundles, build_sample_map, expand_column_specs,
     extract_samples_from_headers, merge_annotation_headers, writer_thread, ColumnSpec,
@@ -553,180 +552,6 @@ pub fn annotate_vcf_opencl_v2_with_gpu(
         }
         Ok(())
     })?;
-
-    Ok(())
-}
-
-struct ParsedLine {
-    raw: String,
-    parsed: Option<ParsedVcfRecord>,
-    alt_alleles: Vec<String>,
-    chr_id: Option<u8>,
-}
-
-fn process_records<W: Write>(
-    writer: &mut W,
-    reader: &mut StreamingVcfReader,
-    gpu: &mut OpenCLv2,
-    ani: &AniIndex,
-    field_meta: &HashMap<String, FieldNumber>,
-    column_modes: &[(String, AnnotateMode)],
-    sample_map: &[Option<usize>],
-    info_overwrite_all: bool,
-    format_overwrite_all: bool,
-) -> Result<()> {
-    let mut lines: Vec<String> = Vec::with_capacity(LINE_BATCH);
-    loop {
-        lines.clear();
-        while lines.len() < LINE_BATCH {
-            let Some(line) = reader.read_line()? else {
-                break;
-            };
-            if line.starts_with('#') {
-                continue;
-            }
-            lines.push(line);
-        }
-
-        if lines.is_empty() {
-            break;
-        }
-
-        let parsed_lines: Vec<ParsedLine> = lines
-            .par_iter()
-            .map(|line| {
-                let parsed = parse_vcf_record(line);
-                let (alt_alleles, chr_id) = if let Some(ref p) = parsed {
-                    let chr_id = chr_name_to_id(&p.chrom);
-                    let alts = p.alt.split(',').map(|s| s.to_string()).collect::<Vec<_>>();
-                    (alts, chr_id)
-                } else {
-                    (Vec::new(), None)
-                };
-
-                ParsedLine {
-                    raw: line.clone(),
-                    parsed,
-                    alt_alleles,
-                    chr_id,
-                }
-            })
-            .collect();
-
-        flush_batch(
-            writer,
-            gpu,
-            ani,
-            field_meta,
-            column_modes,
-            sample_map,
-            info_overwrite_all,
-            format_overwrite_all,
-            &parsed_lines,
-        )?;
-    }
-
-    Ok(())
-}
-
-fn flush_batch<W: Write>(
-    writer: &mut W,
-    gpu: &mut OpenCLv2,
-    ani: &AniIndex,
-    field_meta: &HashMap<String, FieldNumber>,
-    column_modes: &[(String, AnnotateMode)],
-    sample_map: &[Option<usize>],
-    info_overwrite_all: bool,
-    format_overwrite_all: bool,
-    lines: &[ParsedLine],
-) -> Result<()> {
-    let timing = false;
-    let mut write_total = 0f64;
-    let mut kernel_total = 0f64;
-    let mut read_total = 0f64;
-    if lines.is_empty() {
-        return Ok(());
-    }
-
-    let mut bundles_per_line: Vec<Vec<(usize, AnnotationBundle)>> = vec![Vec::new(); lines.len()];
-
-    let mut keys: Vec<u64> = Vec::new();
-    let mut key_line_idx: Vec<usize> = Vec::new();
-    let mut key_alt_idx: Vec<usize> = Vec::new();
-
-    keys.reserve(lines.len());
-    key_line_idx.reserve(lines.len());
-    key_alt_idx.reserve(lines.len());
-
-    for (line_idx, line) in lines.iter().enumerate() {
-        let Some(ref parsed) = line.parsed else {
-            continue;
-        };
-        let Some(chr_id) = line.chr_id else {
-            continue;
-        };
-        for (alt_idx, alt) in line.alt_alleles.iter().enumerate() {
-            keys.push(make_key(chr_id, parsed.pos, &parsed.ref_allele, alt));
-            key_line_idx.push(line_idx);
-            key_alt_idx.push(alt_idx);
-        }
-    }
-
-    let mut offset = 0usize;
-    while offset < keys.len() {
-        let end = (offset + gpu.batch_cap).min(keys.len());
-        let idxs = gpu.run_batch(
-            &keys[offset..end],
-            timing,
-            &mut write_total,
-            &mut kernel_total,
-            &mut read_total,
-        )?;
-        for (i, idx) in idxs.iter().enumerate() {
-            let global = offset + i;
-            let line_idx = key_line_idx[global];
-            let alt_idx = key_alt_idx[global];
-
-            let Some(ref parsed) = lines[line_idx].parsed else {
-                continue;
-            };
-            let Some(chr_id) = lines[line_idx].chr_id else {
-                continue;
-            };
-            if *idx == u32::MAX {
-                continue;
-            }
-
-            let bundle = ani.build_bundle_from_entry(&ani.entries[*idx as usize]);
-            bundles_per_line[line_idx].push((alt_idx, bundle));
-        }
-        offset = end;
-    }
-
-    let outputs: Vec<String> = lines
-        .par_iter()
-        .enumerate()
-        .map(|(i, line)| {
-            if let Some(ref parsed) = line.parsed {
-                annotate_record_with_bundles(
-                    parsed,
-                    &bundles_per_line[i],
-                    field_meta,
-                    column_modes,
-                    sample_map,
-                    info_overwrite_all,
-                    format_overwrite_all,
-                    false,
-                )
-            } else {
-                line.raw.clone()
-            }
-        })
-        .collect();
-
-    for out in outputs {
-        writeln!(writer, "{}", out)?;
-    }
 
     Ok(())
 }

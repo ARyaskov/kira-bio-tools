@@ -120,7 +120,7 @@ impl GpuAni {
         Ok(out)
     }
 
-    pub fn lookup_batch_with_buffers(
+    fn lookup_batch_with_buffers(
         &self,
         keys: &[u64],
         buffers: &mut GpuLookupBuffers,

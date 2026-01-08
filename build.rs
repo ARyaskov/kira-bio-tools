@@ -1,15 +1,14 @@
 fn main() {
     if std::env::var("CARGO_FEATURE_GPU").is_err() {
-        println!("cargo:warning=GPU feature disabled → skipping CUDA build");
         return;
     }
 
-    println!("cargo:warning=GPU feature enabled → checking nvcc...");
+    println!("cargo:warning=GPU feature enabled -> checking nvcc...");
 
     let nvcc = match which::which("nvcc") {
         Ok(path) => path,
         Err(_) => {
-            println!("cargo:warning=CUDA toolkit not found → GPU backend disabled");
+            println!("cargo:warning=CUDA toolkit not found -> GPU backend disabled");
             return;
         }
     };
@@ -27,7 +26,7 @@ fn main() {
             "src/annotate/cuda/ani_kernel.cu",
             "-o",
             &output_ptx,
-            "-arch=sm_75",
+            "-arch=sm_61",
             "-O3",
         ])
         .status()
