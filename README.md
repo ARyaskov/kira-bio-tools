@@ -36,7 +36,12 @@ Binaries installed:
 ```bash
 git clone https://github.com/ARyaskov/kira-bio-tools.git
 cd kira-bio-tools
-cargo build --release --features cli
+cargo build --release --features gpu,opencl
+```
+
+CUDA code must be compiled with x64 Native Tools Command Prompt for VS 2022 and:
+```bash
+nvcc.exe -std=c++14 -O3 -arch=sm_61 -ptx -ccbin "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.36.32532\bin\Hostx64\x64"  -o ani_kernel.ptx src\annotate\cuda\ani_kernel.cu
 ```
 
 Binaries will be in `target/release/`:
@@ -48,6 +53,11 @@ Use KIRA_BT_TIMING=1 and KIRA_BT_DEBUG=1 envs for time consumption output.
 ```
 $env:KIRA_BT_DEBUG = "1"
 $env:KIRA_BT_TIMING = "1"
+```
+
+### Annotate: GPU Multitasking 
+```bash
+.\clinvar.vcf.gz  .\out1.vcf.gz .\clinvar.vcf.gz  .\out2.vcf.gz .\clinvar.vcf.gz  .\out3.vcf.gz .\clinvar.vcf.gz  .\out4.vcf.gz .\clinvar.vcf.gz  .\out5.vcf.gz .\clinvar.vcf.gz  .\out6.vcf.gz .\clinvar.vcf.gz  .\out7.vcf.gz .\clinvar.vcf.gz  .\out8.vcf.gz .\clinvar.vcf.gz  .\out9.vcf.gz .\clinvar.vcf.gz  .\out10.vcf.gz
 ```
 
 ### Tabix Mode (Full Compatibility)

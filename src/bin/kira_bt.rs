@@ -22,6 +22,9 @@ enum Commands {
     #[command(about = "Annotate VCF using ANI index (bcftools annotate -a style)")]
     Annotate(AnnotateArgs),
 
+    #[command(about = "OpenCL annotate server (stdin commands)")]
+    AnnotateServe(AnnotateServeArgs),
+
     #[command(about = "Tabix-compatible indexer and query tool")]
     Tabix(TabixArgs),
 
@@ -67,6 +70,7 @@ fn main() -> Result<()> {
         Commands::Norm(args) => cmd_norm(args),
         Commands::AnnotateIndex(args) => cmd_annotate_index(args),
         Commands::Annotate(args) => cmd_annotate(args),
+        Commands::AnnotateServe(args) => cmd_annotate_serve(args),
         Commands::DbBuild(args) => cmd_db_build(args),
         Commands::Filter(args) => cmd_filter(&args),
     };

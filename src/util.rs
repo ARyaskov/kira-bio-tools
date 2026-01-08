@@ -1,3 +1,5 @@
+use memmap2::MmapMut;
+use std::fs::OpenOptions;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -329,83 +331,7 @@ use fxhash::hash64;
 
 #[inline]
 pub fn fast_hash64(bytes: &[u8]) -> u64 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("sse4.2") {
-            let crc = unsafe { crc32_sse42(bytes) };
-            if is_x86_feature_detected!("pclmulqdq") {
-                return unsafe { clmul_mix(crc, bytes.len() as u64) };
-            }
-            return crc ^ ((bytes.len() as u64).wrapping_mul(0x9e3779b97f4a7c15));
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if std::arch::is_aarch64_feature_detected!("crc") {
-            let crc = unsafe { crc32_aarch64(bytes) };
-            return crc ^ ((bytes.len() as u64).wrapping_mul(0x9e3779b97f4a7c15)) ^ (crc >> 33);
-        }
-    }
     hash64(bytes)
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.2")]
-unsafe fn crc32_sse42(bytes: &[u8]) -> u64 {
-    use core::arch::x86_64::{_mm_crc32_u64, _mm_crc32_u8};
-    use std::ptr::read_unaligned;
-
-    let mut crc: u64 = 0;
-    let mut i = 0usize;
-    let len = bytes.len();
-
-    while i + 8 <= len {
-        let v = read_unaligned(bytes.as_ptr().add(i) as *const u64);
-        crc = _mm_crc32_u64(crc, v);
-        i += 8;
-    }
-
-    while i < len {
-        crc = _mm_crc32_u8(crc as u32, *bytes.get_unchecked(i)) as u64;
-        i += 1;
-    }
-
-    crc
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "pclmulqdq")]
-unsafe fn clmul_mix(crc: u64, len: u64) -> u64 {
-    use core::arch::x86_64::{_mm_clmulepi64_si128, _mm_set_epi64x};
-    let a = _mm_set_epi64x(0, crc as i64);
-    let b = _mm_set_epi64x(0, (len ^ 0x9e3779b97f4a7c15) as i64);
-    let p = _mm_clmulepi64_si128(a, b, 0x00);
-    let out: [u64; 2] = std::mem::transmute(p);
-    out[0] ^ out[1] ^ crc
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "crc")]
-unsafe fn crc32_aarch64(bytes: &[u8]) -> u64 {
-    use core::arch::aarch64::{__crc32b, __crc32d};
-    use std::ptr::read_unaligned;
-
-    let mut crc: u32 = 0;
-    let mut i = 0usize;
-    let len = bytes.len();
-
-    while i + 8 <= len {
-        let v = read_unaligned(bytes.as_ptr().add(i) as *const u64);
-        crc = __crc32d(crc, v);
-        i += 8;
-    }
-
-    while i < len {
-        crc = __crc32b(crc, *bytes.get_unchecked(i));
-        i += 1;
-    }
-
-    crc as u64
 }
 
 pub fn extract_info_key(line: &str) -> Option<String> {
@@ -469,4 +395,69 @@ pub fn choose_best_number(numbers: &[FieldNumber]) -> FieldNumber {
     }
 
     One
+}
+
+pub struct MmapWriter {
+    file: std::fs::File,
+    map: MmapMut,
+    map_size: usize,
+    grow_step: usize,
+    offset: usize,
+}
+
+impl MmapWriter {
+    pub fn create(path: &Path, initial_size: usize) -> std::io::Result<Self> {
+        let size = initial_size.max(1);
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        file.set_len(size as u64)?;
+        let map = unsafe { MmapMut::map_mut(&file)? };
+        Ok(Self {
+            file,
+            map,
+            map_size: size,
+            grow_step: size,
+            offset: 0,
+        })
+    }
+
+    pub fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.ensure_capacity(data.len())?;
+        let end = self.offset + data.len();
+        self.map[self.offset..end].copy_from_slice(data);
+        self.offset = end;
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> std::io::Result<()> {
+        self.map.flush()
+    }
+
+    pub fn finish(mut self, flush: bool) -> std::io::Result<()> {
+        if flush {
+            self.flush()?;
+        }
+        self.file.set_len(self.offset as u64)?;
+        Ok(())
+    }
+
+    fn ensure_capacity(&mut self, additional: usize) -> std::io::Result<()> {
+        let needed = self.offset + additional;
+        if needed <= self.map_size {
+            return Ok(());
+        }
+        let mut new_size = self.map_size;
+        while new_size < needed {
+            new_size += self.grow_step;
+        }
+        self.map.flush()?;
+        self.file.set_len(new_size as u64)?;
+        self.map = unsafe { MmapMut::map_mut(&self.file)? };
+        self.map_size = new_size;
+        Ok(())
+    }
 }

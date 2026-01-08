@@ -38,7 +38,7 @@ crossbeam-channel = "0.5"
 smallvec = { version = "1.13", features = ["union", "const_generics"] }
 memchr = "2.7"
 itoa = "1.0"
-libdeflater = "0.12"
+libdeflater = "1.25"
 num_cpus = "1.17"
 libz-ng-sys = { version = "1.1", features = [], default-features = false }
 percent-encoding = "2.3.2"

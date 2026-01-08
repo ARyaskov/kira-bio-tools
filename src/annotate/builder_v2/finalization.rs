@@ -1,7 +1,7 @@
 use anyhow::Result;
 use kira_kv_engine::{BuildConfig, Builder};
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::mem;
 use std::path::Path;
 
@@ -187,21 +187,19 @@ fn write_ani_file(
     };
 
     let write_start = std::time::Instant::now();
-    let mut file = File::create(output)?;
+    let file = File::create(output)?;
+    let mut file = BufWriter::with_capacity(8 * 1024 * 1024, file);
 
     let hdr_bytes: &[u8] =
         unsafe { std::slice::from_raw_parts(&header as *const _ as *const u8, hdr_size) };
     file.write_all(hdr_bytes)?;
 
-    for g in &mph.g {
-        file.write_all(&g.to_le_bytes())?;
-    }
+    let g_bytes: &[u8] = unsafe { std::slice::from_raw_parts(mph.g.as_ptr() as *const u8, g_size) };
+    file.write_all(g_bytes)?;
 
-    for e in entries {
-        let e_bytes: &[u8] =
-            unsafe { std::slice::from_raw_parts(e as *const _ as *const u8, mem::size_of_val(e)) };
-        file.write_all(e_bytes)?;
-    }
+    let entries_bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(entries.as_ptr() as *const u8, ent_size) };
+    file.write_all(entries_bytes)?;
 
     let mut block_entries = Vec::with_capacity(blocks.len());
     let mut cur_off = block_data_off;
@@ -215,15 +213,19 @@ fn write_ani_file(
         cur_off += b.data.len() as u64;
     }
 
-    for e in &block_entries {
-        let e_bytes: &[u8] =
-            unsafe { std::slice::from_raw_parts(e as *const _ as *const u8, mem::size_of_val(e)) };
-        file.write_all(e_bytes)?;
-    }
+    let block_entries_bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            block_entries.as_ptr() as *const u8,
+            block_entries.len() * mem::size_of::<AniBlockEntry>(),
+        )
+    };
+    file.write_all(block_entries_bytes)?;
 
     for b in blocks {
         file.write_all(&b.data)?;
     }
+
+    file.flush()?;
 
     if timing {
         eprintln!(

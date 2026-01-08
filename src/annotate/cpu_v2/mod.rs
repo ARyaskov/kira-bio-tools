@@ -33,6 +33,11 @@ pub fn annotate_vcf_ani_v2(
     input: &Path,
     output: &Path,
     columns: &[String],
+    bgzf_level: Option<u32>,
+    mmap_output: bool,
+    mmap_no_flush: bool,
+    ram_output: bool,
+    ram_max_mb: u32,
 ) -> Result<()> {
     let timing = std::env::var("KIRA_BT_TIMING").is_ok();
     let debug = std::env::var("KIRA_BT_DEBUG").is_ok() || timing;
@@ -112,6 +117,8 @@ pub fn annotate_vcf_ani_v2(
     let field_meta_clone = Arc::new(field_meta);
     let column_specs_arc = Arc::new(column_specs);
     let sample_map_arc = Arc::new(sample_map);
+    let bundle_acc = Arc::new(BundleTimingAccum::new());
+    let bundle_acc_worker = bundle_acc.clone();
 
     let worker = thread::spawn(move || {
         worker_thread(
@@ -124,12 +131,26 @@ pub fn annotate_vcf_ani_v2(
             info_overwrite_all,
             format_overwrite_all,
             num_threads,
+            timing,
+            bundle_acc_worker,
         )
     });
 
     let output_clone = output.to_path_buf();
     let writer = thread::spawn(move || {
-        writer_thread(work_rx, merged_headers, &output_clone, use_bgzf, timing)
+        writer_thread(
+            work_rx,
+            merged_headers,
+            &output_clone,
+            use_bgzf,
+            bgzf_level,
+            mmap_output,
+            mmap_no_flush,
+            ram_output,
+            ram_max_mb,
+            timing,
+            "cpu",
+        )
     });
 
     read_batches(&mut reader, read_tx, timing)?;
@@ -141,6 +162,13 @@ pub fn annotate_vcf_ani_v2(
         eprintln!(
             "[annotate] Total time: {:.3}s",
             start.elapsed().as_secs_f64()
+        );
+    }
+    if timing {
+        let (r, i, o, s) = bundle_acc.snapshot_seconds();
+        eprintln!(
+            "[annotate] bundle_read: {:.3}s, bundle_info: {:.3}s, bundle_optional: {:.3}s, bundle_samples: {:.3}s",
+            r, i, o, s
         );
     }
 

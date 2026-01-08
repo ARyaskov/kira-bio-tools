@@ -2,25 +2,33 @@
 
 use crate::util::fast_hash64;
 use anyhow::{Context, Result};
-use ocl::{Buffer, ProQue};
+use crossbeam_channel::{bounded, Receiver, Sender};
+use ocl::core::{ProgramInfo, ProgramInfoResult};
+use ocl::{
+    Buffer, Context as OclContext, Device, DeviceType, Kernel, Platform, ProQue, Program, Queue,
+};
 use rayon::prelude::*;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::ffi::CString;
+use std::fs;
+use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::thread;
+use std::time::Instant;
 
-use crate::annotate::constants::OUTPUT_BUFFER_SIZE;
+use crate::annotate::constants::CHANNEL_DEPTH;
 use crate::annotate::cpu_v2::field_metadata::{iter_ani_header_lines, load_and_infer_metadata};
 use crate::annotate::cpu_v2::vcf_parsing::{parse_vcf_record, ParsedVcfRecord};
 use crate::annotate::cpu_v2::{
     annotate_record_with_bundles, build_sample_map, expand_column_specs,
-    extract_samples_from_headers, merge_annotation_headers, ColumnSpec,
+    extract_samples_from_headers, merge_annotation_headers, writer_thread, ColumnSpec,
 };
 use crate::annotate::reader::{StreamingVcfReader, VcfAnnotationReader};
 use crate::annotate::structs::ani::AniIndex;
 use crate::annotate::structs::annotate_mode::AnnotateMode;
 use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber};
-use crate::bgzf::BgzfWriter;
 use crate::util::{chr_name_to_id, detect_format, VcfFormat};
 
 const LINE_BATCH: usize = 200_000;
@@ -31,6 +39,7 @@ pub struct OpenCLv2 {
     buf_keys: Buffer<u64>,
     buf_entry_keys: Buffer<u64>,
     buf_out: Buffer<u32>,
+    kernel: Kernel,
     batch_cap: usize,
     m: u32,
     n: u32,
@@ -41,7 +50,8 @@ impl OpenCLv2 {
     pub fn new(ani: &AniIndex, batch_cap: usize) -> Result<Self> {
         let src = include_str!("ani_opencl_v2.cl");
 
-        let pq = ProQue::builder().src(src).dims(1).build()?;
+        let (platform, device) = pick_opencl_device()?;
+        let pq = build_proque_with_cache(src, platform, device)?;
 
         let buf_g = pq
             .buffer_builder::<u32>()
@@ -60,12 +70,25 @@ impl OpenCLv2 {
             .context("Failed to create buf_entry_keys")?;
         let buf_out = pq.buffer_builder::<u32>().len(batch_cap).build()?;
 
+        let kernel = pq
+            .kernel_builder("ani_lookup_kernel_v2")
+            .arg(&buf_keys)
+            .arg(&buf_g)
+            .arg(ani.mph.m)
+            .arg(ani.mph.n as u32)
+            .arg(ani.mph.salt)
+            .arg(&buf_entry_keys)
+            .arg(&buf_out)
+            .arg(0i32)
+            .build()?;
+
         Ok(Self {
             pq,
             buf_g,
             buf_keys,
             buf_entry_keys,
             buf_out,
+            kernel,
             batch_cap,
             m: ani.mph.m,
             n: ani.mph.n as u32,
@@ -74,45 +97,367 @@ impl OpenCLv2 {
     }
 
     #[inline]
-    pub fn run_batch(&self, keys: &[u64]) -> Result<Vec<u32>> {
+    pub fn run_batch(
+        &mut self,
+        keys: &[u64],
+        timing: bool,
+        write_total: &mut f64,
+        kernel_total: &mut f64,
+        read_total: &mut f64,
+    ) -> Result<Vec<u32>> {
         let batch = keys.len();
         if batch > self.batch_cap {
             anyhow::bail!("OpenCL batch size {} exceeds cap {}", batch, self.batch_cap);
         }
 
-        self.buf_keys.write(keys).enq()?;
+        if timing {
+            let start = Instant::now();
+            self.buf_keys.write(keys).enq()?;
+            *write_total += start.elapsed().as_secs_f64();
+        } else {
+            self.buf_keys.write(keys).enq()?;
+        }
+
+        self.kernel.set_arg(7, batch as i32)?;
+
+        if timing {
+            let start = Instant::now();
+            unsafe {
+                self.kernel.cmd().global_work_size(batch).enq()?;
+            }
+            *kernel_total += start.elapsed().as_secs_f64();
+        } else {
+            unsafe {
+                self.kernel.cmd().global_work_size(batch).enq()?;
+            }
+        }
+
+        let mut out = vec![0u32; batch];
+        if timing {
+            let start = Instant::now();
+            self.buf_out.read(&mut out).enq()?;
+            *read_total += start.elapsed().as_secs_f64();
+        } else {
+            self.buf_out.read(&mut out).enq()?;
+        }
+        Ok(out)
+    }
+
+    pub fn run_batch_from_strings(
+        &self,
+        ref_pool: &[u8],
+        ref_offsets: &[u32],
+        ref_lens: &[u32],
+        alt_pool: &[u8],
+        alt_offsets: &[u32],
+        alt_lens: &[u32],
+        key_ref_idx: &[u32],
+        key_chr: &[u8],
+        key_pos: &[u32],
+        timing: bool,
+        write_total: &mut f64,
+        kernel_total: &mut f64,
+        read_total: &mut f64,
+    ) -> Result<Vec<u32>> {
+        let nkeys = alt_offsets.len();
+        if nkeys == 0 {
+            return Ok(Vec::new());
+        }
+
+        let buf_ref_pool = if timing {
+            let start = Instant::now();
+            let buf = self
+                .pq
+                .buffer_builder::<u8>()
+                .len(ref_pool.len())
+                .copy_host_slice(ref_pool)
+                .build()
+                .context("Failed to create ref pool buffer")?;
+            *write_total += start.elapsed().as_secs_f64();
+            buf
+        } else {
+            self.pq
+                .buffer_builder::<u8>()
+                .len(ref_pool.len())
+                .copy_host_slice(ref_pool)
+                .build()
+                .context("Failed to create ref pool buffer")?
+        };
+        let buf_ref_offsets = self
+            .pq
+            .buffer_builder::<u32>()
+            .len(ref_offsets.len())
+            .copy_host_slice(ref_offsets)
+            .build()
+            .context("Failed to create ref offsets buffer")?;
+        let buf_ref_lens = self
+            .pq
+            .buffer_builder::<u32>()
+            .len(ref_lens.len())
+            .copy_host_slice(ref_lens)
+            .build()
+            .context("Failed to create ref lens buffer")?;
+        let buf_alt_pool = if timing {
+            let start = Instant::now();
+            let buf = self
+                .pq
+                .buffer_builder::<u8>()
+                .len(alt_pool.len())
+                .copy_host_slice(alt_pool)
+                .build()
+                .context("Failed to create alt pool buffer")?;
+            *write_total += start.elapsed().as_secs_f64();
+            buf
+        } else {
+            self.pq
+                .buffer_builder::<u8>()
+                .len(alt_pool.len())
+                .copy_host_slice(alt_pool)
+                .build()
+                .context("Failed to create alt pool buffer")?
+        };
+        let buf_alt_offsets = self
+            .pq
+            .buffer_builder::<u32>()
+            .len(alt_offsets.len())
+            .copy_host_slice(alt_offsets)
+            .build()
+            .context("Failed to create alt offsets buffer")?;
+        let buf_alt_lens = self
+            .pq
+            .buffer_builder::<u32>()
+            .len(alt_lens.len())
+            .copy_host_slice(alt_lens)
+            .build()
+            .context("Failed to create alt lens buffer")?;
+        let buf_key_ref_idx = self
+            .pq
+            .buffer_builder::<u32>()
+            .len(key_ref_idx.len())
+            .copy_host_slice(key_ref_idx)
+            .build()
+            .context("Failed to create key ref idx buffer")?;
+        let buf_key_chr = self
+            .pq
+            .buffer_builder::<u8>()
+            .len(key_chr.len())
+            .copy_host_slice(key_chr)
+            .build()
+            .context("Failed to create key chr buffer")?;
+        let buf_key_pos = self
+            .pq
+            .buffer_builder::<u32>()
+            .len(key_pos.len())
+            .copy_host_slice(key_pos)
+            .build()
+            .context("Failed to create key pos buffer")?;
+        let buf_out = self
+            .pq
+            .buffer_builder::<u32>()
+            .len(nkeys)
+            .build()
+            .context("Failed to create out buffer")?;
 
         let kernel = self
             .pq
-            .kernel_builder("ani_lookup_kernel_v2")
-            .arg(&self.buf_keys)
+            .kernel_builder("ani_lookup_from_strings_kernel")
+            .arg(&buf_ref_pool)
+            .arg(&buf_ref_offsets)
+            .arg(&buf_ref_lens)
+            .arg(&buf_alt_pool)
+            .arg(&buf_alt_offsets)
+            .arg(&buf_alt_lens)
+            .arg(&buf_key_ref_idx)
+            .arg(&buf_key_chr)
+            .arg(&buf_key_pos)
             .arg(&self.buf_g)
             .arg(self.m)
             .arg(self.n)
             .arg(self.salt)
             .arg(&self.buf_entry_keys)
-            .arg(&self.buf_out)
-            .arg(batch as i32)
-            .global_work_size(batch)
+            .arg(&buf_out)
+            .arg(nkeys as i32)
+            .global_work_size(nkeys)
             .build()?;
 
-        unsafe {
-            kernel.enq()?;
+        if timing {
+            let start = Instant::now();
+            unsafe {
+                kernel.enq()?;
+            }
+            *kernel_total += start.elapsed().as_secs_f64();
+        } else {
+            unsafe {
+                kernel.enq()?;
+            }
         }
 
-        let mut out = vec![0u32; batch];
-        self.buf_out.read(&mut out).enq()?;
+        let mut out = vec![0u32; nkeys];
+        if timing {
+            let start = Instant::now();
+            buf_out.read(&mut out).enq()?;
+            *read_total += start.elapsed().as_secs_f64();
+        } else {
+            buf_out.read(&mut out).enq()?;
+        }
         Ok(out)
+    }
+
+    pub fn batch_cap(&self) -> usize {
+        self.batch_cap
     }
 }
 
+fn pick_opencl_device() -> Result<(Platform, Device)> {
+    let platforms = Platform::list();
+    let mut fallback: Option<(Platform, Device)> = None;
+
+    for platform in platforms.iter().copied() {
+        let devices = Device::list(platform, Some(DeviceType::GPU))?;
+        for device in devices {
+            let vendor = device.vendor().unwrap_or_default().to_ascii_lowercase();
+            let name = device.name().unwrap_or_default().to_ascii_lowercase();
+            let is_nvidia = vendor.contains("nvidia") || name.contains("nvidia");
+            if is_nvidia {
+                return Ok((platform, device));
+            }
+            if fallback.is_none() {
+                fallback = Some((platform, device));
+            }
+        }
+    }
+
+    if let Some(pick) = fallback {
+        return Ok(pick);
+    }
+
+    for platform in platforms.iter().copied() {
+        let devices = Device::list(platform, None)?;
+        if let Some(device) = devices.into_iter().next() {
+            return Ok((platform, device));
+        }
+    }
+
+    anyhow::bail!("No OpenCL devices found");
+}
+
+fn build_proque_with_cache(src: &str, platform: Platform, device: Device) -> Result<ProQue> {
+    let vendor = device.vendor().unwrap_or_default();
+    let name = device.name().unwrap_or_default();
+    let dtype = device
+        .info(ocl::enums::DeviceInfo::Type)
+        .ok()
+        .and_then(|v| match v {
+            ocl::enums::DeviceInfoResult::Type(t) => Some(t),
+            _ => None,
+        })
+        .unwrap_or(DeviceType::empty());
+    eprintln!(
+        "[opencl] device: {} (vendor: {}, type: {:?})",
+        name, vendor, dtype
+    );
+
+    let context = OclContext::builder()
+        .platform(platform)
+        .devices(device.clone())
+        .build()?;
+    let queue = Queue::new(&context, device.clone(), None)?;
+    let program = build_program_cached(&context, &device, src)?;
+
+    Ok(ProQue::new(context, queue, program, Some(1)))
+}
+
+fn build_program_cached(context: &OclContext, device: &Device, src: &str) -> Result<Program> {
+    let cmplr_opts = CString::new("").unwrap();
+    let cache_path = opencl_cache_path(device, src)?;
+    if let Ok(bin) = fs::read(&cache_path) {
+        eprintln!("[opencl] cache: hit ({})", cache_path.to_string_lossy());
+        if let Ok(program) = Program::with_binary(context, &[device.clone()], &[&bin], &cmplr_opts)
+        {
+            return Ok(program);
+        }
+        eprintln!("[opencl] cache: hit invalid, rebuilding");
+    }
+
+    eprintln!("[opencl] cache: miss ({})", cache_path.to_string_lossy());
+    let src_c = CString::new(src)?;
+    let program = Program::with_source(context, &[src_c], Some(&[device.clone()]), &cmplr_opts)?;
+
+    if let Ok(ProgramInfoResult::Binaries(bins)) = program.info(ProgramInfo::Binaries) {
+        if let Some(bin) = bins.first() {
+            if let Some(parent) = cache_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if fs::write(&cache_path, bin).is_ok() {
+                eprintln!("[opencl] cache: wrote {}", cache_path.to_string_lossy());
+            }
+        }
+    }
+
+    Ok(program)
+}
+
+fn opencl_cache_path(device: &Device, src: &str) -> Result<PathBuf> {
+    let vendor = device.vendor().unwrap_or_default();
+    let name = device.name().unwrap_or_default();
+    let driver = device.version().map(|v| v.to_string()).unwrap_or_default();
+
+    let mut h = fast_hash64(src.as_bytes());
+    h = h.wrapping_mul(0x9e3779b97f4a7c15) ^ fast_hash64(vendor.as_bytes());
+    h = h.wrapping_mul(0x9e3779b97f4a7c15) ^ fast_hash64(name.as_bytes());
+    h = h.wrapping_mul(0x9e3779b97f4a7c15) ^ fast_hash64(driver.as_bytes());
+
+    let mut path = PathBuf::from("target");
+    path.push("opencl_cache");
+    path.push(format!("ocl_{:016x}.bin", h));
+    Ok(path)
+}
+
 pub fn annotate_vcf_opencl_v2(
-    gpu: &OpenCLv2,
     ani: &AniIndex,
     input: &Path,
     output: &Path,
     columns: &[String],
+    bgzf_level: Option<u32>,
+    mmap_output: bool,
+    mmap_no_flush: bool,
+    ram_output: bool,
+    ram_max_mb: u32,
+    batch_cap: usize,
 ) -> Result<()> {
+    let timing = std::env::var("KIRA_BT_TIMING").is_ok();
+    let init_start = Instant::now();
+    let mut gpu = OpenCLv2::new(ani, batch_cap)?;
+    if timing {
+        eprintln!("[opencl] init: {:.3}s", init_start.elapsed().as_secs_f64());
+    }
+    annotate_vcf_opencl_v2_with_gpu(
+        &mut gpu,
+        ani,
+        input,
+        output,
+        columns,
+        bgzf_level,
+        mmap_output,
+        mmap_no_flush,
+        ram_output,
+        ram_max_mb,
+    )
+}
+
+pub fn annotate_vcf_opencl_v2_with_gpu(
+    gpu: &mut OpenCLv2,
+    ani: &AniIndex,
+    input: &Path,
+    output: &Path,
+    columns: &[String],
+    bgzf_level: Option<u32>,
+    mmap_output: bool,
+    mmap_no_flush: bool,
+    ram_output: bool,
+    ram_max_mb: u32,
+) -> Result<()> {
+    let timing = std::env::var("KIRA_BT_TIMING").is_ok();
     let mut column_specs = ColumnSpec::parse_all(columns);
     let info_overwrite_all = column_specs
         .iter()
@@ -143,42 +488,71 @@ pub fn annotate_vcf_opencl_v2(
     let db_samples = extract_samples_from_headers(&ani_headers);
     let sample_map = build_sample_map(&input_samples, &db_samples);
 
-    if use_bgzf {
-        let mut writer = BgzfWriter::create(output)?;
-        for h in &merged_headers {
-            writeln!(writer, "{}", h)?;
+    let (read_tx, read_rx) = bounded::<Vec<String>>(CHANNEL_DEPTH);
+    let (work_tx, work_rx) = bounded::<Vec<String>>(CHANNEL_DEPTH);
+    let ani_ref = ani;
+    let field_meta = Arc::new(field_meta);
+    let column_modes = Arc::new(column_modes);
+    let sample_map = Arc::new(sample_map);
+    let use_bgzf = use_bgzf;
+    thread::scope(|s| -> Result<()> {
+        let worker = s.spawn(move || {
+            worker_thread_opencl(
+                read_rx,
+                work_tx,
+                gpu,
+                ani_ref,
+                field_meta,
+                column_modes,
+                sample_map,
+                info_overwrite_all,
+                format_overwrite_all,
+                timing,
+            )
+        });
+
+        let output_path = output.to_path_buf();
+        let headers = merged_headers;
+        let writer = s.spawn(move || {
+            writer_thread(
+                work_rx,
+                headers,
+                &output_path,
+                use_bgzf,
+                bgzf_level,
+                mmap_output,
+                mmap_no_flush,
+                ram_output,
+                ram_max_mb,
+                timing,
+                "opencl",
+            )
+        });
+
+        let wait_start = Instant::now();
+        read_batches_opencl(&mut reader, read_tx, timing)?;
+        if timing {
+            eprintln!("[opencl] waiting worker...");
         }
-        process_records(
-            &mut writer,
-            &mut reader,
-            gpu,
-            ani,
-            &field_meta,
-            &column_modes,
-            &sample_map,
-            info_overwrite_all,
-            format_overwrite_all,
-        )?;
-        writer.finish()?;
-    } else {
-        let file = File::create(output)?;
-        let mut writer = BufWriter::with_capacity(OUTPUT_BUFFER_SIZE, file);
-        for h in &merged_headers {
-            writeln!(writer, "{}", h)?;
+        worker.join().unwrap()?;
+        if timing {
+            eprintln!(
+                "[opencl] worker done: {:.3}s",
+                wait_start.elapsed().as_secs_f64()
+            );
         }
-        process_records(
-            &mut writer,
-            &mut reader,
-            gpu,
-            ani,
-            &field_meta,
-            &column_modes,
-            &sample_map,
-            info_overwrite_all,
-            format_overwrite_all,
-        )?;
-        writer.flush()?;
-    }
+        if timing {
+            eprintln!("[opencl] waiting writer...");
+        }
+        writer.join().unwrap()?;
+        if timing {
+            eprintln!(
+                "[opencl] writer done: {:.3}s",
+                wait_start.elapsed().as_secs_f64()
+            );
+        }
+        Ok(())
+    })?;
 
     Ok(())
 }
@@ -193,7 +567,7 @@ struct ParsedLine {
 fn process_records<W: Write>(
     writer: &mut W,
     reader: &mut StreamingVcfReader,
-    gpu: &OpenCLv2,
+    gpu: &mut OpenCLv2,
     ani: &AniIndex,
     field_meta: &HashMap<String, FieldNumber>,
     column_modes: &[(String, AnnotateMode)],
@@ -257,7 +631,7 @@ fn process_records<W: Write>(
 
 fn flush_batch<W: Write>(
     writer: &mut W,
-    gpu: &OpenCLv2,
+    gpu: &mut OpenCLv2,
     ani: &AniIndex,
     field_meta: &HashMap<String, FieldNumber>,
     column_modes: &[(String, AnnotateMode)],
@@ -266,6 +640,10 @@ fn flush_batch<W: Write>(
     format_overwrite_all: bool,
     lines: &[ParsedLine],
 ) -> Result<()> {
+    let timing = false;
+    let mut write_total = 0f64;
+    let mut kernel_total = 0f64;
+    let mut read_total = 0f64;
     if lines.is_empty() {
         return Ok(());
     }
@@ -297,7 +675,13 @@ fn flush_batch<W: Write>(
     let mut offset = 0usize;
     while offset < keys.len() {
         let end = (offset + gpu.batch_cap).min(keys.len());
-        let idxs = gpu.run_batch(&keys[offset..end])?;
+        let idxs = gpu.run_batch(
+            &keys[offset..end],
+            timing,
+            &mut write_total,
+            &mut kernel_total,
+            &mut read_total,
+        )?;
         for (i, idx) in idxs.iter().enumerate() {
             let global = offset + i;
             let line_idx = key_line_idx[global];
@@ -363,4 +747,496 @@ fn build_entry_keys(ani: &AniIndex) -> Vec<u64> {
         keys.push(key);
     }
     keys
+}
+
+struct MinParsed {
+    chr_id: u8,
+    pos: u32,
+    ref_range: (usize, usize),
+    alt_range: (usize, usize),
+}
+
+fn fast_parse_min(line: &str) -> Option<MinParsed> {
+    let bytes = line.as_bytes();
+    let mut tabs = [0usize; 5];
+    let mut count = 0usize;
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == b'\t' {
+            tabs[count] = i;
+            count += 1;
+            if count == 5 {
+                break;
+            }
+        }
+    }
+    if count < 4 {
+        return None;
+    }
+
+    let chrom = &line[..tabs[0]];
+    let chr_id = chr_name_to_id(chrom)?;
+
+    let pos_bytes = &bytes[(tabs[0] + 1)..tabs[1]];
+    let pos = parse_u32_bytes(pos_bytes)?;
+
+    let ref_start = tabs[2] + 1;
+    let ref_end = tabs[3];
+    if ref_end <= ref_start || ref_end > bytes.len() {
+        return None;
+    }
+
+    let alt_start = tabs[3] + 1;
+    let alt_end = if count >= 5 { tabs[4] } else { bytes.len() };
+    if alt_end <= alt_start || alt_end > bytes.len() {
+        return None;
+    }
+
+    Some(MinParsed {
+        chr_id,
+        pos,
+        ref_range: (ref_start, ref_end),
+        alt_range: (alt_start, alt_end),
+    })
+}
+
+fn parse_u32_bytes(bytes: &[u8]) -> Option<u32> {
+    if bytes.is_empty() || bytes.len() > 10 {
+        return None;
+    }
+    let mut v: u32 = 0;
+    for b in bytes {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        v = v.wrapping_mul(10).wrapping_add((b - b'0') as u32);
+    }
+    Some(v)
+}
+
+fn worker_thread_opencl(
+    rx: Receiver<Vec<String>>,
+    tx: Sender<Vec<String>>,
+    gpu: &mut OpenCLv2,
+    ani: &AniIndex,
+    field_meta: Arc<HashMap<String, FieldNumber>>,
+    column_modes: Arc<Vec<(String, AnnotateMode)>>,
+    sample_map: Arc<Vec<Option<usize>>>,
+    info_overwrite_all: bool,
+    format_overwrite_all: bool,
+    timing: bool,
+) -> Result<()> {
+    let num_threads = rayon::current_num_threads().max(1);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .build()
+        .unwrap();
+
+    let mut total_lines = 0usize;
+    let mut parse_total = 0f64;
+    let mut key_total = 0f64;
+    let mut pack_total = 0f64;
+    let mut lookup_total = 0f64;
+    let mut write_total = 0f64;
+    let mut kernel_total = 0f64;
+    let mut read_total = 0f64;
+    let mut bundle_total = 0f64;
+    let mut bundle_read_total = 0f64;
+    let mut bundle_info_total = 0f64;
+    let mut bundle_optional_total = 0f64;
+    let mut bundle_samples_total = 0f64;
+    let mut annotate_total = 0f64;
+    let mut send_total = 0f64;
+    let mut send_max = 0f64;
+    let mut last_report = Instant::now();
+
+    let need_format = format_overwrite_all
+        || column_modes
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("FMT") || k.eq_ignore_ascii_case("FORMAT"));
+    let need_info = info_overwrite_all
+        || column_modes.iter().any(|(k, _)| {
+            !(k.eq_ignore_ascii_case("ID")
+                || k.eq_ignore_ascii_case("QUAL")
+                || k.eq_ignore_ascii_case("FILTER")
+                || k.eq_ignore_ascii_case("FMT")
+                || k.eq_ignore_ascii_case("FORMAT"))
+        });
+
+    while let Ok(mut batch) = rx.recv() {
+        if batch.is_empty() {
+            continue;
+        }
+
+        let parse_start = Instant::now();
+        let mins: Vec<Option<MinParsed>> =
+            pool.install(|| batch.par_iter().map(|line| fast_parse_min(line)).collect());
+        parse_total += parse_start.elapsed().as_secs_f64();
+
+        let key_start = Instant::now();
+        let mut key_count = 0usize;
+        for (line_idx, line) in batch.iter().enumerate() {
+            let Some(ref min) = mins[line_idx] else {
+                continue;
+            };
+            let bytes = line.as_bytes();
+            let (alt_start, alt_end) = min.alt_range;
+            if alt_end <= alt_start || alt_end > bytes.len() {
+                continue;
+            }
+            let mut count = 1usize;
+            for i in alt_start..alt_end {
+                if bytes[i] == b',' {
+                    count += 1;
+                }
+            }
+            key_count += count;
+        }
+
+        let use_gpu_hash = key_count > 0 && key_count <= gpu.batch_cap();
+
+        let mut keys: Vec<u64> = Vec::new();
+        let mut key_line_idx: Vec<usize> = Vec::new();
+        let mut key_alt_idx: Vec<usize> = Vec::new();
+
+        let mut ref_pool: Vec<u8> = Vec::new();
+        let mut ref_offsets: Vec<u32> = vec![0; batch.len()];
+        let mut ref_lens: Vec<u32> = vec![0; batch.len()];
+        let mut alt_pool: Vec<u8> = Vec::new();
+        let mut alt_offsets: Vec<u32> = Vec::new();
+        let mut alt_lens: Vec<u32> = Vec::new();
+        let mut key_ref_idx: Vec<u32> = Vec::new();
+        let mut key_chr: Vec<u8> = Vec::new();
+        let mut key_pos: Vec<u32> = Vec::new();
+
+        if use_gpu_hash {
+            let pack_start = Instant::now();
+            for (line_idx, line) in batch.iter().enumerate() {
+                let Some(ref min) = mins[line_idx] else {
+                    continue;
+                };
+                let bytes = line.as_bytes();
+                let ref_start = min.ref_range.0;
+                let ref_end = min.ref_range.1;
+                if ref_end <= ref_start || ref_end > bytes.len() {
+                    continue;
+                }
+                let ref_off = ref_pool.len();
+                ref_pool.extend_from_slice(&bytes[ref_start..ref_end]);
+                ref_offsets[line_idx] = ref_off as u32;
+                ref_lens[line_idx] = (ref_end - ref_start) as u32;
+
+                let (alt_start, alt_end) = min.alt_range;
+                let mut alt_idx = 0usize;
+                let mut start = alt_start;
+                for i in alt_start..alt_end {
+                    if bytes[i] == b',' {
+                        let alt_off = alt_pool.len();
+                        alt_pool.extend_from_slice(&bytes[start..i]);
+                        alt_offsets.push(alt_off as u32);
+                        alt_lens.push((i - start) as u32);
+                        key_ref_idx.push(line_idx as u32);
+                        key_chr.push(min.chr_id);
+                        key_pos.push(min.pos);
+                        key_line_idx.push(line_idx);
+                        key_alt_idx.push(alt_idx);
+                        alt_idx += 1;
+                        start = i + 1;
+                    }
+                }
+                if start < alt_end {
+                    let alt_off = alt_pool.len();
+                    alt_pool.extend_from_slice(&bytes[start..alt_end]);
+                    alt_offsets.push(alt_off as u32);
+                    alt_lens.push((alt_end - start) as u32);
+                    key_ref_idx.push(line_idx as u32);
+                    key_chr.push(min.chr_id);
+                    key_pos.push(min.pos);
+                    key_line_idx.push(line_idx);
+                    key_alt_idx.push(alt_idx);
+                }
+            }
+            pack_total += pack_start.elapsed().as_secs_f64();
+        } else {
+            for (line_idx, line) in batch.iter().enumerate() {
+                let Some(ref min) = mins[line_idx] else {
+                    continue;
+                };
+                let bytes = line.as_bytes();
+                let ref_bytes = &bytes[min.ref_range.0..min.ref_range.1];
+                let ref_hash = fast_hash64(ref_bytes);
+                let base = (min.chr_id as u64) << 32 | min.pos as u64;
+
+                let (alt_start, alt_end) = min.alt_range;
+                let mut alt_idx = 0usize;
+                let mut start = alt_start;
+                for i in alt_start..alt_end {
+                    if bytes[i] == b',' {
+                        let alt_hash = fast_hash64(&bytes[start..i]);
+                        let key = base ^ ref_hash ^ alt_hash;
+                        keys.push(key);
+                        key_line_idx.push(line_idx);
+                        key_alt_idx.push(alt_idx);
+                        alt_idx += 1;
+                        start = i + 1;
+                    }
+                }
+                if start < alt_end {
+                    let alt_hash = fast_hash64(&bytes[start..alt_end]);
+                    let key = base ^ ref_hash ^ alt_hash;
+                    keys.push(key);
+                    key_line_idx.push(line_idx);
+                    key_alt_idx.push(alt_idx);
+                }
+            }
+        }
+
+        key_total += key_start.elapsed().as_secs_f64();
+
+        if (!use_gpu_hash && keys.is_empty()) || (use_gpu_hash && alt_offsets.is_empty()) {
+            if tx.send(batch).is_err() {
+                break;
+            }
+            continue;
+        }
+
+        let lookup_start = Instant::now();
+        let mut bundles_per_line: Vec<Vec<(usize, AnnotationBundle)>> =
+            vec![Vec::new(); batch.len()];
+        if use_gpu_hash {
+            let idxs = gpu.run_batch_from_strings(
+                &ref_pool,
+                &ref_offsets,
+                &ref_lens,
+                &alt_pool,
+                &alt_offsets,
+                &alt_lens,
+                &key_ref_idx,
+                &key_chr,
+                &key_pos,
+                timing,
+                &mut write_total,
+                &mut kernel_total,
+                &mut read_total,
+            )?;
+            for (i, idx) in idxs.iter().enumerate() {
+                if *idx == u32::MAX {
+                    continue;
+                }
+                let line_idx = key_line_idx[i];
+                let alt_idx = key_alt_idx[i];
+                let bundle_start = Instant::now();
+                let bundle = if timing {
+                    let (bundle, t) = ani.build_bundle_from_entry_timed_opts(
+                        &ani.entries[*idx as usize],
+                        need_info,
+                        need_format,
+                    );
+                    bundle_read_total += t.read_s;
+                    bundle_info_total += t.info_s;
+                    bundle_optional_total += t.optional_s;
+                    bundle_samples_total += t.samples_s;
+                    bundle
+                } else {
+                    ani.build_bundle_from_entry_opts(
+                        &ani.entries[*idx as usize],
+                        need_info,
+                        need_format,
+                    )
+                };
+                bundle_total += bundle_start.elapsed().as_secs_f64();
+                bundles_per_line[line_idx].push((alt_idx, bundle));
+            }
+        } else {
+            let mut offset = 0usize;
+            while offset < keys.len() {
+                let end = (offset + gpu.batch_cap()).min(keys.len());
+                let idxs = gpu.run_batch(
+                    &keys[offset..end],
+                    timing,
+                    &mut write_total,
+                    &mut kernel_total,
+                    &mut read_total,
+                )?;
+                for (i, idx) in idxs.iter().enumerate() {
+                    if *idx == u32::MAX {
+                        continue;
+                    }
+                    let global = offset + i;
+                    let line_idx = key_line_idx[global];
+                    let alt_idx = key_alt_idx[global];
+                    let bundle_start = Instant::now();
+                    let bundle = if timing {
+                        let (bundle, t) = ani.build_bundle_from_entry_timed_opts(
+                            &ani.entries[*idx as usize],
+                            need_info,
+                            need_format,
+                        );
+                        bundle_read_total += t.read_s;
+                        bundle_info_total += t.info_s;
+                        bundle_optional_total += t.optional_s;
+                        bundle_samples_total += t.samples_s;
+                        bundle
+                    } else {
+                        ani.build_bundle_from_entry_opts(
+                            &ani.entries[*idx as usize],
+                            need_info,
+                            need_format,
+                        )
+                    };
+                    bundle_total += bundle_start.elapsed().as_secs_f64();
+                    bundles_per_line[line_idx].push((alt_idx, bundle));
+                }
+                offset = end;
+            }
+        }
+        lookup_total += lookup_start.elapsed().as_secs_f64();
+
+        let annotate_start = Instant::now();
+        let annotated: Vec<Option<String>> = pool.install(|| {
+            batch
+                .par_iter()
+                .enumerate()
+                .map(|(i, line)| {
+                    if bundles_per_line[i].is_empty() {
+                        return None;
+                    }
+                    parse_vcf_record(line).map(|parsed| {
+                        annotate_record_with_bundles(
+                            &parsed,
+                            &bundles_per_line[i],
+                            &field_meta,
+                            &column_modes,
+                            &sample_map,
+                            info_overwrite_all,
+                            format_overwrite_all,
+                            false,
+                        )
+                    })
+                })
+                .collect()
+        });
+        annotate_total += annotate_start.elapsed().as_secs_f64();
+
+        for (i, val) in annotated.into_iter().enumerate() {
+            if let Some(s) = val {
+                batch[i] = s;
+            }
+        }
+
+        let send_start = Instant::now();
+        if tx.send(batch).is_err() {
+            break;
+        }
+        let send_elapsed = send_start.elapsed().as_secs_f64();
+        send_total += send_elapsed;
+        if send_elapsed > send_max {
+            send_max = send_elapsed;
+        }
+
+        if timing {
+            total_lines += key_line_idx.len();
+            if last_report.elapsed().as_secs_f64() >= 2.0 {
+                eprintln!(
+                    "[opencl] lines: {}, parse: {:.3}s, key: {:.3}s, pack: {:.3}s, lookup: {:.3}s, annotate: {:.3}s",
+                    total_lines, parse_total, key_total, pack_total, lookup_total, annotate_total
+                );
+                eprintln!(
+                    "[opencl] kernel: {:.3}s, upload: {:.3}s, download: {:.3}s, bundle: {:.3}s, send: {:.3}s (max {:.3}s)",
+                    kernel_total, write_total, read_total, bundle_total, send_total, send_max
+                );
+                eprintln!(
+                    "[opencl] bundle_read: {:.3}s, bundle_info: {:.3}s, bundle_optional: {:.3}s, bundle_samples: {:.3}s",
+                    bundle_read_total,
+                    bundle_info_total,
+                    bundle_optional_total,
+                    bundle_samples_total
+                );
+                last_report = Instant::now();
+            }
+        }
+    }
+
+    if timing {
+        eprintln!(
+            "[opencl] done: lines: {}, parse: {:.3}s, key: {:.3}s, pack: {:.3}s, lookup: {:.3}s, annotate: {:.3}s",
+            total_lines, parse_total, key_total, pack_total, lookup_total, annotate_total
+        );
+        eprintln!(
+            "[opencl] kernel: {:.3}s, upload: {:.3}s, download: {:.3}s, bundle: {:.3}s, send: {:.3}s (max {:.3}s)",
+            kernel_total, write_total, read_total, bundle_total, send_total, send_max
+        );
+        eprintln!(
+            "[opencl] bundle_read: {:.3}s, bundle_info: {:.3}s, bundle_optional: {:.3}s, bundle_samples: {:.3}s",
+            bundle_read_total,
+            bundle_info_total,
+            bundle_optional_total,
+            bundle_samples_total
+        );
+    }
+
+    Ok(())
+}
+
+fn read_batches_opencl(
+    reader: &mut StreamingVcfReader,
+    read_tx: Sender<Vec<String>>,
+    timing: bool,
+) -> Result<()> {
+    let mut batch = Vec::with_capacity(LINE_BATCH);
+    let mut total_lines = 0usize;
+    let mut send_total = 0f64;
+    let mut send_max = 0f64;
+    if timing {
+        eprintln!("[opencl] read start");
+    }
+    while let Some(line) = reader.read_line()? {
+        if line.starts_with('#') {
+            continue;
+        }
+        batch.push(line);
+
+        if batch.len() >= LINE_BATCH {
+            if timing {
+                total_lines += batch.len();
+                eprintln!("[opencl] read: {} lines", total_lines);
+            }
+            let send_start = Instant::now();
+            if read_tx
+                .send(std::mem::replace(
+                    &mut batch,
+                    Vec::with_capacity(LINE_BATCH),
+                ))
+                .is_err()
+            {
+                break;
+            }
+            let send_elapsed = send_start.elapsed().as_secs_f64();
+            send_total += send_elapsed;
+            if send_elapsed > send_max {
+                send_max = send_elapsed;
+            }
+        }
+    }
+
+    if !batch.is_empty() {
+        if timing {
+            total_lines += batch.len();
+            eprintln!("[opencl] read: {} lines", total_lines);
+        }
+        let send_start = Instant::now();
+        let _ = read_tx.send(batch);
+        let send_elapsed = send_start.elapsed().as_secs_f64();
+        send_total += send_elapsed;
+        if send_elapsed > send_max {
+            send_max = send_elapsed;
+        }
+    }
+    if timing {
+        eprintln!("[opencl] read done: {} lines", total_lines);
+        eprintln!(
+            "[opencl] read send: {:.3}s (max {:.3}s)",
+            send_total, send_max
+        );
+    }
+    Ok(())
 }

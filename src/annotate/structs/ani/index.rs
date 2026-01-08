@@ -3,6 +3,7 @@ use kira_kv_engine::Mphf;
 use libdeflater::Decompressor;
 use memchr::memchr;
 use memmap2::{Mmap, MmapOptions};
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::fs::File;
 use std::mem;
@@ -16,6 +17,7 @@ use super::header::{
 };
 
 const BLOCK_CACHE_CAP: usize = 16;
+const CSTR_CACHE_CAP: usize = 256;
 
 pub enum StringStorage {
     Owned(Vec<u8>),
@@ -79,6 +81,46 @@ enum StringSource {
         cache: Mutex<BlockCache>,
         total_len: usize,
     },
+}
+
+#[derive(Clone, Copy)]
+struct CStrCacheEntry {
+    offset: u64,
+    end: usize,
+    block_idx: Option<usize>,
+}
+
+struct CStrCache {
+    entries: Vec<CStrCacheEntry>,
+}
+
+impl CStrCache {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    fn get(&mut self, offset: u64) -> Option<CStrCacheEntry> {
+        if let Some(pos) = self.entries.iter().position(|e| e.offset == offset) {
+            let entry = self.entries.remove(pos);
+            self.entries.push(entry);
+            Some(entry)
+        } else {
+            None
+        }
+    }
+
+    fn insert(&mut self, entry: CStrCacheEntry) {
+        if self.entries.len() >= CSTR_CACHE_CAP {
+            self.entries.remove(0);
+        }
+        self.entries.push(entry);
+    }
+}
+
+thread_local! {
+    static CSTR_CACHE: RefCell<CStrCache> = RefCell::new(CStrCache::new());
 }
 
 pub struct CStrRef<'a> {
@@ -220,7 +262,21 @@ impl AniIndex {
                         end: 0,
                     };
                 }
-                let end = find_cstr_end(bytes, offset);
+                let offset_u64 = offset as u64;
+                let cached = CSTR_CACHE.with(|c| c.borrow_mut().get(offset_u64));
+                let end = if let Some(entry) = cached {
+                    entry.end
+                } else {
+                    let end = find_cstr_end(bytes, offset);
+                    CSTR_CACHE.with(|c| {
+                        c.borrow_mut().insert(CStrCacheEntry {
+                            offset: offset_u64,
+                            end,
+                            block_idx: None,
+                        })
+                    });
+                    end
+                };
                 CStrRef {
                     data: CStrData::Borrowed(bytes),
                     start: offset,
@@ -229,13 +285,19 @@ impl AniIndex {
             }
             StringSource::Compressed { blocks, cache, .. } => {
                 let offset = offset as u64;
-                let idx = match find_block_index(blocks, offset) {
-                    Some(v) => v,
-                    None => {
-                        return CStrRef {
-                            data: CStrData::Borrowed(&[]),
-                            start: 0,
-                            end: 0,
+                let cached = CSTR_CACHE.with(|c| c.borrow_mut().get(offset));
+                let cached_block_idx = cached.and_then(|e| e.block_idx);
+                let idx = if let Some(v) = cached_block_idx {
+                    v
+                } else {
+                    match find_block_index(blocks, offset) {
+                        Some(v) => v,
+                        None => {
+                            return CStrRef {
+                                data: CStrData::Borrowed(&[]),
+                                start: 0,
+                                end: 0,
+                            }
                         }
                     }
                 };
@@ -264,7 +326,24 @@ impl AniIndex {
 
                 let block = &blocks[idx];
                 let start = (offset - block.raw_start) as usize;
-                let end = find_cstr_end(data.as_slice(), start);
+                let end = if let Some(entry) = cached {
+                    if entry.block_idx == Some(idx) {
+                        entry.end
+                    } else {
+                        find_cstr_end(data.as_slice(), start)
+                    }
+                } else {
+                    find_cstr_end(data.as_slice(), start)
+                };
+                if cached.is_none() || cached.map(|e| e.block_idx != Some(idx)).unwrap_or(false) {
+                    CSTR_CACHE.with(|c| {
+                        c.borrow_mut().insert(CStrCacheEntry {
+                            offset,
+                            end,
+                            block_idx: Some(idx),
+                        })
+                    });
+                }
 
                 CStrRef {
                     data: CStrData::Shared(data),

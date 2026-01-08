@@ -23,11 +23,11 @@ pub struct BgzfWriter {
 
 impl BgzfWriter {
     pub fn create<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        Self::with_compression(path, Compression::new(9))
+        Self::with_compression(path, Compression::new(1))
     }
 
     pub fn with_compression<P: AsRef<Path>>(path: P, compression: Compression) -> io::Result<Self> {
-        let num_workers = num_cpus::get().min(8).max(2);
+        let num_workers = num_cpus::get().min(16).max(2);
 
         let file = File::create(path)?;
         let writer = BufWriter::with_capacity(WRITER_BUFFER_SIZE, file);

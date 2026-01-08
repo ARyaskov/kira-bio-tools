@@ -6,6 +6,45 @@ use crate::annotate::structs::ani::AniIndex;
 use crate::annotate::structs::annotate_mode::AnnotateMode;
 use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber};
 use crate::util::{chr_name_to_id, fast_hash64};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+pub struct BundleTimingAccum {
+    read_ns: AtomicU64,
+    info_ns: AtomicU64,
+    optional_ns: AtomicU64,
+    samples_ns: AtomicU64,
+}
+
+impl BundleTimingAccum {
+    pub fn new() -> Self {
+        Self {
+            read_ns: AtomicU64::new(0),
+            info_ns: AtomicU64::new(0),
+            optional_ns: AtomicU64::new(0),
+            samples_ns: AtomicU64::new(0),
+        }
+    }
+
+    pub fn add(&self, t: &crate::annotate::structs::ani::lookup::BundleTiming) {
+        self.read_ns
+            .fetch_add((t.read_s * 1e9) as u64, Ordering::Relaxed);
+        self.info_ns
+            .fetch_add((t.info_s * 1e9) as u64, Ordering::Relaxed);
+        self.optional_ns
+            .fetch_add((t.optional_s * 1e9) as u64, Ordering::Relaxed);
+        self.samples_ns
+            .fetch_add((t.samples_s * 1e9) as u64, Ordering::Relaxed);
+    }
+
+    pub fn snapshot_seconds(&self) -> (f64, f64, f64, f64) {
+        (
+            self.read_ns.load(Ordering::Relaxed) as f64 / 1e9,
+            self.info_ns.load(Ordering::Relaxed) as f64 / 1e9,
+            self.optional_ns.load(Ordering::Relaxed) as f64 / 1e9,
+            self.samples_ns.load(Ordering::Relaxed) as f64 / 1e9,
+        )
+    }
+}
 
 pub fn annotate_line(
     line: &str,
@@ -68,9 +107,27 @@ pub fn annotate_line(
     };
     let ref_hash = fast_hash64(ref_allele.as_bytes());
 
+    let need_info = info_overwrite_all
+        || column_modes.iter().any(|(k, _)| {
+            !(k.eq_ignore_ascii_case("ID")
+                || k.eq_ignore_ascii_case("QUAL")
+                || k.eq_ignore_ascii_case("FILTER")
+                || k.eq_ignore_ascii_case("FMT")
+                || k.eq_ignore_ascii_case("FORMAT"))
+        });
+    let need_format = want_format;
+
     let mut bundles = Vec::with_capacity(alt_alleles.len());
     for (vcf_idx, alt) in alt_alleles.iter().enumerate() {
-        if let Some(bundle) = ani.lookup_exact_by_chr_id(chr_id, pos, ref_allele, ref_hash, alt) {
+        if let Some(bundle) = ani.lookup_exact_by_chr_id_opts(
+            chr_id,
+            pos,
+            ref_allele,
+            ref_hash,
+            alt,
+            need_info,
+            need_format,
+        ) {
             if debug {
                 eprintln!(
                     "[ANNOTATE] Found bundle for ALT {}: INFO fields={}",
@@ -78,6 +135,119 @@ pub fn annotate_line(
                     bundle.info.len()
                 );
             }
+            bundles.push((vcf_idx, bundle));
+        }
+    }
+
+    if bundles.is_empty() {
+        return line.to_string();
+    }
+
+    annotate_record_with_alts(
+        &parsed,
+        &alt_alleles,
+        &bundles,
+        field_meta,
+        column_modes,
+        sample_map,
+        raw_samples.as_deref(),
+        info_overwrite_all,
+        format_overwrite_all,
+        debug,
+    )
+}
+
+pub fn annotate_line_with_timing(
+    line: &str,
+    ani: &AniIndex,
+    field_meta: &HashMap<String, FieldNumber>,
+    column_modes: &[(String, AnnotateMode)],
+    sample_map: &[Option<usize>],
+    info_overwrite_all: bool,
+    format_overwrite_all: bool,
+    acc: &BundleTimingAccum,
+) -> String {
+    let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
+
+    let mut want_format = format_overwrite_all
+        || column_modes
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("FMT") || k.eq_ignore_ascii_case("FORMAT"));
+
+    if !want_format {
+        let mut tabs = 0;
+        for &b in line.as_bytes() {
+            if b == b'\t' {
+                tabs += 1;
+                if tabs >= 8 {
+                    want_format = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    let Some(parsed) = parse_vcf_record_simd(line, want_format) else {
+        return line.to_string();
+    };
+
+    let raw_samples = if want_format && sample_map.iter().any(|v| v.is_none()) {
+        let mut fields = line.split('\t');
+        for _ in 0..9 {
+            let _ = fields.next();
+        }
+        Some(fields.collect::<Vec<&str>>())
+    } else {
+        None
+    };
+
+    let chrom = &parsed.chrom;
+    let pos = parsed.pos;
+    let ref_allele = &parsed.ref_allele;
+    let alt_alleles: Vec<&str> = parsed.alt.split(',').collect();
+
+    if debug {
+        eprintln!(
+            "[ANNOTATE] {}:{} {} -> {:?}",
+            chrom, pos, ref_allele, alt_alleles
+        );
+    }
+
+    let chr_id = match chr_name_to_id(chrom) {
+        Some(id) => id,
+        None => return line.to_string(),
+    };
+    let ref_hash = fast_hash64(ref_allele.as_bytes());
+
+    let need_info = info_overwrite_all
+        || column_modes.iter().any(|(k, _)| {
+            !(k.eq_ignore_ascii_case("ID")
+                || k.eq_ignore_ascii_case("QUAL")
+                || k.eq_ignore_ascii_case("FILTER")
+                || k.eq_ignore_ascii_case("FMT")
+                || k.eq_ignore_ascii_case("FORMAT"))
+        });
+    let need_format = want_format;
+
+    let mut bundles = Vec::with_capacity(alt_alleles.len());
+    for (vcf_idx, alt) in alt_alleles.iter().enumerate() {
+        if let Some((bundle, t)) = ani.lookup_exact_by_chr_id_timed_opts(
+            chr_id,
+            pos,
+            ref_allele,
+            ref_hash,
+            alt,
+            need_info,
+            need_format,
+        ) {
+            if debug {
+                eprintln!(
+                    "[ANNOTATE] Found bundle for ALT {}: INFO fields={}",
+                    alt,
+                    bundle.info.len()
+                );
+            }
+            acc.add(&t);
             bundles.push((vcf_idx, bundle));
         }
     }
