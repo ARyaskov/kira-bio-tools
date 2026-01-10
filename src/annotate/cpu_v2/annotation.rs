@@ -322,6 +322,20 @@ fn annotate_record_with_alts(
         .iter()
         .map(|s| normalize_sample_values(&s.raw))
         .collect();
+    let format_modified = format_overwrite_all
+        || column_modes
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("FMT") || k.eq_ignore_ascii_case("FORMAT"));
+    if !format_modified {
+        if let Some(raw) = raw_samples {
+            if new_samples.len() != raw.len() {
+                new_samples = raw
+                    .iter()
+                    .map(|s| if s.is_empty() { ".".to_string() } else { (*s).to_string() })
+                    .collect();
+            }
+        }
+    }
 
     let base_info = if info_overwrite_all && !bundles.is_empty() {
         "."
