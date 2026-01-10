@@ -89,8 +89,18 @@ pub fn parse_vcf_record_simd(line: &str, want_format: bool) -> Option<ParsedVcfR
             })
             .collect();
 
-        if samples.is_empty() || samples.iter().any(|s| s.raw.iter().all(|v| v.is_empty())) {
-            if let Ok(line_str) = std::str::from_utf8(bytes) {
+        if let Ok(line_str) = std::str::from_utf8(bytes) {
+            let mut needs_fallback = samples.is_empty()
+                || samples
+                    .iter()
+                    .any(|s| s.raw.iter().all(|v| v.is_empty()));
+            if !needs_fallback {
+                let sample_count = sample_count_from_line(line_str);
+                if sample_count != samples.len() {
+                    needs_fallback = true;
+                }
+            }
+            if needs_fallback {
                 let cols: Vec<&str> = line_str.split('\t').collect();
                 if cols.len() > 9 {
                     let fmt_str = cols[8];
@@ -141,7 +151,9 @@ pub fn parse_vcf_record_simd(line: &str, want_format: bool) -> Option<ParsedVcfR
 }
 
 pub fn patch_samples_from_line(parsed: &mut ParsedVcfRecord, line: &str) {
+    let sample_count = sample_count_from_line(line);
     if !parsed.samples.is_empty()
+        && sample_count == parsed.samples.len()
         && !parsed
             .samples
             .iter()
@@ -170,6 +182,16 @@ pub fn patch_samples_from_line(parsed: &mut ParsedVcfRecord, line: &str) {
         parsed.format = None;
         parsed.samples.clear();
     }
+}
+
+fn sample_count_from_line(line: &str) -> usize {
+    let mut tabs = 0usize;
+    for &b in line.as_bytes() {
+        if b == b'\t' {
+            tabs += 1;
+        }
+    }
+    tabs.saturating_sub(8)
 }
 
 impl ParsedVcfRecord {

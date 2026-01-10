@@ -128,6 +128,7 @@ pub mod arm_simd {
     }
 }
 
+#[cfg(not(all(target_arch = "aarch64", target_feature = "crc")))]
 #[inline(always)]
 pub fn crc32_fallback(crc: u32, data: &[u8]) -> u32 {
     let mut hasher = crc32fast::Hasher::new_with_initial(crc);
