@@ -253,6 +253,9 @@ pub fn cmd_annotate_serve(args: AnnotateServeArgs) -> Result<()> {
                 let key = k.trim();
                 let val = v.trim();
                 match key {
+                    "c" => {
+                        columns = parse_columns(Some(val));
+                    }
                     "columns" => {
                         columns = parse_columns(Some(val));
                     }

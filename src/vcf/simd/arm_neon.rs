@@ -20,6 +20,7 @@ pub unsafe fn parse_vcf_line_simd(line: &[u8]) -> Option<VcfFieldsFull<'_>> {
     }
 
     let line_str = std::str::from_utf8_unchecked(line);
+    let line_len = line.len();
 
     let chrom = &line_str[0..tabs[0]];
     let pos = &line_str[tabs[0] + 1..tabs[1]];
