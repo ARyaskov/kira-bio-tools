@@ -77,17 +77,39 @@ pub fn parse_vcf_record_simd(line: &str, want_format: bool) -> Option<ParsedVcfR
     if want_format {
         let parsed = SimdVcfParser::parse_line(bytes)?;
 
-        let format = parsed.format.map(|fmt_str| ParsedFormat {
+        let mut format = parsed.format.map(|fmt_str| ParsedFormat {
             keys: fmt_str.split(':').map(|s| s.to_string()).collect(),
         });
 
-        let samples = parsed
+        let mut samples: Vec<ParsedSample> = parsed
             .samples
             .iter()
             .map(|sample_data| ParsedSample {
                 raw: sample_data.split(':').map(|s| s.to_string()).collect(),
             })
             .collect();
+
+        if samples.is_empty() || samples.iter().any(|s| s.raw.iter().all(|v| v.is_empty())) {
+            if let Ok(line_str) = std::str::from_utf8(bytes) {
+                let cols: Vec<&str> = line_str.split('\t').collect();
+                if cols.len() > 9 {
+                    let fmt_str = cols[8];
+                    format = if fmt_str.is_empty() || fmt_str == "." {
+                        None
+                    } else {
+                        Some(ParsedFormat {
+                            keys: fmt_str.split(':').map(|s| s.to_string()).collect(),
+                        })
+                    };
+                    samples = cols[9..]
+                        .iter()
+                        .map(|sample_data| ParsedSample {
+                            raw: sample_data.split(':').map(|s| s.to_string()).collect(),
+                        })
+                        .collect();
+                }
+            }
+        }
 
         return Some(ParsedVcfRecord {
             chrom: parsed.chrom.to_string(),
@@ -116,6 +138,38 @@ pub fn parse_vcf_record_simd(line: &str, want_format: bool) -> Option<ParsedVcfR
         format: None,
         samples: Vec::new(),
     })
+}
+
+pub fn patch_samples_from_line(parsed: &mut ParsedVcfRecord, line: &str) {
+    if !parsed.samples.is_empty()
+        && !parsed
+            .samples
+            .iter()
+            .any(|s| s.raw.iter().all(|v| v.is_empty()))
+    {
+        return;
+    }
+
+    let cols: Vec<&str> = line.split('\t').collect();
+    if cols.len() > 9 {
+        let fmt_str = cols[8];
+        parsed.format = if fmt_str.is_empty() || fmt_str == "." {
+            None
+        } else {
+            Some(ParsedFormat {
+                keys: fmt_str.split(':').map(|s| s.to_string()).collect(),
+            })
+        };
+        parsed.samples = cols[9..]
+            .iter()
+            .map(|sample_data| ParsedSample {
+                raw: sample_data.split(':').map(|s| s.to_string()).collect(),
+            })
+            .collect();
+    } else {
+        parsed.format = None;
+        parsed.samples.clear();
+    }
 }
 
 impl ParsedVcfRecord {

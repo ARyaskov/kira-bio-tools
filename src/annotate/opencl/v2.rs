@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use crate::annotate::constants::CHANNEL_DEPTH;
 use crate::annotate::cpu_v2::field_metadata::{iter_ani_header_lines, load_and_infer_metadata};
-use crate::annotate::cpu_v2::vcf_parsing::parse_vcf_record;
+use crate::annotate::cpu_v2::vcf_parsing::{parse_vcf_record, patch_samples_from_line};
 use crate::annotate::cpu_v2::{
     annotate_record_with_bundles, build_sample_map, expand_column_specs,
     extract_samples_from_headers, merge_annotation_headers, writer_thread, ColumnSpec,
@@ -925,7 +925,8 @@ fn worker_thread_opencl(
                     if bundles_per_line[i].is_empty() {
                         return None;
                     }
-                    parse_vcf_record(line).map(|parsed| {
+                    parse_vcf_record(line).map(|mut parsed| {
+                        patch_samples_from_line(&mut parsed, line);
                         annotate_record_with_bundles(
                             &parsed,
                             &bundles_per_line[i],

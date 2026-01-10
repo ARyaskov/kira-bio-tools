@@ -14,7 +14,7 @@ use crate::annotate::cpu_v2::{
     annotate_record_with_bundles, build_sample_map, expand_column_specs,
     extract_samples_from_headers, merge_annotation_headers, ColumnSpec,
 };
-use crate::annotate::cpu_v2::{parse_vcf_record_simd, writer_thread};
+use crate::annotate::cpu_v2::{parse_vcf_record_simd, patch_samples_from_line, writer_thread};
 use crate::annotate::reader::{StreamingVcfReader, VcfAnnotationReader};
 use crate::annotate::structs::ani::AniIndex;
 use crate::annotate::structs::annotate_mode::AnnotateMode;
@@ -716,7 +716,8 @@ fn worker_loop_gpu(
                         return None;
                     }
                     let want_format = want_format_for_line(line, need_format);
-                    parse_vcf_record_simd(line, want_format).map(|parsed| {
+                    parse_vcf_record_simd(line, want_format).map(|mut parsed| {
+                        patch_samples_from_line(&mut parsed, line);
                         annotate_record_with_bundles(
                             &parsed,
                             &bundles_per_line[i],
@@ -1380,7 +1381,8 @@ fn worker_loop_gpu_multi(
                                 return None;
                             }
                             let want_format = want_format_for_line(line, need_format);
-                            parse_vcf_record_simd(line, want_format).map(|parsed| {
+                            parse_vcf_record_simd(line, want_format).map(|mut parsed| {
+                                patch_samples_from_line(&mut parsed, line);
                                 annotate_record_with_bundles(
                                     &parsed,
                                     &bundles_per_batch[batch_idx][i],

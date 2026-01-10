@@ -39,7 +39,7 @@ cd kira-bio-tools
 cargo build --release --features gpu,opencl
 ```
 
-CUDA code must be compiled with x64 Native Tools Command Prompt for VS 2022 and:
+CUDA code must be compiled with x64 Native Tools Command Prompt for VS 2022 (or like that) and:
 ```bash
 nvcc.exe -std=c++14 -O3 -arch=sm_61 -ptx -ccbin "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.36.32532\bin\Hostx64\x64"  -o ani_kernel.ptx src\annotate\cuda\ani_kernel.cu
 ```
