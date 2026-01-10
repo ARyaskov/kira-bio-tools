@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use crate::annotate::cpu_v2::field_metadata::is_missing_value;
-use crate::annotate::cpu_v2::vcf_parsing::{parse_vcf_record_simd, ParsedVcfRecord};
+use crate::annotate::cpu_v2::vcf_parsing::{
+    parse_vcf_record_simd, patch_samples_from_line, ParsedVcfRecord,
+};
 use crate::annotate::structs::ani::AniIndex;
 use crate::annotate::structs::annotate_mode::AnnotateMode;
 use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber};
@@ -75,9 +77,10 @@ pub fn annotate_line(
         }
     }
 
-    let Some(parsed) = parse_vcf_record_simd(line, want_format) else {
+    let Some(mut parsed) = parse_vcf_record_simd(line, want_format) else {
         return line.to_string();
     };
+    patch_samples_from_line(&mut parsed, line);
 
     let raw_samples = if want_format && sample_map.iter().any(|v| v.is_none()) {
         let mut fields = line.split('\t');
@@ -187,9 +190,10 @@ pub fn annotate_line_with_timing(
         }
     }
 
-    let Some(parsed) = parse_vcf_record_simd(line, want_format) else {
+    let Some(mut parsed) = parse_vcf_record_simd(line, want_format) else {
         return line.to_string();
     };
+    patch_samples_from_line(&mut parsed, line);
 
     let raw_samples = if want_format && sample_map.iter().any(|v| v.is_none()) {
         let mut fields = line.split('\t');
