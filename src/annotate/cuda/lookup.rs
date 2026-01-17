@@ -1,6 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crossbeam_channel::{bounded, Receiver, Sender};
-use cust::prelude::*;
+use kira_kv_engine::HybridIndex;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,19 +23,12 @@ use crate::util::{chr_name_to_id, detect_format, fast_hash64, VcfFormat};
 use std::collections::HashMap;
 
 pub struct GpuAni {
-    _ctx: cust::context::Context,
-    module: Module,
-    stream: Stream,
-    d_g: DeviceBuffer<u32>,
-    m: u32,
-    n: u32,
-    salt: u64,
-    d_entry_keys: DeviceBuffer<u64>,
+    index: HybridIndex,
+    entry_keys: Vec<u64>,
 }
 
 struct GpuLookupBuffers {
-    d_keys: DeviceBuffer<u64>,
-    d_out: DeviceBuffer<u32>,
+    out: Vec<u32>,
     capacity: usize,
 }
 
@@ -54,70 +47,14 @@ impl GpuAnnotator {
 
 impl GpuAni {
     pub fn load(ani: &AniIndex) -> Result<Self> {
-        let _ctx = cust::quick_init().context("Failed CUDA init")?;
-
-        let ptx =
-            std::fs::read_to_string("ani_kernel.ptx").context("Failed to read ani_kernel.ptx")?;
-        let module = Module::from_ptx(&ptx, &[]).context("Failed to load PTX")?;
-
-        let stream =
-            Stream::new(StreamFlags::NON_BLOCKING, None).context("Failed to create CUDA stream")?;
-
-        let d_g = DeviceBuffer::from_slice(&ani.mph.g).context("Failed to upload g[]")?;
-
+        let index_bytes = ani.index.to_bytes()?;
+        let index = HybridIndex::from_bytes(&index_bytes)?;
         let entry_keys = build_entry_keys(ani);
-        let d_entry_keys =
-            DeviceBuffer::from_slice(&entry_keys).context("Failed to upload entry keys")?;
-
-        Ok(Self {
-            _ctx,
-            module,
-            stream,
-            d_g,
-            m: ani.mph.m,
-            n: ani.mph.n as u32,
-            salt: ani.mph.salt,
-            d_entry_keys,
-        })
+        Ok(Self { index, entry_keys })
     }
 
     pub fn lookup_batch(&self, keys: &[u64]) -> Result<Vec<u32>> {
-        let n = keys.len();
-
-        let d_keys = DeviceBuffer::from_slice(keys).context("Failed to upload lookup keys")?;
-
-        let d_out = DeviceBuffer::<u32>::zeroed(n).context("Failed to allocate output buffer")?;
-
-        let threads = 256;
-        let blocks = ((n as u32) + threads - 1) / threads;
-
-        let func = self
-            .module
-            .get_function("ani_lookup_kernel_v2")
-            .context("Failed to get ani_lookup_kernel_v2")?;
-
-        let stream = &self.stream;
-        unsafe {
-            launch!(
-                func<<<blocks, threads, 0, stream>>>(
-                    d_keys.as_device_ptr(),
-                    self.d_g.as_device_ptr(),
-                    self.m,
-                    self.n,
-                    self.salt,
-                    self.d_entry_keys.as_device_ptr(),
-                    d_out.as_device_ptr(),
-                    n as i32
-                )
-            )?;
-        }
-
-        self.stream.synchronize()?;
-
-        let mut out = vec![0u32; n];
-        d_out.copy_to(&mut out)?;
-
-        Ok(out)
+        Ok(self.lookup_batch_cpu(keys))
     }
 
     fn lookup_batch_with_buffers(
@@ -125,46 +62,7 @@ impl GpuAni {
         keys: &[u64],
         buffers: &mut GpuLookupBuffers,
     ) -> Result<Vec<u32>> {
-        let n = keys.len();
-        if n == 0 {
-            return Ok(Vec::new());
-        }
-        buffers.ensure_capacity(n)?;
-
-        let mut d_keys = buffers.d_keys.index(0..n);
-        d_keys.copy_from(keys)?;
-
-        let d_out = buffers.d_out.index(0..n);
-
-        let threads = 256;
-        let blocks = ((n as u32) + threads - 1) / threads;
-
-        let func = self
-            .module
-            .get_function("ani_lookup_kernel_v2")
-            .context("Failed to get ani_lookup_kernel_v2")?;
-
-        let stream = &self.stream;
-        unsafe {
-            launch!(
-                func<<<blocks, threads, 0, stream>>>(
-                    d_keys.as_device_ptr(),
-                    self.d_g.as_device_ptr(),
-                    self.m,
-                    self.n,
-                    self.salt,
-                    self.d_entry_keys.as_device_ptr(),
-                    d_out.as_device_ptr(),
-                    n as i32
-                )
-            )?;
-        }
-
-        self.stream.synchronize()?;
-
-        let mut out = vec![0u32; n];
-        d_out.copy_to(&mut out)?;
-        Ok(out)
+        Ok(self.lookup_batch_cpu_with_buffers(keys, buffers))
     }
 
     pub fn lookup_batch_from_strings(
@@ -179,86 +77,111 @@ impl GpuAni {
         key_chr: &[u8],
         key_pos: &[u32],
     ) -> Result<Vec<u32>> {
+        Ok(self.lookup_batch_from_strings_cpu(
+            ref_pool,
+            ref_offsets,
+            ref_lens,
+            alt_pool,
+            alt_offsets,
+            alt_lens,
+            key_ref_idx,
+            key_chr,
+            key_pos,
+        ))
+    }
+
+    fn lookup_batch_cpu(&self, keys: &[u64]) -> Vec<u32> {
+        let mut out = vec![u32::MAX; keys.len()];
+        for (i, &key) in keys.iter().enumerate() {
+            if let Ok(idx) = self.index.lookup_u64(key) {
+                if idx < self.entry_keys.len() && self.entry_keys[idx] == key {
+                    out[i] = idx as u32;
+                }
+            }
+        }
+        out
+    }
+
+    fn lookup_batch_cpu_with_buffers(
+        &self,
+        keys: &[u64],
+        buffers: &mut GpuLookupBuffers,
+    ) -> Vec<u32> {
+        if keys.is_empty() {
+            return Vec::new();
+        }
+        buffers.ensure_capacity(keys.len());
+        for v in buffers.out.iter_mut().take(keys.len()) {
+            *v = u32::MAX;
+        }
+        for (i, &key) in keys.iter().enumerate() {
+            if let Ok(idx) = self.index.lookup_u64(key) {
+                if idx < self.entry_keys.len() && self.entry_keys[idx] == key {
+                    buffers.out[i] = idx as u32;
+                }
+            }
+        }
+        buffers.out[..keys.len()].to_vec()
+    }
+
+    fn lookup_batch_from_strings_cpu(
+        &self,
+        ref_pool: &[u8],
+        ref_offsets: &[u32],
+        ref_lens: &[u32],
+        alt_pool: &[u8],
+        alt_offsets: &[u32],
+        alt_lens: &[u32],
+        key_ref_idx: &[u32],
+        key_chr: &[u8],
+        key_pos: &[u32],
+    ) -> Vec<u32> {
         let n = alt_offsets.len();
-        if n == 0 {
-            return Ok(Vec::new());
+        let mut out = vec![u32::MAX; n];
+        for i in 0..n {
+            let ref_idx = key_ref_idx[i] as usize;
+            if ref_idx >= ref_offsets.len() || ref_idx >= ref_lens.len() {
+                continue;
+            }
+            let ref_start = ref_offsets[ref_idx] as usize;
+            let ref_len = ref_lens[ref_idx] as usize;
+            if ref_start + ref_len > ref_pool.len() {
+                continue;
+            }
+            let alt_start = alt_offsets[i] as usize;
+            let alt_len = alt_lens[i] as usize;
+            if alt_start + alt_len > alt_pool.len() {
+                continue;
+            }
+            let chr_id = key_chr[i];
+            let pos = key_pos[i];
+            let mut key = (chr_id as u64) << 32 | pos as u64;
+            key ^= fast_hash64(&ref_pool[ref_start..ref_start + ref_len]);
+            key ^= fast_hash64(&alt_pool[alt_start..alt_start + alt_len]);
+            if let Ok(idx) = self.index.lookup_u64(key) {
+                if idx < self.entry_keys.len() && self.entry_keys[idx] == key {
+                    out[i] = idx as u32;
+                }
+            }
         }
-
-        let d_ref_pool = DeviceBuffer::from_slice(ref_pool).context("Failed to upload ref pool")?;
-        let d_ref_offsets =
-            DeviceBuffer::from_slice(ref_offsets).context("Failed to upload ref offsets")?;
-        let d_ref_lens = DeviceBuffer::from_slice(ref_lens).context("Failed to upload ref lens")?;
-        let d_alt_pool = DeviceBuffer::from_slice(alt_pool).context("Failed to upload alt pool")?;
-        let d_alt_offsets =
-            DeviceBuffer::from_slice(alt_offsets).context("Failed to upload alt offsets")?;
-        let d_alt_lens = DeviceBuffer::from_slice(alt_lens).context("Failed to upload alt lens")?;
-        let d_key_ref_idx =
-            DeviceBuffer::from_slice(key_ref_idx).context("Failed to upload key ref idx")?;
-        let d_key_chr = DeviceBuffer::from_slice(key_chr).context("Failed to upload key chr")?;
-        let d_key_pos = DeviceBuffer::from_slice(key_pos).context("Failed to upload key pos")?;
-
-        let d_out = DeviceBuffer::<u32>::zeroed(n).context("Failed to allocate output buffer")?;
-
-        let threads = 256;
-        let blocks = ((n as u32) + threads - 1) / threads;
-
-        let func = self
-            .module
-            .get_function("ani_lookup_from_strings_kernel")
-            .context("Failed to get ani_lookup_from_strings_kernel")?;
-
-        let stream = &self.stream;
-        unsafe {
-            launch!(
-                func<<<blocks, threads, 0, stream>>>(
-                    d_ref_pool.as_device_ptr(),
-                    d_ref_offsets.as_device_ptr(),
-                    d_ref_lens.as_device_ptr(),
-                    d_alt_pool.as_device_ptr(),
-                    d_alt_offsets.as_device_ptr(),
-                    d_alt_lens.as_device_ptr(),
-                    d_key_ref_idx.as_device_ptr(),
-                    d_key_chr.as_device_ptr(),
-                    d_key_pos.as_device_ptr(),
-                    self.d_g.as_device_ptr(),
-                    self.m,
-                    self.n,
-                    self.salt,
-                    self.d_entry_keys.as_device_ptr(),
-                    d_out.as_device_ptr(),
-                    n as i32
-                )
-            )?;
-        }
-
-        self.stream.synchronize()?;
-
-        let mut out = vec![0u32; n];
-        d_out.copy_to(&mut out)?;
-
-        Ok(out)
+        out
     }
 }
 
 impl GpuLookupBuffers {
     fn new(capacity: usize) -> Result<Self> {
-        let d_keys = unsafe { DeviceBuffer::uninitialized(capacity)? };
-        let d_out = unsafe { DeviceBuffer::uninitialized(capacity)? };
         Ok(Self {
-            d_keys,
-            d_out,
+            out: vec![0u32; capacity],
             capacity,
         })
     }
 
-    fn ensure_capacity(&mut self, capacity: usize) -> Result<()> {
+    fn ensure_capacity(&mut self, capacity: usize) {
         if capacity <= self.capacity {
-            return Ok(());
+            return;
         }
-        self.d_keys = unsafe { DeviceBuffer::uninitialized(capacity)? };
-        self.d_out = unsafe { DeviceBuffer::uninitialized(capacity)? };
+        self.out = vec![0u32; capacity];
         self.capacity = capacity;
-        Ok(())
     }
 }
 

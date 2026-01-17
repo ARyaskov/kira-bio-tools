@@ -199,12 +199,23 @@ impl AniIndex {
             );
         }
 
-        let idx = self.mph.index(&h.to_le_bytes()) as usize;
+        let idx = match self.index.lookup_u64(h) {
+            Ok(v) => v,
+            Err(_) => {
+                if debug {
+                    eprintln!("[LOOKUP] Index miss for key={:016x}", h);
+                }
+                if let Some(idx) = self.find_interval_entry(chr_id, pos) {
+                    return Some(self.build_bundle_from_entry(&self.entries[idx]));
+                }
+                return None;
+            }
+        };
 
         if idx >= self.entries.len() {
             if debug {
                 eprintln!(
-                    "[LOOKUP] MPH returned idx {} >= entries.len() {}",
+                    "[LOOKUP] Index returned idx {} >= entries.len() {}",
                     idx,
                     self.entries.len()
                 );
@@ -279,12 +290,27 @@ impl AniIndex {
             );
         }
 
-        let idx = self.mph.index(&h.to_le_bytes()) as usize;
+        let idx = match self.index.lookup_u64(h) {
+            Ok(v) => v,
+            Err(_) => {
+                if debug {
+                    eprintln!("[LOOKUP] Index miss for key={:016x}", h);
+                }
+                if let Some(idx) = self.find_interval_entry(chr_id, pos) {
+                    return Some(self.build_bundle_from_entry_opts(
+                        &self.entries[idx],
+                        need_info,
+                        need_format,
+                    ));
+                }
+                return None;
+            }
+        };
 
         if idx >= self.entries.len() {
             if debug {
                 eprintln!(
-                    "[LOOKUP] MPH returned idx {} >= entries.len() {}",
+                    "[LOOKUP] Index returned idx {} >= entries.len() {}",
                     idx,
                     self.entries.len()
                 );
@@ -382,12 +408,28 @@ impl AniIndex {
             );
         }
 
-        let idx = self.mph.index(&h.to_le_bytes()) as usize;
+        let idx = match self.index.lookup_u64(h) {
+            Ok(v) => v,
+            Err(_) => {
+                if debug {
+                    eprintln!("[LOOKUP] Index miss for key={:016x}", h);
+                }
+                if let Some(idx) = self.find_interval_entry(chr_id, pos) {
+                    let (bundle, t) = self.build_bundle_from_entry_timed_opts(
+                        &self.entries[idx],
+                        need_info,
+                        need_format,
+                    );
+                    return Some((bundle, t));
+                }
+                return None;
+            }
+        };
 
         if idx >= self.entries.len() {
             if debug {
                 eprintln!(
-                    "[LOOKUP] MPH returned idx {} >= entries.len() {}",
+                    "[LOOKUP] Index returned idx {} >= entries.len() {}",
                     idx,
                     self.entries.len()
                 );

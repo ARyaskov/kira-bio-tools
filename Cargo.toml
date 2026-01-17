@@ -9,7 +9,7 @@ keywords = ["vcf", "bioinformatics", "genomics", "tabix", "index"]
 categories = ["science", "command-line-utilities"]
 
 [dependencies]
-kira_kv_engine = { version = "0.1", features = ["parallel"] }
+kira_kv_engine = "0.2.1"
 thiserror = "2.0"
 memmap2 = "0.9"
 bytemuck = { version = "1.21", features = ["derive"] }
@@ -29,6 +29,7 @@ once_cell = "1.19"
 fxhash = "0.2.1"
 pest = "2.8.4"
 pest_derive = "2.8.4"
+regex = "1.11"
 cust = { version = "0.3.2", optional = true }
 which = "8.0.0"
 ocl = { version = "0.19.7", optional = true }

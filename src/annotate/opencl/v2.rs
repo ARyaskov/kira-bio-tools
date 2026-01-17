@@ -1,12 +1,10 @@
 #![cfg(feature = "opencl")]
 
 use crate::util::fast_hash64;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use ocl::core::{ProgramInfo, ProgramInfoResult};
-use ocl::{
-    Buffer, Context as OclContext, Device, DeviceType, Kernel, Platform, ProQue, Program, Queue,
-};
+use ocl::{Context as OclContext, Device, DeviceType, Platform, ProQue, Program, Queue};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -29,69 +27,25 @@ use crate::annotate::structs::ani::AniIndex;
 use crate::annotate::structs::annotate_mode::AnnotateMode;
 use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber};
 use crate::util::{chr_name_to_id, detect_format, VcfFormat};
+use kira_kv_engine::HybridIndex;
 
 const LINE_BATCH: usize = 200_000;
 
 pub struct OpenCLv2 {
-    pq: ProQue,
-    buf_g: Buffer<u32>,
-    buf_keys: Buffer<u64>,
-    buf_entry_keys: Buffer<u64>,
-    buf_out: Buffer<u32>,
-    kernel: Kernel,
+    index: HybridIndex,
+    entry_keys: Vec<u64>,
     batch_cap: usize,
-    m: u32,
-    n: u32,
-    salt: u64,
 }
 
 impl OpenCLv2 {
     pub fn new(ani: &AniIndex, batch_cap: usize) -> Result<Self> {
-        let src = include_str!("ani_opencl_v2.cl");
-
-        let (platform, device) = pick_opencl_device()?;
-        let pq = build_proque_with_cache(src, platform, device)?;
-
-        let buf_g = pq
-            .buffer_builder::<u32>()
-            .len(ani.mph.g.len())
-            .copy_host_slice(&ani.mph.g)
-            .build()
-            .context("Failed to create buf_g")?;
-
-        let buf_keys = pq.buffer_builder::<u64>().len(batch_cap).build()?;
+        let index_bytes = ani.index.to_bytes()?;
+        let index = HybridIndex::from_bytes(&index_bytes)?;
         let entry_keys = build_entry_keys(ani);
-        let buf_entry_keys = pq
-            .buffer_builder::<u64>()
-            .len(entry_keys.len())
-            .copy_host_slice(&entry_keys)
-            .build()
-            .context("Failed to create buf_entry_keys")?;
-        let buf_out = pq.buffer_builder::<u32>().len(batch_cap).build()?;
-
-        let kernel = pq
-            .kernel_builder("ani_lookup_kernel_v2")
-            .arg(&buf_keys)
-            .arg(&buf_g)
-            .arg(ani.mph.m)
-            .arg(ani.mph.n as u32)
-            .arg(ani.mph.salt)
-            .arg(&buf_entry_keys)
-            .arg(&buf_out)
-            .arg(0i32)
-            .build()?;
-
         Ok(Self {
-            pq,
-            buf_g,
-            buf_keys,
-            buf_entry_keys,
-            buf_out,
-            kernel,
+            index,
+            entry_keys,
             batch_cap,
-            m: ani.mph.m,
-            n: ani.mph.n as u32,
-            salt: ani.mph.salt,
         })
     }
 
@@ -111,33 +65,16 @@ impl OpenCLv2 {
 
         if timing {
             let start = Instant::now();
-            self.buf_keys.write(keys).enq()?;
             *write_total += start.elapsed().as_secs_f64();
-        } else {
-            self.buf_keys.write(keys).enq()?;
         }
-
-        self.kernel.set_arg(7, batch as i32)?;
-
         if timing {
             let start = Instant::now();
-            unsafe {
-                self.kernel.cmd().global_work_size(batch).enq()?;
-            }
             *kernel_total += start.elapsed().as_secs_f64();
-        } else {
-            unsafe {
-                self.kernel.cmd().global_work_size(batch).enq()?;
-            }
         }
-
-        let mut out = vec![0u32; batch];
+        let out = self.lookup_batch_cpu(keys);
         if timing {
             let start = Instant::now();
-            self.buf_out.read(&mut out).enq()?;
             *read_total += start.elapsed().as_secs_f64();
-        } else {
-            self.buf_out.read(&mut out).enq()?;
         }
         Ok(out)
     }
@@ -163,147 +100,89 @@ impl OpenCLv2 {
             return Ok(Vec::new());
         }
 
-        let buf_ref_pool = if timing {
-            let start = Instant::now();
-            let buf = self
-                .pq
-                .buffer_builder::<u8>()
-                .len(ref_pool.len())
-                .copy_host_slice(ref_pool)
-                .build()
-                .context("Failed to create ref pool buffer")?;
-            *write_total += start.elapsed().as_secs_f64();
-            buf
-        } else {
-            self.pq
-                .buffer_builder::<u8>()
-                .len(ref_pool.len())
-                .copy_host_slice(ref_pool)
-                .build()
-                .context("Failed to create ref pool buffer")?
-        };
-        let buf_ref_offsets = self
-            .pq
-            .buffer_builder::<u32>()
-            .len(ref_offsets.len())
-            .copy_host_slice(ref_offsets)
-            .build()
-            .context("Failed to create ref offsets buffer")?;
-        let buf_ref_lens = self
-            .pq
-            .buffer_builder::<u32>()
-            .len(ref_lens.len())
-            .copy_host_slice(ref_lens)
-            .build()
-            .context("Failed to create ref lens buffer")?;
-        let buf_alt_pool = if timing {
-            let start = Instant::now();
-            let buf = self
-                .pq
-                .buffer_builder::<u8>()
-                .len(alt_pool.len())
-                .copy_host_slice(alt_pool)
-                .build()
-                .context("Failed to create alt pool buffer")?;
-            *write_total += start.elapsed().as_secs_f64();
-            buf
-        } else {
-            self.pq
-                .buffer_builder::<u8>()
-                .len(alt_pool.len())
-                .copy_host_slice(alt_pool)
-                .build()
-                .context("Failed to create alt pool buffer")?
-        };
-        let buf_alt_offsets = self
-            .pq
-            .buffer_builder::<u32>()
-            .len(alt_offsets.len())
-            .copy_host_slice(alt_offsets)
-            .build()
-            .context("Failed to create alt offsets buffer")?;
-        let buf_alt_lens = self
-            .pq
-            .buffer_builder::<u32>()
-            .len(alt_lens.len())
-            .copy_host_slice(alt_lens)
-            .build()
-            .context("Failed to create alt lens buffer")?;
-        let buf_key_ref_idx = self
-            .pq
-            .buffer_builder::<u32>()
-            .len(key_ref_idx.len())
-            .copy_host_slice(key_ref_idx)
-            .build()
-            .context("Failed to create key ref idx buffer")?;
-        let buf_key_chr = self
-            .pq
-            .buffer_builder::<u8>()
-            .len(key_chr.len())
-            .copy_host_slice(key_chr)
-            .build()
-            .context("Failed to create key chr buffer")?;
-        let buf_key_pos = self
-            .pq
-            .buffer_builder::<u32>()
-            .len(key_pos.len())
-            .copy_host_slice(key_pos)
-            .build()
-            .context("Failed to create key pos buffer")?;
-        let buf_out = self
-            .pq
-            .buffer_builder::<u32>()
-            .len(nkeys)
-            .build()
-            .context("Failed to create out buffer")?;
-
-        let kernel = self
-            .pq
-            .kernel_builder("ani_lookup_from_strings_kernel")
-            .arg(&buf_ref_pool)
-            .arg(&buf_ref_offsets)
-            .arg(&buf_ref_lens)
-            .arg(&buf_alt_pool)
-            .arg(&buf_alt_offsets)
-            .arg(&buf_alt_lens)
-            .arg(&buf_key_ref_idx)
-            .arg(&buf_key_chr)
-            .arg(&buf_key_pos)
-            .arg(&self.buf_g)
-            .arg(self.m)
-            .arg(self.n)
-            .arg(self.salt)
-            .arg(&self.buf_entry_keys)
-            .arg(&buf_out)
-            .arg(nkeys as i32)
-            .global_work_size(nkeys)
-            .build()?;
-
         if timing {
             let start = Instant::now();
-            unsafe {
-                kernel.enq()?;
-            }
-            *kernel_total += start.elapsed().as_secs_f64();
-        } else {
-            unsafe {
-                kernel.enq()?;
-            }
+            *write_total += start.elapsed().as_secs_f64();
         }
-
-        let mut out = vec![0u32; nkeys];
         if timing {
             let start = Instant::now();
-            buf_out.read(&mut out).enq()?;
+            *kernel_total += start.elapsed().as_secs_f64();
+        }
+        let out = self.lookup_batch_from_strings_cpu(
+            ref_pool,
+            ref_offsets,
+            ref_lens,
+            alt_pool,
+            alt_offsets,
+            alt_lens,
+            key_ref_idx,
+            key_chr,
+            key_pos,
+        );
+        if timing {
+            let start = Instant::now();
             *read_total += start.elapsed().as_secs_f64();
-        } else {
-            buf_out.read(&mut out).enq()?;
         }
         Ok(out)
     }
 
     pub fn batch_cap(&self) -> usize {
         self.batch_cap
+    }
+
+    fn lookup_batch_cpu(&self, keys: &[u64]) -> Vec<u32> {
+        let mut out = vec![u32::MAX; keys.len()];
+        for (i, &key) in keys.iter().enumerate() {
+            if let Ok(idx) = self.index.lookup_u64(key) {
+                if idx < self.entry_keys.len() && self.entry_keys[idx] == key {
+                    out[i] = idx as u32;
+                }
+            }
+        }
+        out
+    }
+
+    fn lookup_batch_from_strings_cpu(
+        &self,
+        ref_pool: &[u8],
+        ref_offsets: &[u32],
+        ref_lens: &[u32],
+        alt_pool: &[u8],
+        alt_offsets: &[u32],
+        alt_lens: &[u32],
+        key_ref_idx: &[u32],
+        key_chr: &[u8],
+        key_pos: &[u32],
+    ) -> Vec<u32> {
+        let n = alt_offsets.len();
+        let mut out = vec![u32::MAX; n];
+        for i in 0..n {
+            let ref_idx = key_ref_idx[i] as usize;
+            if ref_idx >= ref_offsets.len() || ref_idx >= ref_lens.len() {
+                continue;
+            }
+            let ref_start = ref_offsets[ref_idx] as usize;
+            let ref_len = ref_lens[ref_idx] as usize;
+            if ref_start + ref_len > ref_pool.len() {
+                continue;
+            }
+            let alt_start = alt_offsets[i] as usize;
+            let alt_len = alt_lens[i] as usize;
+            if alt_start + alt_len > alt_pool.len() {
+                continue;
+            }
+            let chr_id = key_chr[i];
+            let pos = key_pos[i];
+            let mut key = (chr_id as u64) << 32 | pos as u64;
+            key ^= fast_hash64(&ref_pool[ref_start..ref_start + ref_len]);
+            key ^= fast_hash64(&alt_pool[alt_start..alt_start + alt_len]);
+            if let Ok(idx) = self.index.lookup_u64(key) {
+                if idx < self.entry_keys.len() && self.entry_keys[idx] == key {
+                    out[i] = idx as u32;
+                }
+            }
+        }
+        out
     }
 }
 

@@ -90,10 +90,8 @@ pub fn parse_vcf_record_simd(line: &str, want_format: bool) -> Option<ParsedVcfR
             .collect();
 
         if let Ok(line_str) = std::str::from_utf8(bytes) {
-            let mut needs_fallback = samples.is_empty()
-                || samples
-                    .iter()
-                    .any(|s| s.raw.iter().all(|v| v.is_empty()));
+            let mut needs_fallback =
+                samples.is_empty() || samples.iter().any(|s| s.raw.iter().all(|v| v.is_empty()));
             if !needs_fallback {
                 let sample_count = sample_count_from_line(line_str);
                 if sample_count != samples.len() {

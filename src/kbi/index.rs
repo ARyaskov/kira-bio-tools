@@ -4,7 +4,7 @@ use std::mem;
 use std::path::Path;
 use std::slice;
 
-use kira_kv_engine::Mphf;
+use kira_kv_engine::HybridIndex;
 use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
 
@@ -12,7 +12,7 @@ use crate::kbi::structs::{KbiHeader, KbiStats, Result};
 use crate::util::{ChrId, GenomicKey};
 
 pub struct KbiIndex {
-    mph: Mphf,
+    index: HybridIndex,
     keys: Vec<u64>,
     offsets: Vec<u64>,
 }
@@ -20,8 +20,10 @@ pub struct KbiIndex {
 impl KbiIndex {
     #[inline]
     pub fn get(&self, key: GenomicKey) -> Option<u64> {
-        let key_bytes = key.as_u64().to_le_bytes();
-        let idx = self.mph.index(&key_bytes) as usize;
+        let idx = match self.index.lookup_u64(key.as_u64()) {
+            Ok(v) => v,
+            Err(_) => return None,
+        };
 
         if idx < self.keys.len() && self.keys[idx] == key.as_u64() {
             Some(self.offsets[idx])
@@ -65,17 +67,12 @@ impl KbiIndex {
         let file = File::create(path)?;
         let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, file);
 
-        let header = KbiHeader::new(self.keys.len(), &self.mph);
+        let index_bytes = self.index.to_bytes()?;
+        let header = KbiHeader::new(self.keys.len(), index_bytes.len());
 
         writer.write_all(bytemuck::bytes_of(&header))?;
 
-        let g_bytes = unsafe {
-            slice::from_raw_parts(
-                self.mph.g.as_ptr() as *const u8,
-                self.mph.g.len() * mem::size_of::<u32>(),
-            )
-        };
-        writer.write_all(g_bytes)?;
+        writer.write_all(&index_bytes)?;
 
         let keys_bytes = unsafe {
             slice::from_raw_parts(
@@ -117,18 +114,14 @@ impl KbiIndex {
         header.validate()?;
 
         let n = header.n_entries as usize;
-        let m = header.mph_m as usize;
-
-        let g_start = header.off_mph_g as usize;
-        let g_end = g_start + m * mem::size_of::<u32>();
-        let g: Vec<u32> = bytemuck::cast_slice(&mmap[g_start..g_end]).to_vec();
-
-        let mph = Mphf {
-            n: header.n_entries,
-            m: header.mph_m,
-            salt: header.mph_salt as u64,
-            g,
-        };
+        let index_start = header.off_index as usize;
+        let index_end = index_start + header.index_len as usize;
+        if index_end > mmap.len() {
+            return Err(crate::kbi::structs::KbiError::InvalidFormat(
+                "Index out of range".into(),
+            ));
+        }
+        let index = HybridIndex::from_bytes(&mmap[index_start..index_end])?;
 
         let keys_start = header.off_keys as usize;
         let keys_end = keys_start + n * mem::size_of::<u64>();
@@ -138,22 +131,30 @@ impl KbiIndex {
         let offsets_end = offsets_start + n * mem::size_of::<u64>();
         let offsets: Vec<u64> = bytemuck::cast_slice(&mmap[offsets_start..offsets_end]).to_vec();
 
-        Ok(Self { mph, keys, offsets })
+        Ok(Self {
+            index,
+            keys,
+            offsets,
+        })
     }
 
     pub fn memory_usage(&self) -> usize {
         mem::size_of::<Self>()
             + self.keys.len() * mem::size_of::<u64>()
             + self.offsets.len() * mem::size_of::<u64>()
-            + self.mph.g.len() * mem::size_of::<u32>()
+            + self.index.stats().total_memory
     }
 
     pub fn bytes_per_key(&self) -> f64 {
         self.memory_usage() as f64 / self.len().max(1) as f64
     }
 
-    pub(crate) fn from_parts(mph: Mphf, keys: Vec<u64>, offsets: Vec<u64>) -> Self {
-        Self { mph, keys, offsets }
+    pub(crate) fn from_parts(index: HybridIndex, keys: Vec<u64>, offsets: Vec<u64>) -> Self {
+        Self {
+            index,
+            keys,
+            offsets,
+        }
     }
 
     pub fn stats(&self, file_size: u64) -> KbiStats {

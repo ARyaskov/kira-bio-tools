@@ -2,19 +2,19 @@ use std::io;
 use std::mem;
 
 use bytemuck::{Pod, Zeroable};
-use kira_kv_engine::{MphError, Mphf};
+use kira_kv_engine::HybridError;
 use thiserror::Error;
 
-pub const KBI_MAGIC: [u8; 8] = *b"KBIV0002";
-pub const KBI_VERSION: u32 = 2;
+pub const KBI_MAGIC: [u8; 8] = *b"KBIV0003";
+pub const KBI_VERSION: u32 = 3;
 pub const ENDIAN_TAG: u32 = 0x01020304;
 
 #[derive(Debug, Error)]
 pub enum KbiError {
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
-    #[error("MPH error: {0}")]
-    Mph(#[from] MphError),
+    #[error("KV error: {0}")]
+    Kv(#[from] HybridError),
     #[error("VCF error: {0}")]
     Vcf(#[from] crate::vcf::VcfError),
     #[error("Empty dataset")]
@@ -34,9 +34,8 @@ pub struct KbiHeader {
     pub version: u32,
     pub endian: u32,
     pub n_entries: u64,
-    pub mph_m: u32,
-    pub mph_salt: u32,
-    pub off_mph_g: u64,
+    pub index_len: u64,
+    pub off_index: u64,
     pub off_keys: u64,
     pub off_offsets: u64,
     _reserved: [u8; 8],
@@ -45,21 +44,20 @@ pub struct KbiHeader {
 const _: () = assert!(mem::size_of::<KbiHeader>() == 64);
 
 impl KbiHeader {
-    pub fn new(n_entries: usize, mph: &Mphf) -> Self {
+    pub fn new(n_entries: usize, index_len: usize) -> Self {
         let header_size = mem::size_of::<Self>() as u64;
-        let mph_g_size = (mph.g.len() * mem::size_of::<u32>()) as u64;
         let keys_size = (n_entries * mem::size_of::<u64>()) as u64;
+        let index_size = index_len as u64;
 
         Self {
             magic: KBI_MAGIC,
             version: KBI_VERSION,
             endian: ENDIAN_TAG,
             n_entries: n_entries as u64,
-            mph_m: mph.m,
-            mph_salt: mph.salt as u32,
-            off_mph_g: header_size,
-            off_keys: header_size + mph_g_size,
-            off_offsets: header_size + mph_g_size + keys_size,
+            index_len: index_size,
+            off_index: header_size,
+            off_keys: header_size + index_size,
+            off_offsets: header_size + index_size + keys_size,
             _reserved: [0; 8],
         }
     }

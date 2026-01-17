@@ -331,7 +331,13 @@ fn annotate_record_with_alts(
             if new_samples.len() != raw.len() {
                 new_samples = raw
                     .iter()
-                    .map(|s| if s.is_empty() { ".".to_string() } else { (*s).to_string() })
+                    .map(|s| {
+                        if s.is_empty() {
+                            ".".to_string()
+                        } else {
+                            (*s).to_string()
+                        }
+                    })
                     .collect();
             }
         }

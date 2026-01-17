@@ -1,4 +1,4 @@
-use kira_kv_engine::{BuildConfig, Builder};
+use kira_kv_engine::{HybridBuilder, HybridConfig};
 use rayon::prelude::*;
 
 use crate::kbi::index::KbiIndex;
@@ -8,18 +8,18 @@ use crate::vcf::VcfRecord;
 
 pub struct KbiBuilder {
     entries: Vec<(u64, u64)>,
-    config: BuildConfig,
+    gamma: f64,
+    rehash_limit: u32,
+    salt: u64,
 }
 
 impl KbiBuilder {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
-            config: BuildConfig {
-                gamma: 1.27,
-                rehash_limit: 16,
-                salt: 0xC0FF_EE00_D15E_A5E,
-            },
+            gamma: 1.27,
+            rehash_limit: 16,
+            salt: 0xC0FF_EE00_D15E_A5E,
         }
     }
 
@@ -31,7 +31,7 @@ impl KbiBuilder {
     }
 
     pub fn gamma(mut self, gamma: f64) -> Self {
-        self.config.gamma = gamma;
+        self.gamma = gamma;
         self
     }
 
@@ -82,9 +82,15 @@ impl KbiBuilder {
 
         let key_bytes: Vec<[u8; 8]> = keys.iter().map(|k| k.to_le_bytes()).collect();
 
-        let mph = Builder::new()
-            .with_config(self.config)
-            .build(key_bytes.iter().map(|b| b.as_slice()))?;
+        let mut config = HybridConfig::default();
+        config.mph_config.gamma = self.gamma;
+        config.mph_config.rehash_limit = self.rehash_limit;
+        config.mph_config.salt = self.salt;
+        config.auto_detect_numeric = true;
+
+        let index = HybridBuilder::new()
+            .with_config(config)
+            .build_index(key_bytes.clone())?;
 
         let n = keys.len();
         let sorted_keys = vec![0u64; n];
@@ -93,7 +99,7 @@ impl KbiBuilder {
         keys.par_iter()
             .zip(offsets.par_iter())
             .for_each(|(&key, &offset)| {
-                let idx = mph.index(&key.to_le_bytes()) as usize;
+                let idx = index.lookup_u64(key).unwrap();
                 unsafe {
                     let keys_ptr = sorted_keys.as_ptr() as *mut u64;
                     let offsets_ptr = sorted_offsets.as_ptr() as *mut u64;
@@ -102,7 +108,7 @@ impl KbiBuilder {
                 }
             });
 
-        Ok(KbiIndex::from_parts(mph, sorted_keys, sorted_offsets))
+        Ok(KbiIndex::from_parts(index, sorted_keys, sorted_offsets))
     }
 }
 

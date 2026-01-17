@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use kira_kv_engine::Mphf;
+use kira_kv_engine::HybridIndex;
 use libdeflater::Decompressor;
 use memchr::memchr;
 use memmap2::{Mmap, MmapOptions};
@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use super::header::{
-    AniBlockEntry, AniEntry, AniEntryV2, AniHeader, AniHeaderV3, AniHeaderV4, ANI_MAGIC,
+    AniBlockEntry, AniEntry, AniEntryV2, AniHeader, AniHeaderV3, AniHeaderV5, ANI_MAGIC,
     ANI_STR_NONE, ANI_VERSION,
 };
 
@@ -184,7 +184,7 @@ pub struct IntervalEntry {
 
 pub struct AniIndex {
     pub header: AniHeader,
-    pub mph: Mphf,
+    pub index: HybridIndex,
     pub entries: Vec<AniEntry>,
     intervals: Vec<Vec<IntervalEntry>>,
     strings: StringSource,
@@ -203,13 +203,13 @@ impl AniIndex {
         let header = read_header(&mmap)?;
         header.validate()?;
 
-        let mph = load_mph(&mmap, &header)?;
+        let index = load_index(&mmap, &header)?;
         let entries = load_entries(&mmap, &header)?;
         let strings = load_strings(&mmap, &header)?;
 
         let mut ani = Self {
             header,
-            mph,
+            index,
             entries,
             intervals: Vec::new(),
             strings,
@@ -474,57 +474,39 @@ fn read_header(mmap: &Mmap) -> Result<AniHeader> {
     }
 
     match h3.version {
-        2 | 3 => Ok(AniHeader {
-            magic: h3.magic,
-            version: h3.version,
-            n_entries: h3.n_entries,
-            mph_m: h3.mph_m,
-            mph_salt: h3.mph_salt,
-            off_mph_g: h3.off_mph_g,
-            off_entries: h3.off_entries,
-            off_strings: h3.off_strings,
-            off_block_index: 0,
-            n_blocks: 0,
-            block_size: 0,
-        }),
         ANI_VERSION => {
-            if mmap.len() < mem::size_of::<AniHeaderV4>() {
-                return Err(anyhow!("ANI file too small for v4 header"));
+            if mmap.len() < mem::size_of::<AniHeaderV5>() {
+                return Err(anyhow!("ANI file too small for v5 header"));
             }
-            let h4: AniHeaderV4 = unsafe { *(mmap.as_ptr() as *const AniHeaderV4) };
+            let h5: AniHeaderV5 = unsafe { *(mmap.as_ptr() as *const AniHeaderV5) };
             Ok(AniHeader {
-                magic: h4.magic,
-                version: h4.version,
-                n_entries: h4.n_entries,
-                mph_m: h4.mph_m,
-                mph_salt: h4.mph_salt,
-                off_mph_g: h4.off_mph_g,
-                off_entries: h4.off_entries,
-                off_strings: h4.off_strings,
-                off_block_index: h4.off_block_index,
-                n_blocks: h4.n_blocks,
-                block_size: h4.block_size,
+                magic: h5.magic,
+                version: h5.version,
+                n_entries: h5.n_entries,
+                index_len: h5.index_len,
+                off_index: h5.off_index,
+                off_entries: h5.off_entries,
+                off_strings: h5.off_strings,
+                off_block_index: h5.off_block_index,
+                n_blocks: h5.n_blocks,
+                block_size: h5.block_size,
             })
         }
+        2 | 3 | 4 => Err(anyhow!(
+            "Unsupported ANI version {} (rebuild index)",
+            h3.version
+        )),
         _ => Err(anyhow!("Unsupported ANI version {}", h3.version)),
     }
 }
 
-fn load_mph(mmap: &Mmap, header: &AniHeader) -> Result<Mphf> {
-    let g_start = header.off_mph_g as usize;
-    let g_end = g_start + header.mph_m as usize * 4;
-    let mut g = Vec::with_capacity(header.mph_m as usize);
-
-    for chunk in mmap[g_start..g_end].chunks_exact(4) {
-        g.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+fn load_index(mmap: &Mmap, header: &AniHeader) -> Result<HybridIndex> {
+    let start = header.off_index as usize;
+    let end = start + header.index_len as usize;
+    if end > mmap.len() {
+        return Err(anyhow!("ANI index out of range"));
     }
-
-    Ok(Mphf {
-        n: header.n_entries,
-        m: header.mph_m as u32,
-        salt: header.mph_salt,
-        g,
-    })
+    HybridIndex::from_bytes(&mmap[start..end]).map_err(|e| anyhow!(e))
 }
 
 fn load_entries(mmap: &Mmap, header: &AniHeader) -> Result<Vec<AniEntry>> {

@@ -1,12 +1,12 @@
 use anyhow::Result;
-use kira_kv_engine::{BuildConfig, Builder};
+use kira_kv_engine::{HybridBuilder, HybridConfig, HybridIndex};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::mem;
 use std::path::Path;
 
 use crate::annotate::builder_v2::StringPool;
-use crate::annotate::structs::ani::{AniBlockEntry, AniEntry, AniHeaderV4, ANI_MAGIC, ANI_VERSION};
+use crate::annotate::structs::ani::{AniBlockEntry, AniEntry, AniHeaderV5, ANI_MAGIC, ANI_VERSION};
 
 pub fn finalize_ani_index(
     rows: Vec<(u64, AniEntry)>,
@@ -33,17 +33,19 @@ pub fn finalize_ani_index(
         verify_key_uniqueness(&keys_bytes, &rows);
     }
 
-    let mph = Builder::new()
-        .with_config(BuildConfig {
-            gamma,
-            rehash_limit: rehash_limit as u32,
-            salt: 0x9E3779B185EBCA87,
-        })
-        .build(keys_bytes.iter().map(|b| b.as_slice()))?;
+    let mut config = HybridConfig::default();
+    config.mph_config.gamma = gamma;
+    config.mph_config.rehash_limit = rehash_limit as u32;
+    config.mph_config.salt = 0x9E3779B185EBCA87;
+    config.auto_detect_numeric = false;
+
+    let index = HybridBuilder::new()
+        .with_config(config)
+        .build_index(keys_bytes.clone())?;
 
     if timing {
         eprintln!(
-            "[ani-build] MPH construction: {:.3}s",
+            "[ani-build] Index construction: {:.3}s",
             mph_start.elapsed().as_secs_f64()
         );
     }
@@ -51,10 +53,11 @@ pub fn finalize_ani_index(
     let entries: Vec<AniEntry> = rows.into_iter().map(|(_, entry)| entry).collect();
 
     if timing {
-        verify_mph_correctness(&mph, &keys_bytes, &entries);
+        verify_index_correctness(&index, &keys_bytes, &entries);
     }
 
-    write_ani_file(output, &mph, &entries, &mut pool, timing)?;
+    let index_bytes = index.to_bytes()?;
+    write_ani_file(output, &index_bytes, &entries, &mut pool, timing)?;
     pool.cleanup();
 
     Ok(())
@@ -106,19 +109,24 @@ fn verify_key_uniqueness(keys_bytes: &[[u8; 8]], rows: &[(u64, AniEntry)]) {
     }
 }
 
-fn verify_mph_correctness(
-    mph: &kira_kv_engine::Mphf,
-    keys_bytes: &[[u8; 8]],
-    entries: &[AniEntry],
-) {
-    eprintln!("[ani-build] Verifying MPH lookups (checking 100 random entries):");
+fn verify_index_correctness(index: &HybridIndex, keys_bytes: &[[u8; 8]], entries: &[AniEntry]) {
+    eprintln!("[ani-build] Verifying index lookups (checking 100 random entries):");
     let mut errors = 0;
     let check_count = 100.min(entries.len());
     let step = entries.len() / check_count;
 
     for i in (0..entries.len()).step_by(step.max(1)).take(check_count) {
         let key = u64::from_le_bytes(keys_bytes[i]);
-        let idx = mph.index(&keys_bytes[i]) as usize;
+        let idx = match index.lookup_u64(key) {
+            Ok(v) => v,
+            Err(_) => {
+                errors += 1;
+                if errors <= 5 {
+                    eprintln!("  [{}] ERROR: key={:016x} -> index lookup failed", i, key);
+                }
+                continue;
+            }
+        };
         let retrieved = &entries[idx];
         let expected = &entries[i];
 
@@ -137,13 +145,13 @@ fn verify_mph_correctness(
 
     if errors > 0 {
         eprintln!(
-            "[ani-build] ERROR: MPH verification FAILED with {} errors out of {} checks!",
+            "[ani-build] ERROR: Index verification FAILED with {} errors out of {} checks!",
             errors, check_count
         );
         eprintln!("[ani-build] This means the index will NOT work correctly!");
     } else {
         eprintln!(
-            "[ani-build] MPH verification: All {} checks passed ✓",
+            "[ani-build] Index verification: All {} checks passed ✓",
             check_count
         );
     }
@@ -151,14 +159,14 @@ fn verify_mph_correctness(
 
 fn write_ani_file(
     output: &Path,
-    mph: &kira_kv_engine::Mphf,
+    index_bytes: &[u8],
     entries: &[AniEntry],
     pool: &mut StringPool,
     timing: bool,
 ) -> Result<()> {
     let n = entries.len();
-    let hdr_size = mem::size_of::<AniHeaderV4>();
-    let g_size = mph.g.len() * 4;
+    let hdr_size = mem::size_of::<AniHeaderV5>();
+    let index_size = index_bytes.len();
     let ent_size = n * mem::size_of::<AniEntry>();
     let block_size = pool.block_size();
     let blocks = pool.blocks();
@@ -168,17 +176,16 @@ fn write_ani_file(
         blocks_size += b.data.len();
     }
 
-    let block_index_off = (hdr_size + g_size + ent_size) as u64;
+    let block_index_off = (hdr_size + index_size + ent_size) as u64;
     let block_data_off = block_index_off + block_index_size as u64;
 
-    let header = AniHeaderV4 {
+    let header = AniHeaderV5 {
         magic: ANI_MAGIC,
         version: ANI_VERSION,
         n_entries: n as u64,
-        mph_m: mph.m as u64,
-        mph_salt: mph.salt,
-        off_mph_g: hdr_size as u64,
-        off_entries: (hdr_size + g_size) as u64,
+        index_len: index_size as u64,
+        off_index: hdr_size as u64,
+        off_entries: (hdr_size + index_size) as u64,
         off_strings: block_index_off,
         off_block_index: block_index_off,
         n_blocks: blocks.len() as u64,
@@ -194,8 +201,7 @@ fn write_ani_file(
         unsafe { std::slice::from_raw_parts(&header as *const _ as *const u8, hdr_size) };
     file.write_all(hdr_bytes)?;
 
-    let g_bytes: &[u8] = unsafe { std::slice::from_raw_parts(mph.g.as_ptr() as *const u8, g_size) };
-    file.write_all(g_bytes)?;
+    file.write_all(index_bytes)?;
 
     let entries_bytes: &[u8] =
         unsafe { std::slice::from_raw_parts(entries.as_ptr() as *const u8, ent_size) };
@@ -234,7 +240,7 @@ fn write_ani_file(
         );
         eprintln!(
             "[ani-build] Total ANI size: {} bytes",
-            hdr_size + g_size + ent_size + block_index_size + blocks_size
+            hdr_size + index_size + ent_size + block_index_size + blocks_size
         );
     }
 

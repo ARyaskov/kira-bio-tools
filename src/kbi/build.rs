@@ -23,7 +23,7 @@ pub fn build_kbi_index<P: AsRef<Path>>(vcf_path: P, output_path: P) -> Result<Kb
         }
     }
 
-    eprintln!("Building MPH for {} entries...", builder.len());
+    eprintln!("Building index for {} entries...", builder.len());
     let index = builder.build()?;
 
     eprintln!("Saving index to {:?}...", output_path.as_ref());

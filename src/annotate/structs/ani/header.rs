@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 
 pub const ANI_MAGIC: u64 = 0x494E4149524B4256;
-pub const ANI_VERSION: u64 = 4;
+pub const ANI_VERSION: u64 = 5;
 pub const ANI_HEADER_END: &str = "##KIRA_BT_ANI_HEADER_END";
 pub const ANI_STR_NONE: u32 = u32::MAX;
 
@@ -35,13 +35,28 @@ pub struct AniHeaderV4 {
     pub _pad: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AniHeaderV5 {
+    pub magic: u64,
+    pub version: u64,
+    pub n_entries: u64,
+    pub index_len: u64,
+    pub off_index: u64,
+    pub off_entries: u64,
+    pub off_strings: u64,
+    pub off_block_index: u64,
+    pub n_blocks: u64,
+    pub block_size: u32,
+    pub _pad: u32,
+}
+
 pub struct AniHeader {
     pub magic: u64,
     pub version: u64,
     pub n_entries: u64,
-    pub mph_m: u64,
-    pub mph_salt: u64,
-    pub off_mph_g: u64,
+    pub index_len: u64,
+    pub off_index: u64,
     pub off_entries: u64,
     pub off_strings: u64,
     pub off_block_index: u64,
@@ -54,7 +69,7 @@ impl AniHeader {
         if self.magic != ANI_MAGIC {
             return Err(anyhow!("Bad ANI magic"));
         }
-        if self.version != 2 && self.version != 3 && self.version != ANI_VERSION {
+        if self.version != ANI_VERSION {
             return Err(anyhow!("ANI version mismatch"));
         }
         Ok(())
