@@ -517,6 +517,108 @@ fn parse_u32_bytes(bytes: &[u8]) -> Option<u32> {
     Some(v)
 }
 
+fn build_bundles_pos_index_batch(
+    ani: &AniIndex,
+    batch: &[String],
+    mins: &[Option<MinParsed>],
+    field_meta: &HashMap<String, FieldNumber>,
+    need_info: bool,
+    need_format: bool,
+) -> Vec<Vec<(usize, AnnotationBundle)>> {
+    let mut bundles_per_line: Vec<Vec<(usize, AnnotationBundle)>> = vec![Vec::new(); batch.len()];
+    for (line_idx, line) in batch.iter().enumerate() {
+        let Some(ref min) = mins[line_idx] else {
+            continue;
+        };
+        let entry_indices = match ani.lookup_pos_index(min.chr_id, min.pos) {
+            Some(v) => v,
+            None => continue,
+        };
+        let bytes = line.as_bytes();
+        let ref_bytes = &bytes[min.ref_range.0..min.ref_range.1];
+        let ref_str = match std::str::from_utf8(ref_bytes) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let alt_range = min.alt_range;
+        let mut alt_idx = 0usize;
+        let mut start = alt_range.0;
+        for i in alt_range.0..alt_range.1 {
+            if bytes[i] == b',' {
+                if let Ok(alt_str) = std::str::from_utf8(&bytes[start..i]) {
+                    if let Some(bundle) = find_bundle_pos_index(
+                        ani,
+                        entry_indices,
+                        min.chr_id,
+                        min.pos,
+                        ref_str,
+                        alt_str,
+                        field_meta,
+                        need_info,
+                        need_format,
+                    ) {
+                        bundles_per_line[line_idx].push((alt_idx, bundle));
+                    }
+                }
+                alt_idx += 1;
+                start = i + 1;
+            }
+        }
+        if start < alt_range.1 {
+            if let Ok(alt_str) = std::str::from_utf8(&bytes[start..alt_range.1]) {
+                if let Some(bundle) = find_bundle_pos_index(
+                    ani,
+                    entry_indices,
+                    min.chr_id,
+                    min.pos,
+                    ref_str,
+                    alt_str,
+                    field_meta,
+                    need_info,
+                    need_format,
+                ) {
+                    bundles_per_line[line_idx].push((alt_idx, bundle));
+                }
+            }
+        }
+    }
+    bundles_per_line
+}
+
+fn find_bundle_pos_index(
+    ani: &AniIndex,
+    entry_indices: &[u32],
+    chr_id: u8,
+    pos: u32,
+    rf: &str,
+    alt: &str,
+    field_meta: &HashMap<String, FieldNumber>,
+    need_info: bool,
+    need_format: bool,
+) -> Option<AnnotationBundle> {
+    for &idx in entry_indices {
+        let e = &ani.entries[idx as usize];
+        if e.chr_id != chr_id || e.pos != pos {
+            continue;
+        }
+        let rf_str = ani.read_cstring(e.ref_ofs as usize);
+        if rf_str.as_ref() != rf {
+            continue;
+        }
+        let alt_str = ani.read_cstring(e.alt_ofs as usize);
+        if alt_str.as_ref() != alt {
+            continue;
+        }
+        return Some(ani.build_bundle_from_entry_idx_opts_with_meta(
+            idx as usize,
+            field_meta,
+            need_info,
+            need_format,
+        ));
+    }
+    None
+}
+
 fn worker_thread_opencl(
     rx: Receiver<Vec<String>>,
     tx: Sender<Vec<String>>,
@@ -575,6 +677,78 @@ fn worker_thread_opencl(
         let mins: Vec<Option<MinParsed>> =
             pool.install(|| batch.par_iter().map(|line| fast_parse_min(line)).collect());
         parse_total += parse_start.elapsed().as_secs_f64();
+
+        if ani.has_pos_index() {
+            let bundle_start = Instant::now();
+            let bundles_per_line = build_bundles_pos_index_batch(
+                ani,
+                &batch,
+                &mins,
+                &field_meta,
+                need_info,
+                need_format,
+            );
+            bundle_total += bundle_start.elapsed().as_secs_f64();
+
+            let annotate_start = Instant::now();
+            let annotated: Vec<Option<String>> = pool.install(|| {
+                batch
+                    .par_iter()
+                    .enumerate()
+                    .map(|(i, line)| {
+                        if bundles_per_line[i].is_empty() {
+                            return None;
+                        }
+                        parse_vcf_record(line).map(|mut parsed| {
+                            patch_samples_from_line(&mut parsed, line);
+                            annotate_record_with_bundles(
+                                &parsed,
+                                &bundles_per_line[i],
+                                &field_meta,
+                                &column_modes,
+                                &sample_map,
+                                info_overwrite_all,
+                                format_overwrite_all,
+                                false,
+                            )
+                        })
+                    })
+                    .collect()
+            });
+            annotate_total += annotate_start.elapsed().as_secs_f64();
+
+            for (i, val) in annotated.into_iter().enumerate() {
+                if let Some(s) = val {
+                    batch[i] = s;
+                }
+            }
+
+            let send_start = Instant::now();
+            if tx.send(batch).is_err() {
+                break;
+            }
+            let send_elapsed = send_start.elapsed().as_secs_f64();
+            send_total += send_elapsed;
+            if send_elapsed > send_max {
+                send_max = send_elapsed;
+            }
+
+            if timing {
+                total_lines += bundles_per_line.iter().map(|v| v.len()).sum::<usize>();
+                if last_report.elapsed().as_secs_f64() >= 2.0 {
+                    eprintln!(
+                        "[opencl] lines: {}, parse: {:.3}s, key: {:.3}s, pack: {:.3}s, lookup: {:.3}s, annotate: {:.3}s",
+                        total_lines, parse_total, key_total, pack_total, lookup_total, annotate_total
+                    );
+                    eprintln!(
+                        "[opencl] kernel: {:.3}s, upload: {:.3}s, download: {:.3}s, bundle: {:.3}s, send: {:.3}s (max {:.3}s)",
+                        kernel_total, write_total, read_total, bundle_total, send_total, send_max
+                    );
+                    last_report = Instant::now();
+                }
+            }
+            continue;
+        }
 
         let key_start = Instant::now();
         let mut key_count = 0usize;
@@ -741,8 +915,9 @@ fn worker_thread_opencl(
                     bundle_samples_total += t.samples_s;
                     bundle
                 } else {
-                    ani.build_bundle_from_entry_opts(
-                        &ani.entries[*idx as usize],
+                    ani.build_bundle_from_entry_idx_opts_with_meta(
+                        *idx as usize,
+                        &field_meta,
                         need_info,
                         need_format,
                     )
@@ -781,8 +956,9 @@ fn worker_thread_opencl(
                         bundle_samples_total += t.samples_s;
                         bundle
                     } else {
-                        ani.build_bundle_from_entry_opts(
-                            &ani.entries[*idx as usize],
+                        ani.build_bundle_from_entry_idx_opts_with_meta(
+                            *idx as usize,
+                            &field_meta,
                             need_info,
                             need_format,
                         )

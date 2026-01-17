@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossbeam_channel::{bounded, Receiver, Sender};
+use cust::prelude::*;
 use kira_kv_engine::HybridIndex;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
@@ -8,28 +9,66 @@ use std::thread;
 use std::time::Instant;
 
 use crate::annotate::constants::{BATCH_SIZE, CHANNEL_DEPTH};
-use crate::annotate::cpu_v2::annotation::annotate_line;
+use crate::annotate::cpu_v2::annotation::{annotate_line, annotate_record_with_bundles_and_info};
 use crate::annotate::cpu_v2::field_metadata::{iter_ani_header_lines, load_and_infer_metadata};
 use crate::annotate::cpu_v2::{
     annotate_record_with_bundles, build_sample_map, expand_column_specs,
     extract_samples_from_headers, merge_annotation_headers, ColumnSpec,
 };
-use crate::annotate::cpu_v2::{parse_vcf_record_simd, patch_samples_from_line, writer_thread};
+use crate::annotate::cpu_v2::{
+    parse_vcf_record_simd, patch_samples_from_line, writer_thread, ParsedVcfRecord,
+};
 use crate::annotate::reader::{StreamingVcfReader, VcfAnnotationReader};
-use crate::annotate::structs::ani::AniIndex;
+use crate::annotate::structs::ani::{AniIndex, AniPosBlock, AniPosContig};
 use crate::annotate::structs::annotate_mode::AnnotateMode;
-use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber};
+use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber, FieldType};
 use crate::util::{chr_name_to_id, detect_format, fast_hash64, VcfFormat};
 use std::collections::HashMap;
 
 pub struct GpuAni {
+    _ctx: cust::context::Context,
+    module: Module,
+    stream: Stream,
     index: HybridIndex,
     entry_keys: Vec<u64>,
+    pos_index: Option<GpuPosIndex>,
+    info_cache: Option<GpuInfoCache>,
+}
+
+struct GpuPosIndex {
+    contigs: DeviceBuffer<AniPosContig>,
+    blocks: DeviceBuffer<AniPosBlock>,
+    pos_offsets: DeviceBuffer<u32>,
+    pos_counts: DeviceBuffer<u16>,
+    contig_count: u32,
+}
+
+struct GpuInfoCache {
+    tag_types: DeviceBuffer<u8>,
+    entry_offsets: DeviceBuffer<u32>,
+    entry_counts: DeviceBuffer<u16>,
+    pair_tag_ids: DeviceBuffer<u32>,
+    pair_value_off: DeviceBuffer<u32>,
+    pair_value_len: DeviceBuffer<u32>,
+    raw_values: DeviceBuffer<u8>,
+    pair_offsets: DeviceBuffer<u32>,
+    pair_counts: DeviceBuffer<u16>,
+    int_values: DeviceBuffer<i32>,
+    float_values: DeviceBuffer<f32>,
+    str_offsets: DeviceBuffer<u32>,
+    str_lens: DeviceBuffer<u32>,
+    str_data: DeviceBuffer<u8>,
 }
 
 struct GpuLookupBuffers {
     out: Vec<u32>,
     capacity: usize,
+    d_chr: DeviceBuffer<u8>,
+    d_pos: DeviceBuffer<u32>,
+    d_out_offsets: DeviceBuffer<u32>,
+    d_out_counts: DeviceBuffer<u16>,
+    host_offsets: Vec<u32>,
+    host_counts: Vec<u16>,
 }
 
 pub struct GpuAnnotator {
@@ -47,10 +86,59 @@ impl GpuAnnotator {
 
 impl GpuAni {
     pub fn load(ani: &AniIndex) -> Result<Self> {
+        let _ctx = cust::quick_init()?;
+        let ptx = std::fs::read_to_string("ani_kernel.ptx")?;
+        let module = Module::from_ptx(&ptx, &[])?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
+
         let index_bytes = ani.index.to_bytes()?;
         let index = HybridIndex::from_bytes(&index_bytes)?;
         let entry_keys = build_entry_keys(ani);
-        Ok(Self { index, entry_keys })
+        let pos_index = if let Some(pos) = ani.pos_index() {
+            Some(GpuPosIndex {
+                contigs: DeviceBuffer::from_slice(&pos.contigs)?,
+                blocks: DeviceBuffer::from_slice(&pos.blocks)?,
+                pos_offsets: DeviceBuffer::from_slice(&pos.pos_offsets)?,
+                pos_counts: DeviceBuffer::from_slice(&pos.pos_counts)?,
+                contig_count: pos.contigs.len() as u32,
+            })
+        } else {
+            None
+        };
+        let info_cache = if let Some(cache) = ani.info_cache() {
+            let blob = ani.info_blob().unwrap();
+            let pair_value_off: Vec<u32> = blob.pairs.iter().map(|p| p.value_off).collect();
+            let pair_value_len: Vec<u32> = blob.pairs.iter().map(|p| p.value_len).collect();
+            let tag_types: Vec<u8> = cache.tag_types.iter().map(field_type_to_u8).collect();
+            Some(GpuInfoCache {
+                tag_types: DeviceBuffer::from_slice(&tag_types)?,
+                entry_offsets: DeviceBuffer::from_slice(&cache.entry_offsets)?,
+                entry_counts: DeviceBuffer::from_slice(&cache.entry_counts)?,
+                pair_tag_ids: DeviceBuffer::from_slice(&cache.pair_tag_ids)?,
+                pair_value_off: DeviceBuffer::from_slice(&pair_value_off)?,
+                pair_value_len: DeviceBuffer::from_slice(&pair_value_len)?,
+                raw_values: DeviceBuffer::from_slice(&blob.values)?,
+                pair_offsets: DeviceBuffer::from_slice(&cache.pair_offsets)?,
+                pair_counts: DeviceBuffer::from_slice(&cache.pair_counts)?,
+                int_values: DeviceBuffer::from_slice(&cache.int_values)?,
+                float_values: DeviceBuffer::from_slice(&cache.float_values)?,
+                str_offsets: DeviceBuffer::from_slice(&cache.str_offsets)?,
+                str_lens: DeviceBuffer::from_slice(&cache.str_lens)?,
+                str_data: DeviceBuffer::from_slice(&cache.str_data)?,
+            })
+        } else {
+            None
+        };
+
+        Ok(Self {
+            _ctx,
+            module,
+            stream,
+            index,
+            entry_keys,
+            pos_index,
+            info_cache,
+        })
     }
 
     pub fn lookup_batch(&self, keys: &[u64]) -> Result<Vec<u32>> {
@@ -110,7 +198,7 @@ impl GpuAni {
         if keys.is_empty() {
             return Vec::new();
         }
-        buffers.ensure_capacity(keys.len());
+        let _ = buffers.ensure_capacity(keys.len());
         for v in buffers.out.iter_mut().take(keys.len()) {
             *v = u32::MAX;
         }
@@ -166,6 +254,68 @@ impl GpuAni {
         }
         out
     }
+
+    pub fn has_pos_index(&self) -> bool {
+        self.pos_index.is_some()
+    }
+
+    pub fn lookup_pos_batch(
+        &self,
+        chr_ids: &[u8],
+        positions: &[u32],
+        buffers: &mut GpuLookupBuffers,
+    ) -> Result<(Vec<u32>, Vec<u16>)> {
+        let Some(pos_index) = &self.pos_index else {
+            return Ok((Vec::new(), Vec::new()));
+        };
+        let n = chr_ids.len();
+        if n == 0 {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let _ = buffers.ensure_capacity(n)?;
+
+        buffers.d_chr.copy_from(chr_ids)?;
+        buffers.d_pos.copy_from(positions)?;
+
+        let threads = 256;
+        let blocks = ((n as u32) + threads - 1) / threads;
+        let func = self.module.get_function("ani_pos_lookup_kernel")?;
+
+        let stream = &self.stream;
+        unsafe {
+            launch!(
+                func<<<blocks, threads, 0, stream>>>(
+                    buffers.d_chr.as_device_ptr(),
+                    buffers.d_pos.as_device_ptr(),
+                    pos_index.contigs.as_device_ptr(),
+                    pos_index.contig_count,
+                    pos_index.blocks.as_device_ptr(),
+                    pos_index.pos_offsets.as_device_ptr(),
+                    pos_index.pos_counts.as_device_ptr(),
+                    buffers.d_out_offsets.as_device_ptr(),
+                    buffers.d_out_counts.as_device_ptr(),
+                    n as i32
+                )
+            )?;
+        }
+        self.stream.synchronize()?;
+
+        buffers.host_offsets.resize(n, 0);
+        buffers.host_counts.resize(n, 0);
+        buffers.d_out_offsets.copy_to(&mut buffers.host_offsets)?;
+        buffers.d_out_counts.copy_to(&mut buffers.host_counts)?;
+
+        Ok((buffers.host_offsets.clone(), buffers.host_counts.clone()))
+    }
+}
+
+fn field_type_to_u8(ty: &FieldType) -> u8 {
+    match ty {
+        FieldType::Integer => 0,
+        FieldType::Float => 1,
+        FieldType::String => 2,
+        FieldType::Flag => 3,
+    }
 }
 
 impl GpuLookupBuffers {
@@ -173,15 +323,28 @@ impl GpuLookupBuffers {
         Ok(Self {
             out: vec![0u32; capacity],
             capacity,
+            d_chr: unsafe { DeviceBuffer::uninitialized(capacity)? },
+            d_pos: unsafe { DeviceBuffer::uninitialized(capacity)? },
+            d_out_offsets: unsafe { DeviceBuffer::uninitialized(capacity)? },
+            d_out_counts: unsafe { DeviceBuffer::uninitialized(capacity)? },
+            host_offsets: vec![0u32; capacity],
+            host_counts: vec![0u16; capacity],
         })
     }
 
-    fn ensure_capacity(&mut self, capacity: usize) {
+    fn ensure_capacity(&mut self, capacity: usize) -> Result<()> {
         if capacity <= self.capacity {
-            return;
+            return Ok(());
         }
         self.out = vec![0u32; capacity];
+        self.d_chr = unsafe { DeviceBuffer::uninitialized(capacity)? };
+        self.d_pos = unsafe { DeviceBuffer::uninitialized(capacity)? };
+        self.d_out_offsets = unsafe { DeviceBuffer::uninitialized(capacity)? };
+        self.d_out_counts = unsafe { DeviceBuffer::uninitialized(capacity)? };
+        self.host_offsets.resize(capacity, 0);
+        self.host_counts.resize(capacity, 0);
         self.capacity = capacity;
+        Ok(())
     }
 }
 
@@ -314,6 +477,19 @@ struct MinParsed {
     alt_range: (usize, usize),
 }
 
+struct GpuInfoTagSpec {
+    key: String,
+    tag_id: u32,
+    number: FieldNumber,
+    ty: FieldType,
+}
+
+struct GpuInfoMergeState {
+    tags: Vec<GpuInfoTagSpec>,
+    d_tag_ids: DeviceBuffer<u32>,
+    d_tag_types: DeviceBuffer<u8>,
+}
+
 fn make_key(chr_id: u8, pos: u32, ref_allele: &str, alt: &str) -> u64 {
     let mut h = (chr_id as u64) << 32 | pos as u64;
     h ^= fast_hash64(ref_allele.as_bytes());
@@ -413,6 +589,432 @@ fn want_format_for_line(line: &str, need_format: bool) -> bool {
     false
 }
 
+fn build_gpu_info_merge_state(
+    ani: &AniIndex,
+    field_meta: &HashMap<String, FieldNumber>,
+    column_modes: &[(String, AnnotateMode)],
+) -> Option<GpuInfoMergeState> {
+    if ani.info_cache().is_none() {
+        return None;
+    }
+    let blob = ani.info_blob()?;
+    let mut id_map: HashMap<&str, u32> = HashMap::new();
+    for (idx, key) in blob.dict_strings.iter().enumerate() {
+        id_map.insert(key.as_str(), idx as u32);
+    }
+    let mut tags = Vec::new();
+    for (key_raw, mode) in column_modes {
+        let key = key_raw.strip_prefix("INFO/").unwrap_or(key_raw);
+        if key.eq_ignore_ascii_case("ID")
+            || key.eq_ignore_ascii_case("QUAL")
+            || key.eq_ignore_ascii_case("FILTER")
+            || key.eq_ignore_ascii_case("FMT")
+            || key.eq_ignore_ascii_case("FORMAT")
+        {
+            continue;
+        }
+        if mode.replace_missing
+            || mode.replace_non_missing
+            || mode.set_or_append
+            || mode.match_value
+        {
+            return None;
+        }
+        let number = field_meta.get(key).copied().unwrap_or(FieldNumber::One);
+        if matches!(number, FieldNumber::A | FieldNumber::R | FieldNumber::G) {
+            return None;
+        }
+        let tag_id = id_map.get(key).copied().unwrap_or(u32::MAX);
+        let ty = ani
+            .info_cache()
+            .and_then(|cache| cache.tag_types.get(tag_id as usize).copied())
+            .unwrap_or(FieldType::String);
+        tags.push(GpuInfoTagSpec {
+            key: key.to_string(),
+            tag_id,
+            number,
+            ty,
+        });
+    }
+    if tags.is_empty() {
+        return None;
+    }
+    let tag_ids: Vec<u32> = tags.iter().map(|t| t.tag_id).collect();
+    let tag_types: Vec<u8> = tags.iter().map(|t| field_type_to_u8(&t.ty)).collect();
+    let d_tag_ids = DeviceBuffer::from_slice(&tag_ids).ok()?;
+    let d_tag_types = DeviceBuffer::from_slice(&tag_types).ok()?;
+    Some(GpuInfoMergeState {
+        tags,
+        d_tag_ids,
+        d_tag_types,
+    })
+}
+
+fn build_bundles_pos_index_batch(
+    ani: &AniIndex,
+    batch: &[String],
+    mins: &[Option<MinParsed>],
+    field_meta: &HashMap<String, FieldNumber>,
+    need_info: bool,
+    need_format: bool,
+) -> Vec<Vec<(usize, AnnotationBundle)>> {
+    let mut bundles_per_line: Vec<Vec<(usize, AnnotationBundle)>> = vec![Vec::new(); batch.len()];
+    for (line_idx, line) in batch.iter().enumerate() {
+        let Some(ref min) = mins[line_idx] else {
+            continue;
+        };
+        let entry_indices = match ani.lookup_pos_index(min.chr_id, min.pos) {
+            Some(v) => v,
+            None => continue,
+        };
+        let bytes = line.as_bytes();
+        let ref_bytes = &bytes[min.ref_range.0..min.ref_range.1];
+        let ref_str = match std::str::from_utf8(ref_bytes) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let alt_range = min.alt_range;
+        let mut alt_idx = 0usize;
+        let mut start = alt_range.0;
+        for i in alt_range.0..alt_range.1 {
+            if bytes[i] == b',' {
+                if let Ok(alt_str) = std::str::from_utf8(&bytes[start..i]) {
+                    if let Some(bundle) = find_bundle_pos_index(
+                        ani,
+                        entry_indices,
+                        min.chr_id,
+                        min.pos,
+                        ref_str,
+                        alt_str,
+                        field_meta,
+                        need_info,
+                        need_format,
+                    ) {
+                        bundles_per_line[line_idx].push((alt_idx, bundle));
+                    }
+                }
+                alt_idx += 1;
+                start = i + 1;
+            }
+        }
+        if start < alt_range.1 {
+            if let Ok(alt_str) = std::str::from_utf8(&bytes[start..alt_range.1]) {
+                if let Some(bundle) = find_bundle_pos_index(
+                    ani,
+                    entry_indices,
+                    min.chr_id,
+                    min.pos,
+                    ref_str,
+                    alt_str,
+                    field_meta,
+                    need_info,
+                    need_format,
+                ) {
+                    bundles_per_line[line_idx].push((alt_idx, bundle));
+                }
+            }
+        }
+    }
+    bundles_per_line
+}
+
+fn build_bundles_from_pos_results(
+    ani: &AniIndex,
+    batch: &[String],
+    mins: &[Option<MinParsed>],
+    offsets: &[u32],
+    counts: &[u16],
+    entry_indices: &[u32],
+    field_meta: &HashMap<String, FieldNumber>,
+    need_info: bool,
+    need_format: bool,
+) -> Vec<Vec<(usize, AnnotationBundle)>> {
+    let mut bundles_per_line: Vec<Vec<(usize, AnnotationBundle)>> = vec![Vec::new(); batch.len()];
+    for (line_idx, line) in batch.iter().enumerate() {
+        let Some(ref min) = mins[line_idx] else {
+            continue;
+        };
+        let count = *counts.get(line_idx).unwrap_or(&0) as usize;
+        if count == 0 {
+            continue;
+        }
+        let offset = *offsets.get(line_idx).unwrap_or(&0) as usize;
+        let end = offset + count;
+        if end > entry_indices.len() {
+            continue;
+        }
+        let entries = &entry_indices[offset..end];
+        let bytes = line.as_bytes();
+        let ref_bytes = &bytes[min.ref_range.0..min.ref_range.1];
+        let ref_str = match std::str::from_utf8(ref_bytes) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let alt_range = min.alt_range;
+        let mut alt_idx = 0usize;
+        let mut start = alt_range.0;
+        for i in alt_range.0..alt_range.1 {
+            if bytes[i] == b',' {
+                if let Ok(alt_str) = std::str::from_utf8(&bytes[start..i]) {
+                    if let Some(bundle) = find_bundle_pos_index(
+                        ani,
+                        entries,
+                        min.chr_id,
+                        min.pos,
+                        ref_str,
+                        alt_str,
+                        field_meta,
+                        need_info,
+                        need_format,
+                    ) {
+                        bundles_per_line[line_idx].push((alt_idx, bundle));
+                    }
+                }
+                alt_idx += 1;
+                start = i + 1;
+            }
+        }
+        if start < alt_range.1 {
+            if let Ok(alt_str) = std::str::from_utf8(&bytes[start..alt_range.1]) {
+                if let Some(bundle) = find_bundle_pos_index(
+                    ani,
+                    entries,
+                    min.chr_id,
+                    min.pos,
+                    ref_str,
+                    alt_str,
+                    field_meta,
+                    need_info,
+                    need_format,
+                ) {
+                    bundles_per_line[line_idx].push((alt_idx, bundle));
+                }
+            }
+        }
+    }
+    bundles_per_line
+}
+
+fn build_entry_matches_from_pos_results(
+    ani: &AniIndex,
+    batch: &[String],
+    mins: &[Option<MinParsed>],
+    offsets: &[u32],
+    counts: &[u16],
+    entry_indices: &[u32],
+) -> Vec<Vec<Option<u32>>> {
+    let mut matches: Vec<Vec<Option<u32>>> = vec![Vec::new(); batch.len()];
+    for (line_idx, line) in batch.iter().enumerate() {
+        let Some(ref min) = mins[line_idx] else {
+            continue;
+        };
+        let count = *counts.get(line_idx).unwrap_or(&0) as usize;
+        if count == 0 {
+            continue;
+        }
+        let offset = *offsets.get(line_idx).unwrap_or(&0) as usize;
+        let end = offset + count;
+        if end > entry_indices.len() {
+            continue;
+        }
+        let entries = &entry_indices[offset..end];
+        let bytes = line.as_bytes();
+        let ref_bytes = &bytes[min.ref_range.0..min.ref_range.1];
+        let ref_str = match std::str::from_utf8(ref_bytes) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let alt_range = min.alt_range;
+        let mut start = alt_range.0;
+        for i in alt_range.0..alt_range.1 {
+            if bytes[i] == b',' {
+                let entry = if let Ok(alt_str) = std::str::from_utf8(&bytes[start..i]) {
+                    find_entry_pos_index(ani, entries, min.chr_id, min.pos, ref_str, alt_str)
+                } else {
+                    None
+                };
+                matches[line_idx].push(entry);
+                start = i + 1;
+            }
+        }
+        if start < alt_range.1 {
+            let entry = if let Ok(alt_str) = std::str::from_utf8(&bytes[start..alt_range.1]) {
+                find_entry_pos_index(ani, entries, min.chr_id, min.pos, ref_str, alt_str)
+            } else {
+                None
+            };
+            matches[line_idx].push(entry);
+        }
+    }
+    matches
+}
+
+fn find_bundle_pos_index(
+    ani: &AniIndex,
+    entry_indices: &[u32],
+    chr_id: u8,
+    pos: u32,
+    rf: &str,
+    alt: &str,
+    field_meta: &HashMap<String, FieldNumber>,
+    need_info: bool,
+    need_format: bool,
+) -> Option<AnnotationBundle> {
+    for &idx in entry_indices {
+        let e = &ani.entries[idx as usize];
+        if e.chr_id != chr_id || e.pos != pos {
+            continue;
+        }
+        let rf_str = ani.read_cstring(e.ref_ofs as usize);
+        if rf_str.as_ref() != rf {
+            continue;
+        }
+        let alt_str = ani.read_cstring(e.alt_ofs as usize);
+        if alt_str.as_ref() != alt {
+            continue;
+        }
+        return Some(ani.build_bundle_from_entry_idx_opts_with_meta(
+            idx as usize,
+            field_meta,
+            need_info,
+            need_format,
+        ));
+    }
+    None
+}
+
+fn find_entry_pos_index(
+    ani: &AniIndex,
+    entry_indices: &[u32],
+    chr_id: u8,
+    pos: u32,
+    rf: &str,
+    alt: &str,
+) -> Option<u32> {
+    for &idx in entry_indices {
+        let e = &ani.entries[idx as usize];
+        if e.chr_id != chr_id || e.pos != pos {
+            continue;
+        }
+        let rf_str = ani.read_cstring(e.ref_ofs as usize);
+        if rf_str.as_ref() != rf {
+            continue;
+        }
+        let alt_str = ani.read_cstring(e.alt_ofs as usize);
+        if alt_str.as_ref() != alt {
+            continue;
+        }
+        return Some(idx);
+    }
+    None
+}
+
+fn gpu_merge_info_batch(
+    gpu: &GpuAni,
+    state: &GpuInfoMergeState,
+    alt_entry_idx: &[u32],
+    alt_offsets: &[u32],
+    alt_counts: &[u16],
+) -> Result<Vec<u32>> {
+    let Some(cache) = &gpu.info_cache else {
+        return Ok(Vec::new());
+    };
+    let n_records = alt_offsets.len();
+    let n_tags = state.tags.len();
+    if n_records == 0 || n_tags == 0 {
+        return Ok(Vec::new());
+    }
+    let total = n_records * n_tags;
+    let d_alt_entry_idx = DeviceBuffer::from_slice(alt_entry_idx)?;
+    let d_alt_offsets = DeviceBuffer::from_slice(alt_offsets)?;
+    let d_alt_counts = DeviceBuffer::from_slice(alt_counts)?;
+    let d_out = unsafe { DeviceBuffer::uninitialized(total)? };
+    let func = gpu.module.get_function("ani_info_merge_kernel")?;
+    let threads = 256;
+    let blocks = ((total as u32) + threads - 1) / threads;
+    let stream = &gpu.stream;
+    unsafe {
+        launch!(
+            func<<<blocks, threads, 0, stream>>>(
+                d_alt_entry_idx.as_device_ptr(),
+                d_alt_offsets.as_device_ptr(),
+                d_alt_counts.as_device_ptr(),
+                cache.entry_offsets.as_device_ptr(),
+                cache.entry_counts.as_device_ptr(),
+                cache.pair_tag_ids.as_device_ptr(),
+                cache.pair_value_off.as_device_ptr(),
+                cache.pair_value_len.as_device_ptr(),
+                cache.raw_values.as_device_ptr(),
+                cache.tag_types.as_device_ptr(),
+                state.d_tag_ids.as_device_ptr(),
+                d_out.as_device_ptr(),
+                n_records as i32,
+                n_tags as i32
+            )
+        )?;
+    }
+    gpu.stream.synchronize()?;
+    let mut out = vec![0u32; total];
+    d_out.copy_to(&mut out)?;
+    Ok(out)
+}
+
+fn format_info_from_pairs(
+    ani: &AniIndex,
+    state: &GpuInfoMergeState,
+    pair_idx: &[u32],
+    n_records: usize,
+) -> Vec<Option<String>> {
+    let n_tags = state.tags.len();
+    let mut out = vec![None; n_records];
+    for rec in 0..n_records {
+        let mut parts: Vec<String> = Vec::new();
+        for (tag_i, tag) in state.tags.iter().enumerate() {
+            let idx = pair_idx[rec * n_tags + tag_i];
+            if idx == u32::MAX {
+                continue;
+            }
+            let val = if tag.number == FieldNumber::Zero || tag.ty == FieldType::Flag {
+                Some(String::new())
+            } else {
+                format_pair_value(ani, tag.ty, idx as usize)
+            };
+            if let Some(v) = val {
+                if v.is_empty() {
+                    parts.push(tag.key.clone());
+                } else {
+                    parts.push(format!("{}={}", tag.key, v));
+                }
+            }
+        }
+        if !parts.is_empty() {
+            out[rec] = Some(parts.join(";"));
+        }
+    }
+    out
+}
+
+fn format_pair_value(ani: &AniIndex, _ty: FieldType, idx: usize) -> Option<String> {
+    let blob = ani.info_blob()?;
+    if idx >= blob.pairs.len() {
+        return None;
+    }
+    let pair = &blob.pairs[idx];
+    if pair.value_len == 0 {
+        return None;
+    }
+    let start = pair.value_off as usize;
+    let end = start + pair.value_len as usize;
+    if end > blob.values.len() {
+        return None;
+    }
+    let raw = std::str::from_utf8(&blob.values[start..end]).unwrap_or("");
+    if raw.is_empty() || raw == "." {
+        return None;
+    }
+    Some(raw.to_string())
+}
+
 fn worker_thread_gpu(
     rx: Receiver<Vec<String>>,
     tx: Sender<Vec<String>>,
@@ -485,6 +1087,11 @@ fn worker_loop_gpu(
                 || k.eq_ignore_ascii_case("FMT")
                 || k.eq_ignore_ascii_case("FORMAT"))
         });
+    let info_merge_state = if need_info {
+        build_gpu_info_merge_state(ani, &field_meta, column_modes.as_ref())
+    } else {
+        None
+    };
     let use_cpu_annotate = sample_map.iter().any(|v| v.is_none());
     if timing && use_cpu_annotate {
         eprintln!("[gpu] cpu-annotate: enabled");
@@ -526,6 +1133,206 @@ fn worker_loop_gpu(
         let mins: Vec<Option<MinParsed>> =
             pool.install(|| batch.par_iter().map(|line| fast_parse_min(line)).collect());
         parse_total += parse_start.elapsed().as_secs_f64();
+
+        if ani.has_pos_index() {
+            let mut chr_ids = Vec::with_capacity(batch.len());
+            let mut positions = Vec::with_capacity(batch.len());
+            for min in &mins {
+                if let Some(m) = min {
+                    chr_ids.push(m.chr_id);
+                    positions.push(m.pos);
+                } else {
+                    chr_ids.push(255);
+                    positions.push(0);
+                }
+            }
+            let lookup_start = Instant::now();
+            let (offsets, counts) = if gpu.has_pos_index() {
+                gpu.lookup_pos_batch(&chr_ids, &positions, buffers)?
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            lookup_total += lookup_start.elapsed().as_secs_f64();
+
+            let parse_records_start = Instant::now();
+            let parsed_records: Vec<Option<ParsedVcfRecord>> = pool.install(|| {
+                batch
+                    .par_iter()
+                    .map(|line| {
+                        let want_format = want_format_for_line(line, need_format);
+                        parse_vcf_record_simd(line, want_format).map(|mut parsed| {
+                            patch_samples_from_line(&mut parsed, line);
+                            parsed
+                        })
+                    })
+                    .collect()
+            });
+            parse_total += parse_records_start.elapsed().as_secs_f64();
+
+            let mut all_info_empty = true;
+            for p in &parsed_records {
+                if let Some(rec) = p {
+                    if !rec.info.is_empty() && rec.info != "." {
+                        all_info_empty = false;
+                        break;
+                    }
+                }
+            }
+
+            let use_gpu_info_merge = info_merge_state.is_some()
+                && gpu.info_cache.is_some()
+                && gpu.has_pos_index()
+                && (info_overwrite_all || all_info_empty);
+
+            let entry_indices = ani.pos_index().unwrap().entry_indices.as_slice();
+            let bundle_start = Instant::now();
+            let entry_matches = if use_gpu_info_merge {
+                build_entry_matches_from_pos_results(
+                    ani,
+                    &batch,
+                    &mins,
+                    &offsets,
+                    &counts,
+                    entry_indices,
+                )
+            } else {
+                Vec::new()
+            };
+            let bundles_per_line = if use_gpu_info_merge {
+                build_bundles_from_pos_results(
+                    ani,
+                    &batch,
+                    &mins,
+                    &offsets,
+                    &counts,
+                    entry_indices,
+                    &field_meta,
+                    false,
+                    need_format,
+                )
+            } else if gpu.has_pos_index() {
+                build_bundles_from_pos_results(
+                    ani,
+                    &batch,
+                    &mins,
+                    &offsets,
+                    &counts,
+                    entry_indices,
+                    &field_meta,
+                    need_info,
+                    need_format,
+                )
+            } else {
+                build_bundles_pos_index_batch(
+                    ani,
+                    &batch,
+                    &mins,
+                    &field_meta,
+                    need_info,
+                    need_format,
+                )
+            };
+            bundle_total += bundle_start.elapsed().as_secs_f64();
+
+            let merged_info = if use_gpu_info_merge {
+                let mut alt_offsets = Vec::with_capacity(parsed_records.len());
+                let mut alt_counts = Vec::with_capacity(parsed_records.len());
+                let mut flat_entries = Vec::new();
+                for (i, rec) in parsed_records.iter().enumerate() {
+                    let alt_count = rec.as_ref().map(|r| r.alt.split(',').count()).unwrap_or(0);
+                    alt_offsets.push(flat_entries.len() as u32);
+                    alt_counts.push(alt_count as u16);
+                    let matches = entry_matches.get(i);
+                    for a in 0..alt_count {
+                        let v = matches
+                            .and_then(|m| m.get(a).and_then(|v| *v))
+                            .unwrap_or(u32::MAX);
+                        flat_entries.push(v);
+                    }
+                }
+                if let Some(state) = &info_merge_state {
+                    let pair_idx =
+                        gpu_merge_info_batch(gpu, state, &flat_entries, &alt_offsets, &alt_counts)?;
+                    format_info_from_pairs(ani, state, &pair_idx, parsed_records.len())
+                } else {
+                    vec![None; parsed_records.len()]
+                }
+            } else {
+                vec![None; parsed_records.len()]
+            };
+
+            let annotate_start = Instant::now();
+            let annotated: Vec<Option<String>> = pool.install(|| {
+                batch
+                    .par_iter()
+                    .enumerate()
+                    .map(|(i, _line)| {
+                        if bundles_per_line[i].is_empty() {
+                            return None;
+                        }
+                        let Some(parsed) = parsed_records[i].as_ref() else {
+                            return None;
+                        };
+                        if use_gpu_info_merge {
+                            let info = merged_info[i].as_deref().unwrap_or("");
+                            Some(annotate_record_with_bundles_and_info(
+                                parsed,
+                                &bundles_per_line[i],
+                                &field_meta,
+                                &column_modes,
+                                &sample_map,
+                                info_overwrite_all,
+                                format_overwrite_all,
+                                false,
+                                Some(info),
+                            ))
+                        } else {
+                            Some(annotate_record_with_bundles(
+                                parsed,
+                                &bundles_per_line[i],
+                                &field_meta,
+                                &column_modes,
+                                &sample_map,
+                                info_overwrite_all,
+                                format_overwrite_all,
+                                false,
+                            ))
+                        }
+                    })
+                    .collect()
+            });
+            annotate_total += annotate_start.elapsed().as_secs_f64();
+
+            for (i, val) in annotated.into_iter().enumerate() {
+                if let Some(s) = val {
+                    batch[i] = s;
+                }
+            }
+
+            let send_start = Instant::now();
+            if tx.send(batch).is_err() {
+                break;
+            }
+            let send_elapsed = send_start.elapsed().as_secs_f64();
+            send_total += send_elapsed;
+
+            if timing {
+                total_lines += bundles_per_line.iter().map(|v| v.len()).sum::<usize>();
+                if last_report.elapsed().as_secs_f64() >= 2.0 {
+                    eprintln!(
+                        "[gpu] lines: {}, parse: {:.3}s, lookup: {:.3}s, bundle: {:.3}s, annotate: {:.3}s, send: {:.3}s",
+                        total_lines,
+                        parse_total,
+                        lookup_total,
+                        bundle_total,
+                        annotate_total,
+                        send_total
+                    );
+                    last_report = Instant::now();
+                }
+            }
+            continue;
+        }
 
         let keys_start = Instant::now();
         let mut keys: Vec<u64> = Vec::new();
@@ -591,12 +1398,13 @@ fn worker_loop_gpu(
                             std::str::from_utf8(alt_bytes),
                         ) {
                             let ref_hash = fast_hash64(ref_str.as_bytes());
-                            if let Some(bundle) = ani.lookup_exact_by_chr_id_opts(
+                            if let Some(bundle) = ani.lookup_exact_by_chr_id_pos_index_opts(
                                 min.chr_id,
                                 min.pos,
                                 ref_str,
                                 ref_hash,
                                 alt_str,
+                                &field_meta,
                                 need_info,
                                 need_format,
                             ) {
@@ -619,8 +1427,9 @@ fn worker_loop_gpu(
                 bundle_samples_total += t.samples_s;
                 bundle
             } else {
-                ani.build_bundle_from_entry_opts(
-                    &ani.entries[*idx as usize],
+                ani.build_bundle_from_entry_idx_opts_with_meta(
+                    *idx as usize,
+                    &field_meta,
                     need_info,
                     need_format,
                 )
@@ -1167,6 +1976,122 @@ fn worker_loop_gpu_multi(
             .collect();
         parse_total += parse_start.elapsed().as_secs_f64();
 
+        if ani.has_pos_index() {
+            let bundle_start = Instant::now();
+            let mut bundles_per_batch: Vec<Vec<Vec<(usize, AnnotationBundle)>>> = Vec::new();
+            for (batch_idx, batch) in batches.iter().enumerate() {
+                let mins = &mins_per_batch[batch_idx];
+                let bundles = if gpu.has_pos_index() {
+                    let mut chr_ids = Vec::with_capacity(batch.lines.len());
+                    let mut positions = Vec::with_capacity(batch.lines.len());
+                    for min in mins {
+                        if let Some(m) = min {
+                            chr_ids.push(m.chr_id);
+                            positions.push(m.pos);
+                        } else {
+                            chr_ids.push(255);
+                            positions.push(0);
+                        }
+                    }
+                    let (offsets, counts) = gpu.lookup_pos_batch(&chr_ids, &positions, buffers)?;
+                    let entry_indices = ani.pos_index().unwrap().entry_indices.as_slice();
+                    build_bundles_from_pos_results(
+                        ani,
+                        &batch.lines,
+                        mins,
+                        &offsets,
+                        &counts,
+                        entry_indices,
+                        &field_meta,
+                        need_info,
+                        need_format,
+                    )
+                } else {
+                    build_bundles_pos_index_batch(
+                        ani,
+                        &batch.lines,
+                        mins,
+                        &field_meta,
+                        need_info,
+                        need_format,
+                    )
+                };
+                bundles_per_batch.push(bundles);
+            }
+            bundle_total += bundle_start.elapsed().as_secs_f64();
+
+            let annotate_start = Instant::now();
+            let annotated_batches: Vec<(usize, Vec<String>)> = batches
+                .iter()
+                .enumerate()
+                .map(|(batch_idx, batch)| {
+                    let sample_map = &sample_maps[batch.vcf_id];
+                    let annotated: Vec<Option<String>> = pool.install(|| {
+                        batch
+                            .lines
+                            .par_iter()
+                            .enumerate()
+                            .map(|(i, line)| {
+                                if bundles_per_batch[batch_idx][i].is_empty() {
+                                    return None;
+                                }
+                                let want_format = want_format_for_line(line, need_format);
+                                parse_vcf_record_simd(line, want_format).map(|mut parsed| {
+                                    patch_samples_from_line(&mut parsed, line);
+                                    annotate_record_with_bundles(
+                                        &parsed,
+                                        &bundles_per_batch[batch_idx][i],
+                                        &field_meta,
+                                        &column_modes,
+                                        sample_map,
+                                        info_overwrite_all,
+                                        format_overwrite_all,
+                                        false,
+                                    )
+                                })
+                            })
+                            .collect()
+                    });
+                    let mut out = batch.lines.clone();
+                    for (i, val) in annotated.into_iter().enumerate() {
+                        if let Some(s) = val {
+                            out[i] = s;
+                        }
+                    }
+                    (batch.vcf_id, out)
+                })
+                .collect();
+            annotate_total += annotate_start.elapsed().as_secs_f64();
+
+            let send_start = Instant::now();
+            for (vcf_id, lines) in annotated_batches {
+                if txs[vcf_id].send(lines).is_err() {
+                    return Ok(());
+                }
+            }
+            send_total += send_start.elapsed().as_secs_f64();
+
+            if timing {
+                total_lines += bundles_per_batch
+                    .iter()
+                    .map(|b| b.iter().map(|v| v.len()).sum::<usize>())
+                    .sum::<usize>();
+                if last_report.elapsed().as_secs_f64() >= 2.0 {
+                    eprintln!(
+                        "[gpu] lines: {}, parse: {:.3}s, lookup: {:.3}s, bundle: {:.3}s, annotate: {:.3}s, send: {:.3}s",
+                        total_lines,
+                        parse_total,
+                        lookup_total,
+                        bundle_total,
+                        annotate_total,
+                        send_total
+                    );
+                    last_report = Instant::now();
+                }
+            }
+            continue;
+        }
+
         let keys_start = Instant::now();
         let mut keys: Vec<u64> = Vec::new();
         let mut key_batch_idx: Vec<usize> = Vec::new();
@@ -1245,12 +2170,13 @@ fn worker_loop_gpu_multi(
                             std::str::from_utf8(alt_bytes),
                         ) {
                             let ref_hash = fast_hash64(ref_str.as_bytes());
-                            if let Some(bundle) = ani.lookup_exact_by_chr_id_opts(
+                            if let Some(bundle) = ani.lookup_exact_by_chr_id_pos_index_opts(
                                 min.chr_id,
                                 min.pos,
                                 ref_str,
                                 ref_hash,
                                 alt_str,
+                                &field_meta,
                                 need_info,
                                 need_format,
                             ) {
@@ -1276,8 +2202,9 @@ fn worker_loop_gpu_multi(
                 bundle_cache.insert(*idx, bundle.clone());
                 bundle
             } else {
-                let bundle = ani.build_bundle_from_entry_opts(
-                    &ani.entries[*idx as usize],
+                let bundle = ani.build_bundle_from_entry_idx_opts_with_meta(
+                    *idx as usize,
+                    &field_meta,
                     need_info,
                     need_format,
                 );

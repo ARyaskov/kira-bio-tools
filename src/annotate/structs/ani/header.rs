@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 
 pub const ANI_MAGIC: u64 = 0x494E4149524B4256;
-pub const ANI_VERSION: u64 = 5;
+pub const ANI_VERSION: u64 = 6;
 pub const ANI_HEADER_END: &str = "##KIRA_BT_ANI_HEADER_END";
 pub const ANI_STR_NONE: u32 = u32::MAX;
 
@@ -51,6 +51,26 @@ pub struct AniHeaderV5 {
     pub _pad: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AniHeaderV6 {
+    pub magic: u64,
+    pub version: u64,
+    pub n_entries: u64,
+    pub index_len: u64,
+    pub off_index: u64,
+    pub off_entries: u64,
+    pub off_strings: u64,
+    pub off_block_index: u64,
+    pub n_blocks: u64,
+    pub block_size: u32,
+    pub _pad: u32,
+    pub off_pos_index: u64,
+    pub pos_index_len: u64,
+    pub off_blob: u64,
+    pub blob_len: u64,
+}
+
 pub struct AniHeader {
     pub magic: u64,
     pub version: u64,
@@ -62,6 +82,10 @@ pub struct AniHeader {
     pub off_block_index: u64,
     pub n_blocks: u64,
     pub block_size: u32,
+    pub off_pos_index: u64,
+    pub pos_index_len: u64,
+    pub off_blob: u64,
+    pub blob_len: u64,
 }
 
 impl AniHeader {

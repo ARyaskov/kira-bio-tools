@@ -2,8 +2,10 @@ use crate::util::fast_hash64;
 
 use crate::annotate::structs::ani::header::{AniEntry, ANI_STR_NONE};
 use crate::annotate::structs::ani::index::{AniIndex, CStrRef};
+use crate::annotate::structs::bundle::FieldNumber;
 use crate::annotate::structs::bundle::{parse_info_field, AnnotationBundle};
 use crate::util::chr_name_to_id;
+use std::collections::HashMap;
 use std::time::Instant;
 
 pub struct BundleTiming {
@@ -372,6 +374,43 @@ impl AniIndex {
         }
 
         Some(self.build_bundle_from_entry_opts(e, need_info, need_format))
+    }
+
+    pub fn lookup_exact_by_chr_id_pos_index_opts(
+        &self,
+        chr_id: u8,
+        pos: u32,
+        rf: &str,
+        rf_hash: u64,
+        alt: &str,
+        field_meta: &HashMap<String, FieldNumber>,
+        need_info: bool,
+        need_format: bool,
+    ) -> Option<AnnotationBundle> {
+        if let Some(list) = self.lookup_pos_index(chr_id, pos) {
+            for &idx in list {
+                let e = &self.entries[idx as usize];
+                if e.chr_id != chr_id || e.pos != pos {
+                    continue;
+                }
+                let rf_str = self.read_cstring(e.ref_ofs as usize);
+                if rf_str.as_ref() != rf {
+                    continue;
+                }
+                let alt_str = self.read_cstring(e.alt_ofs as usize);
+                if alt_str.as_ref() != alt {
+                    continue;
+                }
+                return Some(self.build_bundle_from_entry_idx_opts_with_meta(
+                    idx as usize,
+                    field_meta,
+                    need_info,
+                    need_format,
+                ));
+            }
+        }
+
+        self.lookup_exact_by_chr_id_opts(chr_id, pos, rf, rf_hash, alt, need_info, need_format)
     }
 
     pub fn lookup_exact_by_chr_id_timed(

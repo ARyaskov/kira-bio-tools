@@ -122,12 +122,13 @@ pub fn annotate_line(
 
     let mut bundles = Vec::with_capacity(alt_alleles.len());
     for (vcf_idx, alt) in alt_alleles.iter().enumerate() {
-        if let Some(bundle) = ani.lookup_exact_by_chr_id_opts(
+        if let Some(bundle) = ani.lookup_exact_by_chr_id_pos_index_opts(
             chr_id,
             pos,
             ref_allele,
             ref_hash,
             alt,
+            field_meta,
             need_info,
             need_format,
         ) {
@@ -235,7 +236,25 @@ pub fn annotate_line_with_timing(
 
     let mut bundles = Vec::with_capacity(alt_alleles.len());
     for (vcf_idx, alt) in alt_alleles.iter().enumerate() {
-        if let Some((bundle, t)) = ani.lookup_exact_by_chr_id_timed_opts(
+        if let Some(bundle) = ani.lookup_exact_by_chr_id_pos_index_opts(
+            chr_id,
+            pos,
+            ref_allele,
+            ref_hash,
+            alt,
+            field_meta,
+            need_info,
+            need_format,
+        ) {
+            if debug {
+                eprintln!(
+                    "[ANNOTATE] Found bundle for ALT {}: INFO fields={}",
+                    alt,
+                    bundle.info.len()
+                );
+            }
+            bundles.push((vcf_idx, bundle));
+        } else if let Some((bundle, t)) = ani.lookup_exact_by_chr_id_timed_opts(
             chr_id,
             pos,
             ref_allele,
@@ -478,6 +497,198 @@ pub fn annotate_record_with_bundles(
         format_overwrite_all,
         debug,
     )
+}
+
+pub fn annotate_record_with_bundles_and_info(
+    parsed: &ParsedVcfRecord,
+    bundles: &[(usize, AnnotationBundle)],
+    field_meta: &HashMap<String, FieldNumber>,
+    column_modes: &[(String, AnnotateMode)],
+    sample_map: &[Option<usize>],
+    info_overwrite_all: bool,
+    format_overwrite_all: bool,
+    debug: bool,
+    merged_info: Option<&str>,
+) -> String {
+    annotate_record_with_alts_and_info(
+        parsed,
+        &parsed.alt.split(',').collect::<Vec<&str>>(),
+        bundles,
+        field_meta,
+        column_modes,
+        sample_map,
+        None,
+        info_overwrite_all,
+        format_overwrite_all,
+        debug,
+        merged_info,
+    )
+}
+
+fn annotate_record_with_alts_and_info(
+    parsed: &ParsedVcfRecord,
+    alt_alleles: &[&str],
+    bundles: &[(usize, AnnotationBundle)],
+    field_meta: &HashMap<String, FieldNumber>,
+    column_modes: &[(String, AnnotateMode)],
+    sample_map: &[Option<usize>],
+    raw_samples: Option<&[&str]>,
+    info_overwrite_all: bool,
+    format_overwrite_all: bool,
+    debug: bool,
+    merged_info: Option<&str>,
+) -> String {
+    use crate::annotate::cpu_v2::merge_info::merge_info_fields;
+
+    let mut new_id = parsed.id.clone();
+    let mut new_qual = parsed.qual.clone();
+    let mut new_filter = parsed.filter.clone();
+    let mut new_format: Option<String> = parsed.format.as_ref().map(|f| join_keys(&f.keys));
+    let mut new_samples: Vec<String> = parsed
+        .samples
+        .iter()
+        .map(|s| normalize_sample_values(&s.raw))
+        .collect();
+    let format_modified = format_overwrite_all
+        || column_modes
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("FMT") || k.eq_ignore_ascii_case("FORMAT"));
+    if !format_modified {
+        if let Some(raw) = raw_samples {
+            if new_samples.len() != raw.len() {
+                new_samples = raw
+                    .iter()
+                    .map(|s| {
+                        if s.is_empty() {
+                            ".".to_string()
+                        } else {
+                            (*s).to_string()
+                        }
+                    })
+                    .collect();
+            }
+        }
+    }
+
+    let new_info = if let Some(info) = merged_info {
+        if info.is_empty() {
+            ".".to_string()
+        } else {
+            info.to_string()
+        }
+    } else {
+        let base_info = if info_overwrite_all && !bundles.is_empty() {
+            "."
+        } else {
+            parsed.info.as_str()
+        };
+        let info_map = merge_info_fields(
+            base_info,
+            bundles,
+            &None,
+            alt_alleles,
+            field_meta,
+            column_modes,
+        );
+        if info_map.is_empty() {
+            ".".to_string()
+        } else {
+            let mut len = 0usize;
+            for (k, v) in info_map.iter() {
+                len += k.len();
+                if !v.is_empty() {
+                    len += 1 + v.len();
+                }
+            }
+            len += info_map.len().saturating_sub(1);
+            let mut out = String::with_capacity(len);
+            for (i, (k, v)) in info_map.iter().enumerate() {
+                if i > 0 {
+                    out.push(';');
+                }
+                if v.is_empty() {
+                    out.push_str(k);
+                } else {
+                    out.push_str(k);
+                    out.push('=');
+                    out.push_str(v);
+                }
+            }
+            out
+        }
+    };
+
+    if !bundles.is_empty() {
+        let bundle = &bundles[0].1;
+
+        for (key, mode) in column_modes {
+            match key.as_str() {
+                "ID" => {
+                    if let Some(ref db_id) = bundle.id {
+                        if should_replace(&parsed.id, db_id, *mode) {
+                            new_id = db_id.clone();
+                        }
+                    }
+                }
+                "QUAL" => {
+                    if let Some(ref db_qual) = bundle.qual {
+                        if should_replace(&parsed.qual, db_qual, *mode) {
+                            new_qual = db_qual.clone();
+                        }
+                    }
+                }
+                "FILTER" => {
+                    if let Some(ref db_filter) = bundle.filter {
+                        if should_replace(&parsed.filter, db_filter, *mode) {
+                            new_filter = db_filter.clone();
+                        }
+                    }
+                }
+                "FMT" | "FORMAT" => {
+                    let (fmt, samples) = merge_all_format(
+                        parsed,
+                        bundle,
+                        *mode,
+                        sample_map,
+                        raw_samples,
+                        format_overwrite_all,
+                        debug,
+                    );
+                    new_format = fmt;
+                    new_samples = samples;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str(&parsed.chrom);
+    out.push('\t');
+    out.push_str(&parsed.pos.to_string());
+    out.push('\t');
+    out.push_str(&new_id);
+    out.push('\t');
+    out.push_str(&parsed.ref_allele);
+    out.push('\t');
+    out.push_str(&parsed.alt);
+    out.push('\t');
+    out.push_str(&new_qual);
+    out.push('\t');
+    out.push_str(&new_filter);
+    out.push('\t');
+    out.push_str(&new_info);
+
+    if let Some(fmt) = new_format {
+        out.push('\t');
+        out.push_str(&fmt);
+        for s in &new_samples {
+            out.push('\t');
+            out.push_str(&s);
+        }
+    }
+
+    out
 }
 
 fn should_replace(existing: &str, new_val: &str, mode: AnnotateMode) -> bool {

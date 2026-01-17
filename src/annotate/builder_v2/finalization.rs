@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bytemuck;
 use kira_kv_engine::{HybridBuilder, HybridConfig, HybridIndex};
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -6,7 +7,10 @@ use std::mem;
 use std::path::Path;
 
 use crate::annotate::builder_v2::StringPool;
-use crate::annotate::structs::ani::{AniBlockEntry, AniEntry, AniHeaderV5, ANI_MAGIC, ANI_VERSION};
+use crate::annotate::structs::ani::{
+    AniBlockEntry, AniEntry, AniHeaderV6, AniInfoBlobHeader, AniInfoPair, AniPosBlock,
+    AniPosContig, AniPosIndexHeader, ANI_MAGIC, ANI_STR_NONE, ANI_VERSION,
+};
 
 pub fn finalize_ani_index(
     rows: Vec<(u64, AniEntry)>,
@@ -57,7 +61,17 @@ pub fn finalize_ani_index(
     }
 
     let index_bytes = index.to_bytes()?;
-    write_ani_file(output, &index_bytes, &entries, &mut pool, timing)?;
+    let pos_index_bytes = build_pos_index(&entries);
+    let info_blob_bytes = build_info_blob(&entries, &mut pool)?;
+    write_ani_file(
+        output,
+        &index_bytes,
+        &pos_index_bytes,
+        &info_blob_bytes,
+        &entries,
+        &mut pool,
+        timing,
+    )?;
     pool.cleanup();
 
     Ok(())
@@ -160,12 +174,14 @@ fn verify_index_correctness(index: &HybridIndex, keys_bytes: &[[u8; 8]], entries
 fn write_ani_file(
     output: &Path,
     index_bytes: &[u8],
+    pos_index_bytes: &[u8],
+    info_blob_bytes: &[u8],
     entries: &[AniEntry],
     pool: &mut StringPool,
     timing: bool,
 ) -> Result<()> {
     let n = entries.len();
-    let hdr_size = mem::size_of::<AniHeaderV5>();
+    let hdr_size = mem::size_of::<AniHeaderV6>();
     let index_size = index_bytes.len();
     let ent_size = n * mem::size_of::<AniEntry>();
     let block_size = pool.block_size();
@@ -178,8 +194,10 @@ fn write_ani_file(
 
     let block_index_off = (hdr_size + index_size + ent_size) as u64;
     let block_data_off = block_index_off + block_index_size as u64;
+    let pos_index_off = block_data_off + blocks_size as u64;
+    let blob_off = pos_index_off + pos_index_bytes.len() as u64;
 
-    let header = AniHeaderV5 {
+    let header = AniHeaderV6 {
         magic: ANI_MAGIC,
         version: ANI_VERSION,
         n_entries: n as u64,
@@ -191,6 +209,10 @@ fn write_ani_file(
         n_blocks: blocks.len() as u64,
         block_size: block_size as u32,
         _pad: 0,
+        off_pos_index: pos_index_off,
+        pos_index_len: pos_index_bytes.len() as u64,
+        off_blob: blob_off,
+        blob_len: info_blob_bytes.len() as u64,
     };
 
     let write_start = std::time::Instant::now();
@@ -231,6 +253,9 @@ fn write_ani_file(
         file.write_all(&b.data)?;
     }
 
+    file.write_all(pos_index_bytes)?;
+    file.write_all(info_blob_bytes)?;
+
     file.flush()?;
 
     if timing {
@@ -240,9 +265,289 @@ fn write_ani_file(
         );
         eprintln!(
             "[ani-build] Total ANI size: {} bytes",
-            hdr_size + index_size + ent_size + block_index_size + blocks_size
+            hdr_size
+                + index_size
+                + ent_size
+                + block_index_size
+                + blocks_size
+                + pos_index_bytes.len()
+                + info_blob_bytes.len()
         );
     }
 
     Ok(())
+}
+
+fn build_pos_index(entries: &[AniEntry]) -> Vec<u8> {
+    let mut per_chr: Vec<Vec<(u32, u32)>> = vec![Vec::new(); 256];
+    for (idx, entry) in entries.iter().enumerate() {
+        per_chr[entry.chr_id as usize].push((entry.pos, idx as u32));
+    }
+
+    let mut contigs: Vec<AniPosContig> = Vec::new();
+    let mut blocks: Vec<AniPosBlock> = Vec::new();
+    let mut pos_offsets: Vec<u32> = Vec::new();
+    let mut pos_counts: Vec<u16> = Vec::new();
+    let mut entry_indices: Vec<u32> = Vec::new();
+
+    for (chr_id, list) in per_chr.iter_mut().enumerate() {
+        if list.is_empty() {
+            continue;
+        }
+        list.sort_by_key(|(pos, _)| *pos);
+
+        let min_pos = list.first().unwrap().0;
+        let max_pos = list.last().unwrap().0;
+        let block_start = blocks.len() as u32;
+
+        let mut current_base: Option<u32> = None;
+        let mut current_block = AniPosBlock {
+            base_pos: 0,
+            _pad: 0,
+            masks: [0u64; 8],
+            offsets_start: 0,
+            _pad2: 0,
+        };
+
+        let mut i = 0usize;
+        while i < list.len() {
+            let pos = list[i].0;
+            let base = (pos / 512) * 512;
+            if current_base != Some(base) {
+                if current_base.is_some() {
+                    blocks.push(current_block);
+                }
+                current_base = Some(base);
+                current_block = AniPosBlock {
+                    base_pos: base,
+                    _pad: 0,
+                    masks: [0u64; 8],
+                    offsets_start: pos_offsets.len() as u32,
+                    _pad2: 0,
+                };
+            }
+
+            let mut count = 0u16;
+            let start_idx = i;
+            while i < list.len() && list[i].0 == pos {
+                let entry_idx = list[i].1;
+                entry_indices.push(entry_idx);
+                count = count.wrapping_add(1);
+                i += 1;
+            }
+
+            let bit = (pos - base) as usize;
+            let word = bit / 64;
+            let bit_in_word = bit % 64;
+            current_block.masks[word] |= 1u64 << bit_in_word;
+            pos_offsets.push((entry_indices.len() as u32) - (count as u32));
+            pos_counts.push(count);
+
+            if i == start_idx {
+                i += 1;
+            }
+        }
+
+        if current_base.is_some() {
+            blocks.push(current_block);
+        }
+
+        let block_count = blocks.len() as u32 - block_start;
+        contigs.push(AniPosContig {
+            chr_id: chr_id as u16,
+            _pad: 0,
+            min_pos,
+            max_pos,
+            block_start,
+            block_count,
+        });
+    }
+
+    let header_size = mem::size_of::<AniPosIndexHeader>();
+    let mut out = vec![0u8; header_size];
+    let mut offset = header_size;
+
+    offset = align8(&mut out, offset);
+    let off_contigs = offset;
+    let contig_bytes = bytemuck::cast_slice(&contigs);
+    out.extend_from_slice(contig_bytes);
+    offset += contig_bytes.len();
+
+    offset = align8(&mut out, offset);
+    let off_blocks = offset;
+    let block_bytes = bytemuck::cast_slice(&blocks);
+    out.extend_from_slice(block_bytes);
+    offset += block_bytes.len();
+
+    offset = align8(&mut out, offset);
+    let off_pos_offsets = offset;
+    let pos_offsets_bytes = bytemuck::cast_slice(&pos_offsets);
+    out.extend_from_slice(pos_offsets_bytes);
+    offset += pos_offsets_bytes.len();
+
+    offset = align8(&mut out, offset);
+    let off_pos_counts = offset;
+    let pos_counts_bytes = bytemuck::cast_slice(&pos_counts);
+    out.extend_from_slice(pos_counts_bytes);
+    offset += pos_counts_bytes.len();
+
+    offset = align8(&mut out, offset);
+    let off_entry_indices = offset;
+    let entry_indices_bytes = bytemuck::cast_slice(&entry_indices);
+    out.extend_from_slice(entry_indices_bytes);
+
+    let header = AniPosIndexHeader {
+        contig_count: contigs.len() as u32,
+        block_count: blocks.len() as u32,
+        pos_count: pos_offsets.len() as u32,
+        entry_index_count: entry_indices.len() as u32,
+        off_contigs: off_contigs as u32,
+        off_blocks: off_blocks as u32,
+        off_pos_offsets: off_pos_offsets as u32,
+        off_pos_counts: off_pos_counts as u32,
+        off_entry_indices: off_entry_indices as u32,
+    };
+
+    let hdr_bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(&header as *const _ as *const u8, header_size) };
+    out[..header_size].copy_from_slice(hdr_bytes);
+    out
+}
+
+fn build_info_blob(entries: &[AniEntry], pool: &mut StringPool) -> Result<Vec<u8>> {
+    let raw = pool.materialize()?;
+    let mut dict_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut dict_list: Vec<String> = Vec::new();
+    let mut entry_offsets: Vec<u32> = Vec::with_capacity(entries.len());
+    let mut entry_counts: Vec<u16> = Vec::with_capacity(entries.len());
+    let mut pairs: Vec<AniInfoPair> = Vec::new();
+    let mut values: Vec<u8> = Vec::new();
+
+    for entry in entries {
+        entry_offsets.push(pairs.len() as u32);
+        let mut count: u16 = 0;
+        if entry.info_ofs == ANI_STR_NONE || entry.info_len == 0 {
+            entry_counts.push(0);
+            continue;
+        }
+        let ofs = entry.info_ofs as usize;
+        let len = entry.info_len as usize;
+        if ofs + len > raw.len() {
+            entry_counts.push(0);
+            continue;
+        }
+        let info = &raw[ofs..ofs + len];
+        let info_str = std::str::from_utf8(info).unwrap_or("");
+        if info_str.is_empty() || info_str == "." {
+            entry_counts.push(0);
+            continue;
+        }
+        for token in info_str.split(';') {
+            if token.is_empty() {
+                continue;
+            }
+            let (key, value_opt) = if let Some((k, v)) = token.split_once('=') {
+                (k, Some(v))
+            } else {
+                (token, None)
+            };
+            if key.is_empty() {
+                continue;
+            }
+            let tag_id = *dict_map.entry(key.to_string()).or_insert_with(|| {
+                let id = dict_list.len() as u32;
+                dict_list.push(key.to_string());
+                id
+            });
+            if let Some(value) = value_opt {
+                let value_off = values.len() as u32;
+                let value_len = value.len() as u32;
+                values.extend_from_slice(value.as_bytes());
+                pairs.push(AniInfoPair {
+                    tag_id,
+                    value_off,
+                    value_len,
+                });
+            } else {
+                pairs.push(AniInfoPair {
+                    tag_id,
+                    value_off: 0,
+                    value_len: 0,
+                });
+            }
+            count = count.wrapping_add(1);
+        }
+        entry_counts.push(count);
+    }
+
+    let mut dict_offsets: Vec<u32> = Vec::with_capacity(dict_list.len());
+    let mut dict_data: Vec<u8> = Vec::new();
+    for key in &dict_list {
+        dict_offsets.push(dict_data.len() as u32);
+        dict_data.extend_from_slice(key.as_bytes());
+        dict_data.push(0);
+    }
+
+    let header_size = mem::size_of::<AniInfoBlobHeader>();
+    let mut out = vec![0u8; header_size];
+    let mut offset = header_size;
+
+    offset = align8(&mut out, offset);
+    let off_dict_offsets = offset;
+    let dict_offsets_bytes = bytemuck::cast_slice(&dict_offsets);
+    out.extend_from_slice(dict_offsets_bytes);
+    offset += dict_offsets_bytes.len();
+
+    offset = align8(&mut out, offset);
+    let off_dict_data = offset;
+    out.extend_from_slice(&dict_data);
+    offset += dict_data.len();
+
+    offset = align8(&mut out, offset);
+    let off_entry_offsets = offset;
+    let entry_offsets_bytes = bytemuck::cast_slice(&entry_offsets);
+    out.extend_from_slice(entry_offsets_bytes);
+    offset += entry_offsets_bytes.len();
+
+    offset = align8(&mut out, offset);
+    let off_entry_counts = offset;
+    let entry_counts_bytes = bytemuck::cast_slice(&entry_counts);
+    out.extend_from_slice(entry_counts_bytes);
+    offset += entry_counts_bytes.len();
+
+    offset = align8(&mut out, offset);
+    let off_pairs = offset;
+    let pairs_bytes = bytemuck::cast_slice(&pairs);
+    out.extend_from_slice(pairs_bytes);
+    offset += pairs_bytes.len();
+
+    offset = align8(&mut out, offset);
+    let off_values = offset;
+    out.extend_from_slice(&values);
+
+    let header = AniInfoBlobHeader {
+        n_entries: entries.len() as u64,
+        dict_count: dict_list.len() as u32,
+        pair_count: pairs.len() as u32,
+        off_dict_offsets: off_dict_offsets as u64,
+        off_dict_data: off_dict_data as u64,
+        off_entry_offsets: off_entry_offsets as u64,
+        off_entry_counts: off_entry_counts as u64,
+        off_pairs: off_pairs as u64,
+        off_values: off_values as u64,
+    };
+
+    let hdr_bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(&header as *const _ as *const u8, header_size) };
+    out[..header_size].copy_from_slice(hdr_bytes);
+    Ok(out)
+}
+
+fn align8(out: &mut Vec<u8>, mut offset: usize) -> usize {
+    let pad = (8 - (offset % 8)) % 8;
+    for _ in 0..pad {
+        out.push(0u8);
+    }
+    offset += pad;
+    offset
 }
