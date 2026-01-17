@@ -63,6 +63,15 @@ impl KbiIndex {
             .collect()
     }
 
+    pub fn has_range(&self, chr: ChrId, start_pos: u32, end_pos: u32) -> bool {
+        let start_key = GenomicKey::new(chr, start_pos).as_u64();
+        let end_key = GenomicKey::new(chr, end_pos).as_u64();
+
+        let start_idx = self.keys.partition_point(|&k| k < start_key);
+        let end_idx = self.keys.partition_point(|&k| k <= end_key);
+        start_idx < end_idx
+    }
+
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let file = File::create(path)?;
         let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, file);

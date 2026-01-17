@@ -60,6 +60,19 @@ $env:KIRA_BT_TIMING = "1"
 .\clinvar.vcf.gz  .\out1.vcf.gz .\clinvar.vcf.gz  .\out2.vcf.gz .\clinvar.vcf.gz  .\out3.vcf.gz .\clinvar.vcf.gz  .\out4.vcf.gz .\clinvar.vcf.gz  .\out5.vcf.gz .\clinvar.vcf.gz  .\out6.vcf.gz .\clinvar.vcf.gz  .\out7.vcf.gz .\clinvar.vcf.gz  .\out8.vcf.gz .\clinvar.vcf.gz  .\out9.vcf.gz .\clinvar.vcf.gz  .\out10.vcf.gz
 ```
 
+
+```
+  # kira-bt
+  kira-bt filter -i "INFO/DP>10 && INFO/AF<0.05 && QUAL>30" -Oz -o kira.vcf.gz input.vcf.gz
+
+  # bcftools
+  bcftools filter -i "INFO/DP>10 && INFO/AF<0.05 && QUAL>30" -Oz -o bcftools.vcf.gz input.vcf.gz
+
+  bcftools norm -Ov -o kira.norm.vcf kira.vcf.gz
+  bcftools norm -Ov -o bcftools.norm.vcf bcftools.vcf.gz
+  diff -u bcftools.norm.vcf kira.norm.vcf
+```
+
 ### Tabix Mode (Full Compatibility)
 
 `kira-bt tabix` is a **100% compatible drop-in replacement** for tabix. All standard tabix options are supported.

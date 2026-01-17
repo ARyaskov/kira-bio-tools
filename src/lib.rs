@@ -3,6 +3,7 @@ pub mod bgzf;
 pub mod cli;
 pub mod csi;
 pub mod filter;
+pub mod filter_arch;
 pub mod kbi;
 pub mod norm;
 pub mod util;
