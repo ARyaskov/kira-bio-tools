@@ -42,11 +42,15 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
         };
         let ext = ann.extension().and_then(|e| e.to_str());
         if ext != Some("ani") {
-            eprintln!("[annotate] Refreshing ANI index from source...");
-            if ext == Some("tab") {
-                annotate::build_ani_index_from_tab(ann, &ani_path, args.columns.as_deref())?;
+            if ani_path.exists() {
+                eprintln!("[annotate] Using existing ANI index.");
             } else {
-                annotate::build_ani_index_auto_v2(ann, &ani_path)?;
+                eprintln!("[annotate] Building ANI index from source...");
+                if ext == Some("tab") {
+                    annotate::build_ani_index_from_tab(ann, &ani_path, args.columns.as_deref())?;
+                } else {
+                    annotate::build_ani_index_auto_v2(ann, &ani_path)?;
+                }
             }
         } else if !ani_path.exists() {
             anyhow::bail!("ANI file not found: {:?}", ani_path);
@@ -172,11 +176,15 @@ pub fn cmd_annotate_serve(args: AnnotateServeArgs) -> Result<()> {
         };
         let ext = ann.extension().and_then(|e| e.to_str());
         if ext != Some("ani") {
-            eprintln!("[annotate] Refreshing ANI index from source...");
-            if ext == Some("tab") {
-                annotate::build_ani_index_from_tab(ann, &ani_path, args.columns.as_deref())?;
+            if ani_path.exists() {
+                eprintln!("[annotate] Using existing ANI index.");
             } else {
-                annotate::build_ani_index_auto_v2(ann, &ani_path)?;
+                eprintln!("[annotate] Building ANI index from source...");
+                if ext == Some("tab") {
+                    annotate::build_ani_index_from_tab(ann, &ani_path, args.columns.as_deref())?;
+                } else {
+                    annotate::build_ani_index_auto_v2(ann, &ani_path)?;
+                }
             }
         } else if !ani_path.exists() {
             anyhow::bail!("ANI file not found: {:?}", ani_path);
