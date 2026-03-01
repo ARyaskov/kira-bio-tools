@@ -6,11 +6,11 @@ rust-version = "1.95"
 description = "High-performance VCF indexer with full tabix compatibility"
 license = "MIT"
 repository = "https://github.com/ARyaskov/kira-bio-tools"
-keywords = ["vcf", "bioinformatics", "genomics", "tabix", "index"]
+keywords = ["vcf", "bioinformatics", "genomics", "tabix", "bcf"]
 categories = ["science", "command-line-utilities"]
 
 [dependencies]
-kira_kv_engine = "0.3.1"
+kira_kv_engine = "0.3.2"
 thiserror = "2.0"
 memmap2 = "0.9"
 bytemuck = { version = "1.21", features = ["derive"] }
