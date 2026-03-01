@@ -109,3 +109,6 @@ Cargo.lock
 
 .idea/
 *sync
+bcftools-sources/
+htslib-sources/
+*.ani

@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use crate::annotate::constants::OUTPUT_BUFFER_SIZE;
 use crate::annotate::cpu_v2::annotation::{
-    annotate_line, annotate_line_with_timing, BundleTimingAccum,
+    BundleTimingAccum, annotate_line, annotate_line_with_timing,
 };
 use crate::annotate::cpu_v2::column_spec::ColumnSpec;
 use crate::annotate::structs::ani::AniIndex;

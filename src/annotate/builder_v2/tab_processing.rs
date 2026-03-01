@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::entry_processing::{insert_or_update_entry, make_position_key};
 use super::multiallelic::split_info_for_allele;
 use crate::annotate::builder_v2::StringPool;
-use crate::annotate::structs::ani::{AniEntry, ANI_STR_NONE};
+use crate::annotate::structs::ani::{ANI_STR_NONE, AniEntry};
 use crate::annotate::structs::tab::TabSchema;
 use crate::util::{chr_name_to_id, url_encode_info_value};
 
@@ -140,7 +140,7 @@ pub fn process_tab_line_multiallelic(
 
         let alt_ofs = pool.append_cstr(alt_single);
 
-        let info_ofs = if !base_info_str.is_empty() && base_info_str != "." {
+        let (info_ofs, info_len) = if !base_info_str.is_empty() && base_info_str != "." {
             let final_info = if alt_alleles.len() > 1 {
                 split_info_for_allele(
                     &base_info_str,
@@ -163,9 +163,9 @@ pub fn process_tab_line_multiallelic(
                 );
             }
             let encoded = url_encode_info_value(&final_info);
-            pool.append_cstr(&encoded) as u32
+            (pool.append_cstr(&encoded) as u32, encoded.len() as u32)
         } else {
-            pool.append_cstr(".") as u32
+            (pool.append_cstr(".") as u32, 1)
         };
 
         let entry = AniEntry {
@@ -177,7 +177,7 @@ pub fn process_tab_line_multiallelic(
             qual_ofs: qual_ofs as u32,
             filter_ofs: filter_ofs as u32,
             info_ofs,
-            info_len: 0,
+            info_len,
             format_ofs: ANI_STR_NONE,
             samples_ofs: ANI_STR_NONE,
         };

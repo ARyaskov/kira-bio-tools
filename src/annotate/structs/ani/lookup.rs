@@ -1,9 +1,9 @@
 use crate::util::fast_hash64;
 
-use crate::annotate::structs::ani::header::{AniEntry, ANI_STR_NONE};
+use crate::annotate::structs::ani::header::{ANI_STR_NONE, AniEntry};
 use crate::annotate::structs::ani::index::{AniIndex, CStrRef};
 use crate::annotate::structs::bundle::FieldNumber;
-use crate::annotate::structs::bundle::{parse_info_field, AnnotationBundle};
+use crate::annotate::structs::bundle::{AnnotationBundle, parse_info_field};
 use crate::util::chr_name_to_id;
 use std::collections::HashMap;
 use std::time::Instant;

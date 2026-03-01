@@ -1,6 +1,6 @@
 use anyhow::Result;
 use bytemuck;
-use kira_kv_engine::{HybridBuilder, HybridConfig, HybridIndex};
+use kira_kv_engine::{BackendKind, Index, IndexBuilder, IndexConfig};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::mem;
@@ -8,9 +8,10 @@ use std::path::Path;
 
 use crate::annotate::builder_v2::StringPool;
 use crate::annotate::structs::ani::{
-    AniBlockEntry, AniEntry, AniHeaderV6, AniInfoBlobHeader, AniInfoPair, AniPosBlock,
-    AniPosContig, AniPosIndexHeader, ANI_MAGIC, ANI_STR_NONE, ANI_VERSION,
+    ANI_MAGIC, ANI_STR_NONE, ANI_VERSION, AniBlockEntry, AniEntry, AniHeaderV6, AniInfoBlobHeader,
+    AniInfoPair, AniPosBlock, AniPosContig, AniPosIndexHeader,
 };
+use crate::util::url_decode_info_value;
 
 pub fn finalize_ani_index(
     rows: Vec<(u64, AniEntry)>,
@@ -25,10 +26,12 @@ pub fn finalize_ani_index(
     let n = rows.len();
     let mph_start = std::time::Instant::now();
 
-    let (gamma, rehash_limit) = calculate_mph_params(n);
+    let mut config = IndexConfig::default();
+    config.auto_detect_numeric = false;
+    config.backend = BackendKind::CHD;
 
     if timing {
-        print_mph_config(gamma, rehash_limit, n, &rows);
+        print_mph_config(&config, n, &rows);
     }
 
     let keys_bytes: Vec<[u8; 8]> = rows.iter().map(|(k, _)| k.to_le_bytes()).collect();
@@ -37,13 +40,7 @@ pub fn finalize_ani_index(
         verify_key_uniqueness(&keys_bytes, &rows);
     }
 
-    let mut config = HybridConfig::default();
-    config.mph_config.gamma = gamma;
-    config.mph_config.rehash_limit = rehash_limit as u32;
-    config.mph_config.salt = 0x9E3779B185EBCA87;
-    config.auto_detect_numeric = false;
-
-    let index = HybridBuilder::new()
+    let index = IndexBuilder::new()
         .with_config(config)
         .build_index(keys_bytes.clone())?;
 
@@ -54,13 +51,54 @@ pub fn finalize_ani_index(
         );
     }
 
-    let entries: Vec<AniEntry> = rows.into_iter().map(|(_, entry)| entry).collect();
+    let mut reordered_entries: Vec<Option<AniEntry>> = vec![None; n];
+    let mut reordered_keys: Vec<Option<u64>> = vec![None; n];
+    for (i, (key, entry)) in rows.into_iter().enumerate() {
+        let idx = index.get(&keys_bytes[i])?;
+        if idx >= n {
+            anyhow::bail!("Index returned out-of-range idx {}", idx);
+        }
+        if reordered_entries[idx].is_some() {
+            anyhow::bail!("Index collision at idx {}", idx);
+        }
+        reordered_entries[idx] = Some(entry);
+        reordered_keys[idx] = Some(key);
+    }
+    let entries: Vec<AniEntry> = reordered_entries
+        .into_iter()
+        .map(|v| v.ok_or_else(|| anyhow::anyhow!("Missing entry after reordering")))
+        .collect::<Result<Vec<_>>>()?;
+    let keys_ordered: Vec<u64> = reordered_keys
+        .into_iter()
+        .map(|v| v.ok_or_else(|| anyhow::anyhow!("Missing key after reordering")))
+        .collect::<Result<Vec<_>>>()?;
 
     if timing {
-        verify_index_correctness(&index, &keys_bytes, &entries);
+        let stats = index.stats();
+        eprintln!(
+            "[ani-build] Index stats: engine={}, total_keys={}, total_memory={}",
+            stats.engine, stats.total_keys, stats.total_memory
+        );
+        eprintln!("[ani-build] Sanity (first 5 keys):");
+        for (i, key_bytes) in keys_bytes.iter().take(5).enumerate() {
+            let key = u64::from_le_bytes(*key_bytes);
+            let contains = index.contains(key_bytes);
+            let lookup = index.get(key_bytes).ok();
+            let lookup_u64 = index.lookup_u64(key).ok();
+            eprintln!(
+                "  [{}] key={:016x} len={} contains={} lookup={:?} lookup_u64={:?}",
+                i,
+                key,
+                key_bytes.len(),
+                contains,
+                lookup,
+                lookup_u64
+            );
+        }
+        verify_index_correctness(&index, &keys_bytes, &keys_ordered);
     }
 
-    let index_bytes = index.to_bytes()?;
+    let index_bytes = index.serialize()?;
     let pos_index_bytes = build_pos_index(&entries);
     let info_blob_bytes = build_info_blob(&entries, &mut pool)?;
     write_ani_file(
@@ -77,19 +115,10 @@ pub fn finalize_ani_index(
     Ok(())
 }
 
-fn calculate_mph_params(n: usize) -> (f64, usize) {
-    match n {
-        0..=100_000 => (1.2, 16),
-        100_001..=1_000_000 => (1.5, 32),
-        1_000_001..=10_000_000 => (2.0, 64),
-        _ => (2.5, 100),
-    }
-}
-
-fn print_mph_config(gamma: f64, rehash_limit: usize, n: usize, rows: &[(u64, AniEntry)]) {
+fn print_mph_config(config: &IndexConfig, n: usize, rows: &[(u64, AniEntry)]) {
     eprintln!(
-        "[ani-build] MPHF config: gamma={:.1}, rehash_limit={}, entries={}",
-        gamma, rehash_limit, n
+        "[ani-build] MPHF config: gamma={:.2}, rehash_limit={}, entries={}",
+        config.mph_config.gamma, config.mph_config.rehash_limit, n
     );
     eprintln!("[ani-build] First 5 keys for verification:");
     for (i, (k, e)) in rows.iter().enumerate().take(5) {
@@ -123,37 +152,39 @@ fn verify_key_uniqueness(keys_bytes: &[[u8; 8]], rows: &[(u64, AniEntry)]) {
     }
 }
 
-fn verify_index_correctness(index: &HybridIndex, keys_bytes: &[[u8; 8]], entries: &[AniEntry]) {
+fn verify_index_correctness(index: &Index, keys_bytes: &[[u8; 8]], keys_ordered: &[u64]) {
     eprintln!("[ani-build] Verifying index lookups (checking 100 random entries):");
     let mut errors = 0;
-    let check_count = 100.min(entries.len());
-    let step = entries.len() / check_count;
+    let check_count = 100.min(keys_bytes.len());
+    let step = keys_bytes.len() / check_count;
 
-    for i in (0..entries.len()).step_by(step.max(1)).take(check_count) {
-        let key = u64::from_le_bytes(keys_bytes[i]);
-        let idx = match index.lookup_u64(key) {
+    for i in (0..keys_bytes.len()).step_by(step.max(1)).take(check_count) {
+        let key_bytes = &keys_bytes[i];
+        let key = u64::from_le_bytes(*key_bytes);
+        let idx = match index.get(key_bytes) {
             Ok(v) => v,
-            Err(_) => {
+            Err(err) => {
                 errors += 1;
                 if errors <= 5 {
-                    eprintln!("  [{}] ERROR: key={:016x} -> index lookup failed", i, key);
+                    eprintln!(
+                        "  [{}] ERROR: key={:016x} -> index lookup failed: {:?}",
+                        i, key, err
+                    );
                 }
                 continue;
             }
         };
-        let retrieved = &entries[idx];
-        let expected = &entries[i];
-
-        if retrieved.chr_id != expected.chr_id || retrieved.pos != expected.pos {
+        if idx >= keys_ordered.len() || keys_ordered[idx] != key {
             errors += 1;
             if errors <= 5 {
-                eprintln!("  [{}] ERROR: key={:016x} -> mph_idx={} -> chr={} pos={} (expected chr={} pos={})", i, key, idx, retrieved.chr_id, retrieved.pos, expected.chr_id, expected.pos);
+                let got = keys_ordered.get(idx).copied().unwrap_or(0);
+                eprintln!(
+                    "  [{}] ERROR: key={:016x} -> mph_idx={} -> key={:016x}",
+                    i, key, idx, got
+                );
             }
         } else if i < 3 {
-            eprintln!(
-                "  [{}] OK: key={:016x} -> mph_idx={} -> chr={} pos={}",
-                i, key, idx, retrieved.chr_id, retrieved.pos
-            );
+            eprintln!("  [{}] OK: key={:016x} -> mph_idx={}", i, key, idx);
         }
     }
 
@@ -415,6 +446,7 @@ fn build_pos_index(entries: &[AniEntry]) -> Vec<u8> {
 }
 
 fn build_info_blob(entries: &[AniEntry], pool: &mut StringPool) -> Result<Vec<u8>> {
+    let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
     let raw = pool.materialize()?;
     let mut dict_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     let mut dict_list: Vec<String> = Vec::new();
@@ -438,11 +470,12 @@ fn build_info_blob(entries: &[AniEntry], pool: &mut StringPool) -> Result<Vec<u8
         }
         let info = &raw[ofs..ofs + len];
         let info_str = std::str::from_utf8(info).unwrap_or("");
-        if info_str.is_empty() || info_str == "." {
+        let decoded_info = url_decode_info_value(info_str);
+        if decoded_info.is_empty() || decoded_info == "." {
             entry_counts.push(0);
             continue;
         }
-        for token in info_str.split(';') {
+        for token in decoded_info.split(';') {
             if token.is_empty() {
                 continue;
             }
@@ -478,6 +511,16 @@ fn build_info_blob(entries: &[AniEntry], pool: &mut StringPool) -> Result<Vec<u8
             count = count.wrapping_add(1);
         }
         entry_counts.push(count);
+    }
+
+    if debug {
+        eprintln!(
+            "[ANI-BLOB] entries={}, pairs={}, dict={}, values={}",
+            entries.len(),
+            pairs.len(),
+            dict_list.len(),
+            values.len()
+        );
     }
 
     let mut dict_offsets: Vec<u32> = Vec::with_capacity(dict_list.len());

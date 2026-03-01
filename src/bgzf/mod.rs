@@ -6,8 +6,8 @@ mod writer;
 
 pub use reader::{BgzfLineReader, BgzfReader};
 pub use structs::{
-    BgzfBlock, BgzfError, CompressedBlock, Result, VirtualPosition, WritePool, BGZF_BLOCK_SIZE,
-    BGZF_EOF, BGZF_HEADER, CHUNK_SIZE,
+    BGZF_BLOCK_SIZE, BGZF_EOF, BGZF_HEADER, BgzfBlock, BgzfError, CHUNK_SIZE, CompressedBlock,
+    Result, VirtualPosition, WritePool,
 };
 pub use utils::is_bgzf;
 pub use writer::BgzfWriter;

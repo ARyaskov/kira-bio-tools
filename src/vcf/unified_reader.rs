@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::bgzf::{BgzfReader as NoodlesBgzfReader, VirtualPosition};
-use crate::util::{chr_name_to_id, detect_format, VcfFormat};
+use crate::util::{VcfFormat, chr_name_to_id, detect_format};
 use crate::vcf::parser::extract_contig_id;
 use crate::vcf::structs::{Result, VcfError, VcfRecord};
 

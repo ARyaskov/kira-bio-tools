@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use kira_bio_tools::annotate::{annotate_vcf_ani_v2, build_ani_index_auto_v2};
 use std::fs;
 use tempfile::TempDir;
@@ -38,6 +38,11 @@ fn bench_bgzf_annotation(c: &mut Criterion) {
                 black_box(&plain_vcf.as_ref()),
                 black_box(&output),
                 black_box(&[]),
+                None,
+                false,
+                false,
+                false,
+                1024,
             )
             .unwrap();
         });
@@ -51,6 +56,11 @@ fn bench_bgzf_annotation(c: &mut Criterion) {
                 black_box(&bgzf_vcf),
                 black_box(&output),
                 black_box(&[]),
+                None,
+                false,
+                false,
+                false,
+                1024,
             )
             .unwrap();
         });

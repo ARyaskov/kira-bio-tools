@@ -4,8 +4,8 @@ use std::io::{BufRead, BufReader};
 
 use crate::cli::args::TabixArgs;
 use crate::{
-    build_csi_index, build_kbi_index, chr_id_to_name, chr_name_to_id, detect_format, fetch_line,
-    CsiQuery, KbiIndex, Region, VcfFormat, VcfReader,
+    CsiQuery, KbiIndex, Region, VcfFormat, VcfReader, build_csi_index, build_kbi_index,
+    chr_id_to_name, chr_name_to_id, detect_format, fetch_line,
 };
 
 pub fn cmd_tabix(args: TabixArgs) -> Result<()> {

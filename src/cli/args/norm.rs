@@ -3,6 +3,13 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 pub struct NormArgs {
+    #[arg(
+        short = 'f',
+        long = "fasta-ref",
+        help = "Reference FASTA for left alignment and normalization"
+    )]
+    pub fasta_ref: Option<PathBuf>,
+
     #[arg(help = "Input VCF file (.vcf or .vcf.gz)")]
     pub input: PathBuf,
 

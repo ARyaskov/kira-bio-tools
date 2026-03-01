@@ -1,8 +1,8 @@
 use crate::annotate;
 #[cfg(feature = "gpu")]
 use crate::annotate::cpu_v2::{
-    build_sample_map, extract_samples_from_headers, iter_ani_header_lines,
-    merge_annotation_headers, ColumnSpec,
+    ColumnSpec, build_sample_map, extract_samples_from_headers, iter_ani_header_lines,
+    merge_annotation_headers,
 };
 use crate::cli::args::{AnnotateArgs, AnnotateIndexArgs, AnnotateServeArgs, DbBuildArgs};
 use anyhow::{Context, Result};
@@ -36,20 +36,22 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
         anyhow::bail!("Either --annotations or --ani must be provided");
     };
 
-    if args.ani.is_none() && !ani_path.exists() {
-        eprintln!("[annotate] ANI index not found, building from source...");
-
+    if args.ani.is_none() {
         let Some(ann) = annotations else {
             anyhow::bail!("--annotations is required to build ANI index");
         };
         let ext = ann.extension().and_then(|e| e.to_str());
-
-        if ext == Some("tab") {
-            annotate::build_ani_index_from_tab(ann, &ani_path, args.columns.as_deref())?;
-        } else {
-            annotate::build_ani_index_auto_v2(ann, &ani_path)?;
+        if ext != Some("ani") {
+            eprintln!("[annotate] Refreshing ANI index from source...");
+            if ext == Some("tab") {
+                annotate::build_ani_index_from_tab(ann, &ani_path, args.columns.as_deref())?;
+            } else {
+                annotate::build_ani_index_auto_v2(ann, &ani_path)?;
+            }
+        } else if !ani_path.exists() {
+            anyhow::bail!("ANI file not found: {:?}", ani_path);
         }
-    } else if args.ani.is_some() && !ani_path.exists() {
+    } else if !ani_path.exists() {
         anyhow::bail!("ANI file not found: {:?}", ani_path);
     }
 
@@ -164,18 +166,22 @@ pub fn cmd_annotate_serve(args: AnnotateServeArgs) -> Result<()> {
         anyhow::bail!("Either --annotations or --ani must be provided");
     };
 
-    if args.ani.is_none() && !ani_path.exists() {
-        eprintln!("[annotate] ANI index not found, building from source...");
+    if args.ani.is_none() {
         let Some(ann) = annotations else {
             anyhow::bail!("--annotations is required to build ANI index");
         };
         let ext = ann.extension().and_then(|e| e.to_str());
-        if ext == Some("tab") {
-            annotate::build_ani_index_from_tab(ann, &ani_path, args.columns.as_deref())?;
-        } else {
-            annotate::build_ani_index_auto_v2(ann, &ani_path)?;
+        if ext != Some("ani") {
+            eprintln!("[annotate] Refreshing ANI index from source...");
+            if ext == Some("tab") {
+                annotate::build_ani_index_from_tab(ann, &ani_path, args.columns.as_deref())?;
+            } else {
+                annotate::build_ani_index_auto_v2(ann, &ani_path)?;
+            }
+        } else if !ani_path.exists() {
+            anyhow::bail!("ANI file not found: {:?}", ani_path);
         }
-    } else if args.ani.is_some() && !ani_path.exists() {
+    } else if !ani_path.exists() {
         anyhow::bail!("ANI file not found: {:?}", ani_path);
     }
 

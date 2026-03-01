@@ -1,0 +1,99 @@
+##fileformat=VCFv4.2
+##source=kira-bt mpileup(native)
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total depth">
+##INFO=<ID=DV,Number=1,Type=Integer,Description="Total non-reference depth">
+##INFO=<ID=DPR,Number=2,Type=Integer,Description="Ref/Alt depth">
+##INFO=<ID=DP4,Number=4,Type=Integer,Description="Ref/Alt fwd/rev counts">
+##INFO=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
+##INFO=<ID=ADF,Number=R,Type=Integer,Description="Allelic depths on forward strand">
+##INFO=<ID=ADR,Number=R,Type=Integer,Description="Allelic depths on reverse strand">
+##INFO=<ID=SP,Number=1,Type=Integer,Description="Strand bias metric">
+##INFO=<ID=SCR,Number=1,Type=Float,Description="Soft clipping ratio proxy">
+##INFO=<ID=NMBZ,Number=1,Type=Float,Description="Mismatch bias Z-score proxy">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Sample depth">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
+##FORMAT=<ID=ADF,Number=R,Type=Integer,Description="Allelic depths on forward strand">
+##FORMAT=<ID=ADR,Number=R,Type=Integer,Description="Allelic depths on reverse strand">
+##FORMAT=<ID=DV,Number=1,Type=Integer,Description="Sample non-reference depth">
+##FORMAT=<ID=DPR,Number=2,Type=Integer,Description="Sample ref/alt depth">
+##FORMAT=<ID=SCR,Number=1,Type=Float,Description="Soft clipping ratio proxy">
+##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype quality">
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description="Phred-scaled genotype likelihoods">
+##contig=<ID=chr6>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	sample
+chr6	75	.	G	A	.	PASS	DP=403;NMBZ=0.000	GT:DP	0/1:403
+chr6	76	.	T	.	.	PASS	DP=405;NMBZ=0.000	GT:DP	0/0:405
+chr6	77	.	T	.	.	PASS	DP=403;NMBZ=0.000	GT:DP	0/0:403
+chr6	78	.	A	T	.	PASS	DP=391;NMBZ=0.000	GT:DP	0/0:391
+chr6	79	.	C	.	.	PASS	DP=389;NMBZ=0.000	GT:DP	0/0:389
+chr6	80	.	T	.	.	PASS	DP=383;NMBZ=0.000	GT:DP	0/0:383
+chr6	81	.	C	.	.	PASS	DP=376;NMBZ=0.000	GT:DP	0/0:376
+chr6	82	.	C	.	.	PASS	DP=373;NMBZ=0.000	GT:DP	0/0:373
+chr6	83	.	T	.	.	PASS	DP=369;NMBZ=0.000	GT:DP	0/0:369
+chr6	84	.	G	.	.	PASS	DP=364;NMBZ=0.000	GT:DP	0/0:364
+chr6	85	.	A	C	.	PASS	DP=352;NMBZ=0.000	GT:DP	0/0:352
+chr6	86	.	G	.	.	PASS	DP=349;NMBZ=0.000	GT:DP	0/0:349
+chr6	87	.	G	.	.	PASS	DP=344;NMBZ=0.000	GT:DP	0/0:344
+chr6	88	.	C	.	.	PASS	DP=336;NMBZ=0.000	GT:DP	0/0:336
+chr6	89	.	G	.	.	PASS	DP=330;NMBZ=0.000	GT:DP	0/0:330
+chr6	90	.	T	.	.	PASS	DP=320;NMBZ=0.000	GT:DP	0/0:320
+chr6	91	.	G	.	.	PASS	DP=324;NMBZ=0.000	GT:DP	0/0:324
+chr6	92	.	G	.	.	PASS	DP=320;NMBZ=0.000	GT:DP	0/0:320
+chr6	93	.	C	G	.	PASS	DP=319;NMBZ=0.000	GT:DP	0/0:319
+chr6	94	.	G	.	.	PASS	DP=316;NMBZ=0.000	GT:DP	0/0:316
+chr6	95	.	T	G	.	PASS	DP=306;NMBZ=0.000	GT:DP	0/0:306
+chr6	96	.	G	.	.	PASS	DP=306;NMBZ=0.000	GT:DP	0/0:306
+chr6	97	.	T	.	.	PASS	DP=297;NMBZ=0.000	GT:DP	0/0:297
+chr6	98	.	G	.	.	PASS	DP=296;NMBZ=0.000	GT:DP	0/0:296
+chr6	99	.	A	.	.	PASS	DP=285;NMBZ=0.000	GT:DP	0/0:285
+chr6	100	.	T	.	.	PASS	DP=286;NMBZ=0.000	GT:DP	0/0:286
+chr6	101	.	G	.	.	PASS	DP=277;NMBZ=0.000	GT:DP	0/0:277
+chr6	102	.	A	.	.	PASS	DP=271;NMBZ=0.000	GT:DP	0/0:271
+chr6	103	.	T	.	.	PASS	DP=264;NMBZ=0.000	GT:DP	0/0:264
+chr6	104	.	G	.	.	PASS	DP=258;NMBZ=0.000	GT:DP	0/0:258
+chr6	105	.	T	.	.	PASS	DP=254;NMBZ=0.000	GT:DP	0/0:254
+chr6	106	.	C	.	.	PASS	DP=244;NMBZ=0.000	GT:DP	0/0:244
+chr6	107	.	C	.	.	PASS	DP=242;NMBZ=0.000	GT:DP	0/0:242
+chr6	108	.	C	.	.	PASS	DP=236;NMBZ=0.000	GT:DP	0/0:236
+chr6	109	.	T	.	.	PASS	DP=234;NMBZ=0.000	GT:DP	0/0:234
+chr6	110	.	T	.	.	PASS	DP=228;NMBZ=0.000	GT:DP	0/0:228
+chr6	111	.	A	.	.	PASS	DP=219;NMBZ=0.000	GT:DP	0/0:219
+chr6	112	.	A	.	.	PASS	DP=215;NMBZ=0.000	GT:DP	0/0:215
+chr6	113	.	A	.	.	PASS	DP=211;NMBZ=0.000	GT:DP	0/0:211
+chr6	114	.	T	.	.	PASS	DP=204;NMBZ=0.000	GT:DP	0/0:204
+chr6	115	.	C	.	.	PASS	DP=197;NMBZ=0.000	GT:DP	0/0:197
+chr6	116	.	A	.	.	PASS	DP=197;NMBZ=0.000	GT:DP	0/0:197
+chr6	117	.	G	.	.	PASS	DP=189;NMBZ=0.000	GT:DP	0/0:189
+chr6	118	.	G	.	.	PASS	DP=186;NMBZ=0.000	GT:DP	0/0:186
+chr6	119	.	T	.	.	PASS	DP=177;NMBZ=0.000	GT:DP	0/0:177
+chr6	120	.	C	.	.	PASS	DP=175;NMBZ=0.000	GT:DP	0/0:175
+chr6	121	.	T	.	.	PASS	DP=176;NMBZ=0.000	GT:DP	0/0:176
+chr6	122	.	T	.	.	PASS	DP=168;NMBZ=0.000	GT:DP	0/0:168
+chr6	123	.	T	.	.	PASS	DP=165;NMBZ=0.000	GT:DP	0/0:165
+chr6	124	.	T	.	.	PASS	DP=159;NMBZ=0.000	GT:DP	0/0:159
+chr6	125	.	G	T	.	PASS	DP=154;NMBZ=0.000	GT:DP	0/0:154
+chr6	126	.	G	.	.	PASS	DP=147;NMBZ=0.000	GT:DP	0/0:147
+chr6	127	.	C	A	.	PASS	DP=141;NMBZ=0.000	GT:DP	0/0:141
+chr6	128	.	T	.	.	PASS	DP=139;NMBZ=0.000	GT:DP	0/0:139
+chr6	129	.	G	.	.	PASS	DP=133;NMBZ=0.000	GT:DP	0/0:133
+chr6	130	.	A	.	.	PASS	DP=124;NMBZ=0.000	GT:DP	0/0:124
+chr6	131	.	G	.	.	PASS	DP=119;NMBZ=0.000	GT:DP	0/0:119
+chr6	132	.	A	.	.	PASS	DP=115;NMBZ=0.000	GT:DP	0/0:115
+chr6	133	.	G	.	.	PASS	DP=112;NMBZ=0.000	GT:DP	0/0:112
+chr6	134	.	T	.	.	PASS	DP=101;NMBZ=0.000	GT:DP	0/0:101
+chr6	135	.	A	.	.	PASS	DP=99;NMBZ=0.000	GT:DP	0/0:99
+chr6	136	.	C	.	.	PASS	DP=95;NMBZ=0.000	GT:DP	0/0:95
+chr6	137	.	G	.	.	PASS	DP=86;NMBZ=0.000	GT:DP	0/0:86
+chr6	138	.	T	.	.	PASS	DP=80;NMBZ=0.000	GT:DP	0/0:80
+chr6	139	.	G	.	.	PASS	DP=77;NMBZ=0.000	GT:DP	0/0:77
+chr6	140	.	G	.	.	PASS	DP=73;NMBZ=0.000	GT:DP	0/0:73
+chr6	141	.	G	.	.	PASS	DP=67;NMBZ=0.000	GT:DP	0/0:67
+chr6	142	.	C	.	.	PASS	DP=59;NMBZ=0.000	GT:DP	0/0:59
+chr6	143	.	T	.	.	PASS	DP=57;NMBZ=0.000	GT:DP	0/0:57
+chr6	144	.	T	.	.	PASS	DP=48;NMBZ=0.000	GT:DP	0/0:48
+chr6	145	.	T	.	.	PASS	DP=46;NMBZ=0.000	GT:DP	0/0:46
+chr6	146	.	G	.	.	PASS	DP=36;NMBZ=0.000	GT:DP	0/0:36
+chr6	147	.	G	.	.	PASS	DP=28;NMBZ=0.000	GT:DP	0/0:28
+chr6	148	.	A	.	.	PASS	DP=13;NMBZ=0.000	GT:DP	0/0:13
+chr6	149	.	C	.	.	PASS	DP=6;NMBZ=0.000	GT:DP	0/0:6

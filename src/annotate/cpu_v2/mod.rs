@@ -26,7 +26,66 @@ use super::constants::*;
 use super::reader::{StreamingVcfReader, VcfAnnotationReader};
 use crate::annotate::structs::ani::AniIndex;
 use crate::annotate::structs::bundle::FieldNumber;
-use crate::util::{detect_format, VcfFormat};
+use crate::util::detect_format;
+
+fn split_mapped_ref(raw: &str) -> (&str, &str) {
+    if let Some((src, dst)) = raw.split_once("=>") {
+        (src, dst)
+    } else {
+        (raw, raw)
+    }
+}
+
+fn is_format_ref(raw: &str) -> bool {
+    let upper = raw.to_ascii_uppercase();
+    upper == "FMT" || upper == "FORMAT" || upper.starts_with("FMT/") || upper.starts_with("FORMAT/")
+}
+
+fn info_id_from_ref(raw: &str) -> String {
+    raw.strip_prefix("INFO/").unwrap_or(raw).to_string()
+}
+
+fn format_id_from_ref(raw: &str) -> String {
+    raw.strip_prefix("FMT/")
+        .or_else(|| raw.strip_prefix("FORMAT/"))
+        .unwrap_or(raw)
+        .to_string()
+}
+
+fn rewrite_header_id(line: &str, dst_id: &str) -> String {
+    if let Some(start) = line.find("ID=") {
+        let id_start = start + 3;
+        if let Some(rel_end) = line[id_start..].find([',', '>']) {
+            let id_end = id_start + rel_end;
+            let mut out = String::with_capacity(line.len() + dst_id.len());
+            out.push_str(&line[..id_start]);
+            out.push_str(dst_id);
+            out.push_str(&line[id_end..]);
+            return out;
+        }
+    }
+    line.to_string()
+}
+
+fn synthetic_info_header_for_fixed_source(src_ref: &str, dst_id: &str) -> Option<String> {
+    let src_upper = src_ref.to_ascii_uppercase();
+    if src_upper == "ID" {
+        return Some(format!(
+            "##INFO=<ID={dst_id},Number=1,Type=String,Description=\"Transferred ID column\">"
+        ));
+    }
+    if src_upper == "FILTER" {
+        return Some(format!(
+            "##INFO=<ID={dst_id},Number=1,Type=String,Description=\"Transferred FILTER column\">"
+        ));
+    }
+    if src_upper == "QUAL" {
+        return Some(format!(
+            "##INFO=<ID={dst_id},Number=1,Type=Float,Description=\"Transferred QUAL column\">"
+        ));
+    }
+    None
+}
 
 pub fn annotate_vcf_ani_v2(
     db: &Path,
@@ -46,10 +105,11 @@ pub fn annotate_vcf_ani_v2(
     let mut column_specs = ColumnSpec::parse_all(columns);
     let info_overwrite_all = column_specs
         .iter()
-        .any(|c| c.key.eq_ignore_ascii_case("INFO"));
-    let format_overwrite_all = column_specs
-        .iter()
-        .any(|c| c.key.eq_ignore_ascii_case("FMT") || c.key.eq_ignore_ascii_case("FORMAT"));
+        .any(|c| c.key.eq_ignore_ascii_case("INFO") && c.mode.replace_all);
+    let format_overwrite_all = column_specs.iter().any(|c| {
+        (c.key.eq_ignore_ascii_case("FMT") || c.key.eq_ignore_ascii_case("FORMAT"))
+            && c.mode.replace_all
+    });
 
     let num_threads = rayon::current_num_threads() / 2;
     if debug {
@@ -84,11 +144,11 @@ pub fn annotate_vcf_ani_v2(
     let input_format = detect_format(input)?;
     let output_ext = output.extension().and_then(|s| s.to_str()).unwrap_or("");
     let output_wants_bgzf = matches!(output_ext, "gz" | "bgz" | "bgzf");
-    let use_bgzf = matches!(input_format, VcfFormat::Bgzf) || output_wants_bgzf;
+    let use_bgzf = output_wants_bgzf;
     if debug {
         eprintln!(
-            "[annotate] Input: {:?}, Output BGZF: {}",
-            input_format, use_bgzf
+            "[annotate] Input: {:?}, Output path: {:?}, ext: {:?}, wants_bgzf: {}, use_bgzf: {}",
+            input_format, output, output_ext, output_wants_bgzf, use_bgzf
         );
     }
 
@@ -221,15 +281,38 @@ pub(crate) fn merge_annotation_headers(
     column_specs: &[ColumnSpec],
 ) -> Result<Vec<String>> {
     let mut info_needed = Vec::new();
+    let mut info_needed_seen = std::collections::HashSet::new();
+    let mut format_needed = Vec::new();
+    let mut format_needed_seen = std::collections::HashSet::new();
+    let mut info_src_to_dst: Vec<(String, String, String)> = Vec::new();
+    let mut format_src_to_dst: Vec<(String, String)> = Vec::new();
     let mut need_format = false;
     let mut need_filter = false;
 
     for col in column_specs {
-        match col.key.to_uppercase().as_str() {
+        let (src_ref, dst_ref) = split_mapped_ref(&col.key);
+        match dst_ref.to_uppercase().as_str() {
             "ID" | "QUAL" => {}
             "FILTER" => need_filter = true,
             "FMT" | "FORMAT" => need_format = true,
-            _ => info_needed.push(col.key.clone()),
+            _ => {
+                if is_format_ref(dst_ref) {
+                    need_format = true;
+                    let src_id = format_id_from_ref(src_ref);
+                    let dst_id = format_id_from_ref(dst_ref);
+                    if format_needed_seen.insert(dst_id.clone()) {
+                        format_needed.push(dst_id.clone());
+                    }
+                    format_src_to_dst.push((src_id, dst_id));
+                } else {
+                    let src_id = info_id_from_ref(src_ref);
+                    let dst_id = info_id_from_ref(dst_ref);
+                    if info_needed_seen.insert(dst_id.clone()) {
+                        info_needed.push(dst_id.clone());
+                    }
+                    info_src_to_dst.push((src_ref.to_string(), src_id, dst_id));
+                }
+            }
         }
     }
 
@@ -270,20 +353,75 @@ pub(crate) fn merge_annotation_headers(
     let mut extra = Vec::new();
 
     if !info_needed.is_empty() {
-        let wanted: std::collections::HashSet<String> = info_needed.into_iter().collect();
-        for h in info_headers {
-            if let Some(id) = extract_header_id(&h) {
-                if wanted.contains(&id) && !input_info_ids.contains(&id) {
-                    extra.push(h);
+        let mut info_header_by_id = std::collections::HashMap::new();
+        for h in &info_headers {
+            if let Some(id) = extract_header_id(h) {
+                info_header_by_id.insert(id, h.clone());
+            }
+        }
+
+        for dst_id in &info_needed {
+            if input_info_ids.contains(dst_id) {
+                continue;
+            }
+            let mapped_src = info_src_to_dst
+                .iter()
+                .find(|(_, _, dst)| dst == dst_id)
+                .map(|(src_ref, src_id, _)| (src_ref.clone(), src_id.clone()));
+            if let Some((src_ref, src_id)) = mapped_src {
+                if let Some(synth) = synthetic_info_header_for_fixed_source(&src_ref, dst_id) {
+                    extra.push(synth);
+                    continue;
                 }
+                if let Some(src_line) = info_header_by_id.get(&src_id) {
+                    extra.push(rewrite_header_id(src_line, dst_id));
+                    continue;
+                }
+            }
+            if let Some(line) = info_header_by_id.get(dst_id) {
+                extra.push(line.clone());
             }
         }
     }
 
     if need_format {
+        let mut format_header_by_id = std::collections::HashMap::new();
+        for h in &format_headers {
+            if let Some(id) = extract_header_id(h) {
+                format_header_by_id.insert(id, h.clone());
+            }
+        }
+
+        for dst_id in &format_needed {
+            if input_format_ids.contains(dst_id) {
+                continue;
+            }
+            let mapped_src = format_src_to_dst
+                .iter()
+                .find(|(_, dst)| dst == dst_id)
+                .map(|(src, _)| src.clone());
+            if let Some(src_id) = mapped_src {
+                if let Some(src_line) = format_header_by_id.get(&src_id) {
+                    extra.push(rewrite_header_id(src_line, dst_id));
+                    continue;
+                }
+            }
+            if let Some(line) = format_header_by_id.get(dst_id) {
+                extra.push(line.clone());
+            }
+        }
+
         for h in format_headers {
             if let Some(id) = extract_header_id(&h) {
-                if !input_format_ids.contains(&id) {
+                if format_needed_seen.contains(&id) {
+                    continue;
+                }
+                if !input_format_ids.contains(&id)
+                    && column_specs.iter().any(|c| {
+                        split_mapped_ref(&c.key).1.eq_ignore_ascii_case("FMT")
+                            || split_mapped_ref(&c.key).1.eq_ignore_ascii_case("FORMAT")
+                    })
+                {
                     extra.push(h);
                 }
             }
@@ -340,10 +478,13 @@ pub(crate) fn expand_column_specs(
 
         expanded.push(col.clone());
 
-        match col.key.to_uppercase().as_str() {
+        let (_, dst_ref) = split_mapped_ref(&col.key);
+        match dst_ref.to_uppercase().as_str() {
             "ID" | "QUAL" | "FILTER" | "FMT" | "FORMAT" => {}
             _ => {
-                seen_info.insert(col.key.clone());
+                if !is_format_ref(dst_ref) {
+                    seen_info.insert(info_id_from_ref(dst_ref));
+                }
             }
         }
     }

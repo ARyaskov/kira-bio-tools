@@ -1,0 +1,14 @@
+##fileformat=VCFv4.1
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=1,assembly=b37,length=249250621>
+##reference=file:///lustre/scratch105/projects/g1k/ref/main_project/human_g1k_v37.fasta
+##FILTER=<ID=ori_filter1,Description="Test">
+##FILTER=<ID=ori_filter2,Description="Test">
+##bcftools_viewVersion=1.19+htslib-1.19
+##bcftools_viewCommand=view -Oz -o annotate19.dst.vcf.gz annotate19.dst.vcf; Date=Tue Feb 24 04:14:52 2026
+##FILTER=<ID=filter_filter,Description="Test">
+##INFO=<ID=FILTER,Number=1,Type=String,Description="Transferred FILTER column">
+##bcftools_annotateVersion=1.19+htslib-1.19
+##bcftools_annotateCommand=annotate -a db.vcf.gz -c FILTER,INFO/FILTER:=./FILTER -o out.bcf.ref.vcf in.vcf.gz; Date=Tue Feb 24 04:21:56 2026
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+1	3000001	ori_id	C	T	.	filter_filter	FILTER=filter_filter

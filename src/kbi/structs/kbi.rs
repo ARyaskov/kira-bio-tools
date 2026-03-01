@@ -2,7 +2,7 @@ use std::io;
 use std::mem;
 
 use bytemuck::{Pod, Zeroable};
-use kira_kv_engine::HybridError;
+use kira_kv_engine::IndexError;
 use thiserror::Error;
 
 pub const KBI_MAGIC: [u8; 8] = *b"KBIV0003";
@@ -14,7 +14,7 @@ pub enum KbiError {
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
     #[error("KV error: {0}")]
-    Kv(#[from] HybridError),
+    Kv(#[from] IndexError),
     #[error("VCF error: {0}")]
     Vcf(#[from] crate::vcf::VcfError),
     #[error("Empty dataset")]

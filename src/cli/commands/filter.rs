@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::bgzf::BgzfWriter;
@@ -12,7 +12,7 @@ use crate::cli::args::FilterArgs;
 use crate::filter::FilterEngine;
 use crate::filter_arch;
 use crate::kbi::KbiIndex;
-use crate::util::{chr_name_to_id, Region};
+use crate::util::{Region, chr_name_to_id};
 use crate::vcf::VcfParser;
 use crate::vcf::{VcfReader, VcfRecord};
 
@@ -30,6 +30,7 @@ pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
 
     let mut reader = VcfReader::open(&args.input)?;
     let mut headers = reader.header()?;
+    ensure_filter_header(&mut headers, "PASS", "All filters passed");
 
     if (args.mask.is_some() || args.mask_file.is_some()) && args.soft_filter.is_none() {
         anyhow::bail!("--mask and --mask-file require --soft-filter");
@@ -497,60 +498,62 @@ fn run_parallel_filter(
         let filter_name = filter_name.clone();
         let mode = mode;
         let set_gts = set_gts;
-        let handle = std::thread::spawn(move || loop {
-            let (idx, rec) = match rx.recv() {
-                Ok(v) => v,
-                Err(_) => break,
-            };
-            stats.records.fetch_add(1, Ordering::Relaxed);
-            let eval_start = Instant::now();
-            let res = match engine.eval(&rec) {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ = res_tx.send(Err(e));
-                    continue;
-                }
-            };
-            stats
-                .eval_ns
-                .fetch_add(eval_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            let mut pass = res.pass_site;
-            if let Some(ref mask_cfg) = mask {
-                let mask_start = Instant::now();
-                if !mask_pass(mask_cfg, &rec) {
-                    pass = false;
-                }
+        let handle = std::thread::spawn(move || {
+            loop {
+                let (idx, rec) = match rx.recv() {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                stats.records.fetch_add(1, Ordering::Relaxed);
+                let eval_start = Instant::now();
+                let res = match engine.eval(&rec) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = res_tx.send(Err(e));
+                        continue;
+                    }
+                };
                 stats
-                    .mask_ns
-                    .fetch_add(mask_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            }
-            if !pass && filter_name.is_none() && set_gts.is_none() {
-                stats.dropped.fetch_add(1, Ordering::Relaxed);
-                let _ = res_tx.send(Ok((idx, None)));
-                continue;
-            }
-            let mode_start = Instant::now();
-            let mut out_rec = rec;
-            match apply_filter_mode(&out_rec.filter, pass, filter_name.as_deref(), &mode) {
-                Some(f) => out_rec.filter = f,
-                None => {
+                    .eval_ns
+                    .fetch_add(eval_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                let mut pass = res.pass_site;
+                if let Some(ref mask_cfg) = mask {
+                    let mask_start = Instant::now();
+                    if !mask_pass(mask_cfg, &rec) {
+                        pass = false;
+                    }
+                    stats
+                        .mask_ns
+                        .fetch_add(mask_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+                if !pass && filter_name.is_none() && set_gts.is_none() {
                     stats.dropped.fetch_add(1, Ordering::Relaxed);
                     let _ = res_tx.send(Ok((idx, None)));
                     continue;
                 }
-            }
-            stats
-                .mode_ns
-                .fetch_add(mode_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            if let Some(mode) = set_gts {
-                let set_start = Instant::now();
-                set_genotypes(&mut out_rec, pass, res.pass_samples.as_ref(), mode);
+                let mode_start = Instant::now();
+                let mut out_rec = rec;
+                match apply_filter_mode(&out_rec.filter, pass, filter_name.as_deref(), &mode) {
+                    Some(f) => out_rec.filter = f,
+                    None => {
+                        stats.dropped.fetch_add(1, Ordering::Relaxed);
+                        let _ = res_tx.send(Ok((idx, None)));
+                        continue;
+                    }
+                }
                 stats
-                    .setgt_ns
-                    .fetch_add(set_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    .mode_ns
+                    .fetch_add(mode_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                if let Some(mode) = set_gts {
+                    let set_start = Instant::now();
+                    set_genotypes(&mut out_rec, pass, res.pass_samples.as_ref(), mode);
+                    stats
+                        .setgt_ns
+                        .fetch_add(set_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+                let line = record_line(&out_rec);
+                let _ = res_tx.send(Ok((idx, Some(line))));
             }
-            let line = record_line(&out_rec);
-            let _ = res_tx.send(Ok((idx, Some(line))));
         });
         handles.push(handle);
     }
@@ -741,11 +744,7 @@ fn mask_pass_regions(mask: &MaskConfig, rec: &VcfRecord) -> bool {
             }
         }
     }
-    if mask.negate {
-        hit
-    } else {
-        !hit
-    }
+    if mask.negate { hit } else { !hit }
 }
 
 fn mask_pass_kbi(mask: &KbiMask, rec: &VcfRecord) -> bool {
@@ -769,11 +768,7 @@ fn mask_pass_kbi(mask: &KbiMask, rec: &VcfRecord) -> bool {
             }
         }
     }
-    if mask.negate {
-        hit
-    } else {
-        !hit
-    }
+    if mask.negate { hit } else { !hit }
 }
 
 fn variant_bounds(rec: &VcfRecord, pos0: u32) -> (u32, u32) {

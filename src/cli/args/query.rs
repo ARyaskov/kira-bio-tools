@@ -2,7 +2,13 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-pub struct QueryArgs {
+pub struct QueryCompatArgs {
+    #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+    pub bcftools_args: Vec<String>,
+}
+
+#[derive(Parser)]
+pub struct RegionQueryArgs {
     #[arg(help = "Indexed VCF file")]
     pub file: PathBuf,
 

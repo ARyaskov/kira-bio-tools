@@ -1,7 +1,7 @@
 use anyhow::Result;
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use cust::prelude::*;
-use kira_kv_engine::HybridIndex;
+use kira_kv_engine::Index;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,24 +12,24 @@ use crate::annotate::constants::{BATCH_SIZE, CHANNEL_DEPTH};
 use crate::annotate::cpu_v2::annotation::{annotate_line, annotate_record_with_bundles_and_info};
 use crate::annotate::cpu_v2::field_metadata::{iter_ani_header_lines, load_and_infer_metadata};
 use crate::annotate::cpu_v2::{
-    annotate_record_with_bundles, build_sample_map, expand_column_specs,
-    extract_samples_from_headers, merge_annotation_headers, ColumnSpec,
+    ColumnSpec, annotate_record_with_bundles, build_sample_map, expand_column_specs,
+    extract_samples_from_headers, merge_annotation_headers,
 };
 use crate::annotate::cpu_v2::{
-    parse_vcf_record_simd, patch_samples_from_line, writer_thread, ParsedVcfRecord,
+    ParsedVcfRecord, parse_vcf_record_simd, patch_samples_from_line, writer_thread,
 };
 use crate::annotate::reader::{StreamingVcfReader, VcfAnnotationReader};
 use crate::annotate::structs::ani::{AniIndex, AniPosBlock, AniPosContig};
 use crate::annotate::structs::annotate_mode::AnnotateMode;
 use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber, FieldType};
-use crate::util::{chr_name_to_id, detect_format, fast_hash64, VcfFormat};
+use crate::util::{VcfFormat, chr_name_to_id, detect_format, fast_hash64};
 use std::collections::HashMap;
 
 pub struct GpuAni {
     _ctx: cust::context::Context,
     module: Module,
     stream: Stream,
-    index: HybridIndex,
+    index: Index,
     entry_keys: Vec<u64>,
     pos_index: Option<GpuPosIndex>,
     info_cache: Option<GpuInfoCache>,
@@ -91,8 +91,8 @@ impl GpuAni {
         let module = Module::from_ptx(&ptx, &[])?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        let index_bytes = ani.index.to_bytes()?;
-        let index = HybridIndex::from_bytes(&index_bytes)?;
+        let index_bytes = ani.index.serialize()?;
+        let index = Index::deserialize(&index_bytes)?;
         let entry_keys = build_entry_keys(ani);
         let pos_index = if let Some(pos) = ani.pos_index() {
             Some(GpuPosIndex {
@@ -367,10 +367,11 @@ pub fn annotate_vcf_ani_gpu(
     let mut column_specs = ColumnSpec::parse_all(columns);
     let info_overwrite_all = column_specs
         .iter()
-        .any(|c| c.key.eq_ignore_ascii_case("INFO"));
-    let format_overwrite_all = column_specs
-        .iter()
-        .any(|c| c.key.eq_ignore_ascii_case("FMT") || c.key.eq_ignore_ascii_case("FORMAT"));
+        .any(|c| c.key.eq_ignore_ascii_case("INFO") && c.mode.replace_all);
+    let format_overwrite_all = column_specs.iter().any(|c| {
+        (c.key.eq_ignore_ascii_case("FMT") || c.key.eq_ignore_ascii_case("FORMAT"))
+            && c.mode.replace_all
+    });
 
     let meta_start = Instant::now();
     let field_meta = load_and_infer_metadata(ani, false)?;
@@ -385,7 +386,7 @@ pub fn annotate_vcf_ani_gpu(
     let input_format = detect_format(input)?;
     let output_ext = output.extension().and_then(|s| s.to_str()).unwrap_or("");
     let output_wants_bgzf = matches!(output_ext, "gz" | "bgz" | "bgzf");
-    let use_bgzf = matches!(input_format, VcfFormat::Bgzf) || output_wants_bgzf;
+    let use_bgzf = output_wants_bgzf;
 
     let input_reader = VcfAnnotationReader::open(input)?;
     let streaming_reader = StreamingVcfReader::new(input_reader);
@@ -1532,10 +1533,7 @@ fn worker_loop_gpu(
         eprintln!("[gpu] bundle: {:.3}s", bundle_total);
         eprintln!(
             "[gpu] bundle_read: {:.3}s, bundle_info: {:.3}s, bundle_optional: {:.3}s, bundle_samples: {:.3}s",
-            bundle_read_total,
-            bundle_info_total,
-            bundle_optional_total,
-            bundle_samples_total
+            bundle_read_total, bundle_info_total, bundle_optional_total, bundle_samples_total
         );
     }
 
@@ -1562,10 +1560,11 @@ pub fn annotate_vcf_ani_gpu_with_state(
     let mut column_specs = ColumnSpec::parse_all(columns);
     let info_overwrite_all = column_specs
         .iter()
-        .any(|c| c.key.eq_ignore_ascii_case("INFO"));
-    let format_overwrite_all = column_specs
-        .iter()
-        .any(|c| c.key.eq_ignore_ascii_case("FMT") || c.key.eq_ignore_ascii_case("FORMAT"));
+        .any(|c| c.key.eq_ignore_ascii_case("INFO") && c.mode.replace_all);
+    let format_overwrite_all = column_specs.iter().any(|c| {
+        (c.key.eq_ignore_ascii_case("FMT") || c.key.eq_ignore_ascii_case("FORMAT"))
+            && c.mode.replace_all
+    });
 
     let meta_start = Instant::now();
     let field_meta = load_and_infer_metadata(ani, false)?;
@@ -1580,7 +1579,7 @@ pub fn annotate_vcf_ani_gpu_with_state(
     let input_format = detect_format(input)?;
     let output_ext = output.extension().and_then(|s| s.to_str()).unwrap_or("");
     let output_wants_bgzf = matches!(output_ext, "gz" | "bgz" | "bgzf");
-    let use_bgzf = matches!(input_format, VcfFormat::Bgzf) || output_wants_bgzf;
+    let use_bgzf = output_wants_bgzf;
 
     let input_reader = VcfAnnotationReader::open(input)?;
     let streaming_reader = StreamingVcfReader::new(input_reader);
@@ -1695,10 +1694,11 @@ pub fn annotate_vcf_ani_gpu_multi_with_state(
     let mut column_specs = ColumnSpec::parse_all(columns);
     let info_overwrite_all = column_specs
         .iter()
-        .any(|c| c.key.eq_ignore_ascii_case("INFO"));
-    let format_overwrite_all = column_specs
-        .iter()
-        .any(|c| c.key.eq_ignore_ascii_case("FMT") || c.key.eq_ignore_ascii_case("FORMAT"));
+        .any(|c| c.key.eq_ignore_ascii_case("INFO") && c.mode.replace_all);
+    let format_overwrite_all = column_specs.iter().any(|c| {
+        (c.key.eq_ignore_ascii_case("FMT") || c.key.eq_ignore_ascii_case("FORMAT"))
+            && c.mode.replace_all
+    });
 
     let meta_start = Instant::now();
     let field_meta = load_and_infer_metadata(ani, false)?;
@@ -2319,10 +2319,7 @@ fn worker_loop_gpu_multi(
         eprintln!("[gpu] bundle: {:.3}s", bundle_total);
         eprintln!(
             "[gpu] bundle_read: {:.3}s, bundle_info: {:.3}s, bundle_optional: {:.3}s, bundle_samples: {:.3}s",
-            bundle_read_total,
-            bundle_info_total,
-            bundle_optional_total,
-            bundle_samples_total
+            bundle_read_total, bundle_info_total, bundle_optional_total, bundle_samples_total
         );
     }
 

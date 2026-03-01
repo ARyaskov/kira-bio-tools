@@ -4,7 +4,7 @@ use std::mem;
 use std::path::Path;
 use std::slice;
 
-use kira_kv_engine::HybridIndex;
+use kira_kv_engine::Index;
 use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
 
@@ -12,7 +12,7 @@ use crate::kbi::structs::{KbiHeader, KbiStats, Result};
 use crate::util::{ChrId, GenomicKey};
 
 pub struct KbiIndex {
-    index: HybridIndex,
+    index: Index,
     keys: Vec<u64>,
     offsets: Vec<u64>,
 }
@@ -76,7 +76,7 @@ impl KbiIndex {
         let file = File::create(path)?;
         let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, file);
 
-        let index_bytes = self.index.to_bytes()?;
+        let index_bytes = self.index.serialize()?;
         let header = KbiHeader::new(self.keys.len(), index_bytes.len());
 
         writer.write_all(bytemuck::bytes_of(&header))?;
@@ -130,7 +130,7 @@ impl KbiIndex {
                 "Index out of range".into(),
             ));
         }
-        let index = HybridIndex::from_bytes(&mmap[index_start..index_end])?;
+        let index = Index::deserialize(&mmap[index_start..index_end])?;
 
         let keys_start = header.off_keys as usize;
         let keys_end = keys_start + n * mem::size_of::<u64>();
@@ -158,7 +158,7 @@ impl KbiIndex {
         self.memory_usage() as f64 / self.len().max(1) as f64
     }
 
-    pub(crate) fn from_parts(index: HybridIndex, keys: Vec<u64>, offsets: Vec<u64>) -> Self {
+    pub(crate) fn from_parts(index: Index, keys: Vec<u64>, offsets: Vec<u64>) -> Self {
         Self {
             index,
             keys,

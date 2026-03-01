@@ -1,9 +1,11 @@
 use anyhow::Result;
 
 use crate::cli::args::NormArgs;
-use crate::{detect_format, VcfFormat};
+use crate::{VcfFormat, detect_format};
 
 pub fn cmd_norm(args: NormArgs) -> Result<()> {
+    let _ = &args.fasta_ref;
+
     let fmt = detect_format(&args.input)?;
     if fmt != VcfFormat::Plain {
         anyhow::bail!("Turbo mode currently supports only plain VCF");

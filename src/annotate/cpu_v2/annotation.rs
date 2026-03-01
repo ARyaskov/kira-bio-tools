@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::annotate::cpu_v2::field_metadata::is_missing_value;
 use crate::annotate::cpu_v2::vcf_parsing::{
-    parse_vcf_record_simd, patch_samples_from_line, ParsedVcfRecord,
+    ParsedVcfRecord, parse_vcf_record_simd, patch_samples_from_line,
 };
 use crate::annotate::structs::ani::AniIndex;
 use crate::annotate::structs::annotate_mode::AnnotateMode;
@@ -48,6 +48,173 @@ impl BundleTimingAccum {
     }
 }
 
+fn split_mapped_ref(raw: &str) -> (&str, &str) {
+    if let Some((src, dst)) = raw.split_once("=>") {
+        (src, dst)
+    } else {
+        (raw, raw)
+    }
+}
+
+fn is_fixed_column(raw: &str) -> bool {
+    raw.eq_ignore_ascii_case("ID")
+        || raw.eq_ignore_ascii_case("QUAL")
+        || raw.eq_ignore_ascii_case("FILTER")
+        || raw.eq_ignore_ascii_case("FMT")
+        || raw.eq_ignore_ascii_case("FORMAT")
+}
+
+fn is_format_ref(raw: &str) -> bool {
+    let upper = raw.to_ascii_uppercase();
+    upper == "FMT" || upper == "FORMAT" || upper.starts_with("FMT/") || upper.starts_with("FORMAT/")
+}
+
+fn column_targets_format(raw: &str) -> bool {
+    let (_, dst) = split_mapped_ref(raw);
+    is_format_ref(dst)
+}
+
+fn column_targets_info(raw: &str) -> bool {
+    let (_, dst) = split_mapped_ref(raw);
+    !is_fixed_column(dst) && !is_format_ref(dst)
+}
+
+fn info_key_from_ref(raw: &str) -> &str {
+    raw.strip_prefix("INFO/").unwrap_or(raw)
+}
+
+fn format_key_from_ref(raw: &str) -> &str {
+    raw.strip_prefix("FMT/")
+        .or_else(|| raw.strip_prefix("FORMAT/"))
+        .unwrap_or(raw)
+}
+
+fn read_scalar_from_bundle(bundle: &AnnotationBundle, src_ref: &str) -> Option<String> {
+    let src_upper = src_ref.to_ascii_uppercase();
+    if src_upper == "ID" {
+        return bundle.id.clone();
+    }
+    if src_upper == "QUAL" {
+        return bundle.qual.clone();
+    }
+    if src_upper == "FILTER" {
+        return bundle.filter.clone();
+    }
+    if src_upper.starts_with("INFO/") || !src_ref.contains('/') {
+        let key = info_key_from_ref(src_ref);
+        return bundle
+            .info
+            .iter()
+            .find(|f| f.key == key)
+            .map(|f| join_values(&f.values));
+    }
+    None
+}
+
+fn apply_format_field_mappings(
+    format: &mut Option<String>,
+    samples: &mut Vec<String>,
+    bundle: &AnnotationBundle,
+    column_modes: &[(String, AnnotateMode)],
+    sample_map: &[Option<usize>],
+) {
+    let Some(db_format) = bundle.format_str.as_ref() else {
+        return;
+    };
+    if samples.is_empty() {
+        return;
+    }
+
+    let db_keys: Vec<&str> = db_format.split(':').collect();
+    let mut out_keys: Vec<String> = format
+        .as_ref()
+        .map(|s| {
+            if s.is_empty() {
+                Vec::new()
+            } else {
+                s.split(':').map(|v| v.to_string()).collect()
+            }
+        })
+        .unwrap_or_default();
+    let mut out_sample_values: Vec<Vec<String>> = samples
+        .iter()
+        .map(|s| {
+            if s.is_empty() {
+                Vec::new()
+            } else {
+                s.split(':').map(|v| v.to_string()).collect()
+            }
+        })
+        .collect();
+
+    for (raw_key, mode) in column_modes {
+        let (src_ref, dst_ref) = split_mapped_ref(raw_key);
+        if !is_format_ref(dst_ref) {
+            continue;
+        }
+        if dst_ref.eq_ignore_ascii_case("FMT") || dst_ref.eq_ignore_ascii_case("FORMAT") {
+            continue;
+        }
+        if !is_format_ref(src_ref) {
+            continue;
+        }
+
+        let src_key = format_key_from_ref(src_ref);
+        let dst_key = format_key_from_ref(dst_ref);
+        let src_db_idx = db_keys.iter().position(|k| *k == src_key);
+        let Some(src_db_idx) = src_db_idx else {
+            continue;
+        };
+        let dst_out_idx = match out_keys.iter().position(|k| k == dst_key) {
+            Some(i) => i,
+            None => {
+                out_keys.push(dst_key.to_string());
+                for vals in &mut out_sample_values {
+                    vals.push(".".to_string());
+                }
+                out_keys.len() - 1
+            }
+        };
+
+        for (sample_idx, vals) in out_sample_values.iter_mut().enumerate() {
+            if dst_out_idx >= vals.len() {
+                vals.resize(dst_out_idx + 1, ".".to_string());
+            }
+            let existing = vals.get(dst_out_idx).map(|s| s.as_str()).unwrap_or(".");
+            let db_idx = sample_map.get(sample_idx).and_then(|v| *v);
+            if db_idx.is_none() {
+                continue;
+            }
+            let db_val = db_idx
+                .and_then(|idx| bundle.format_samples.get(idx))
+                .and_then(|s| s.split(':').nth(src_db_idx))
+                .unwrap_or(".");
+            let existing_missing = is_missing_value(existing);
+            let db_missing = is_missing_value(db_val);
+            if mode.replace_all {
+                vals[dst_out_idx] = db_val.to_string();
+                continue;
+            }
+            let should_replace = (mode.replace_missing && existing_missing)
+                || (mode.replace_non_missing && !existing_missing)
+                || mode.set_or_append;
+            if should_replace && (!db_missing || mode.carry_over_missing || mode.set_or_append) {
+                vals[dst_out_idx] = db_val.to_string();
+            }
+        }
+    }
+
+    if out_keys.is_empty() {
+        *format = None;
+    } else {
+        *format = Some(join_keys(&out_keys));
+    }
+    *samples = out_sample_values
+        .into_iter()
+        .map(|vals| normalize_sample_values(&vals))
+        .collect();
+}
+
 pub fn annotate_line(
     line: &str,
     ani: &AniIndex,
@@ -59,10 +226,8 @@ pub fn annotate_line(
 ) -> String {
     let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
 
-    let mut want_format = format_overwrite_all
-        || column_modes
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("FMT") || k.eq_ignore_ascii_case("FORMAT"));
+    let mut want_format =
+        format_overwrite_all || column_modes.iter().any(|(k, _)| column_targets_format(k));
 
     if !want_format {
         let mut tabs = 0;
@@ -110,14 +275,7 @@ pub fn annotate_line(
     };
     let ref_hash = fast_hash64(ref_allele.as_bytes());
 
-    let need_info = info_overwrite_all
-        || column_modes.iter().any(|(k, _)| {
-            !(k.eq_ignore_ascii_case("ID")
-                || k.eq_ignore_ascii_case("QUAL")
-                || k.eq_ignore_ascii_case("FILTER")
-                || k.eq_ignore_ascii_case("FMT")
-                || k.eq_ignore_ascii_case("FORMAT"))
-        });
+    let need_info = info_overwrite_all || column_modes.iter().any(|(k, _)| column_targets_info(k));
     let need_format = want_format;
 
     let mut bundles = Vec::with_capacity(alt_alleles.len());
@@ -173,10 +331,8 @@ pub fn annotate_line_with_timing(
 ) -> String {
     let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
 
-    let mut want_format = format_overwrite_all
-        || column_modes
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("FMT") || k.eq_ignore_ascii_case("FORMAT"));
+    let mut want_format =
+        format_overwrite_all || column_modes.iter().any(|(k, _)| column_targets_format(k));
 
     if !want_format {
         let mut tabs = 0;
@@ -224,14 +380,7 @@ pub fn annotate_line_with_timing(
     };
     let ref_hash = fast_hash64(ref_allele.as_bytes());
 
-    let need_info = info_overwrite_all
-        || column_modes.iter().any(|(k, _)| {
-            !(k.eq_ignore_ascii_case("ID")
-                || k.eq_ignore_ascii_case("QUAL")
-                || k.eq_ignore_ascii_case("FILTER")
-                || k.eq_ignore_ascii_case("FMT")
-                || k.eq_ignore_ascii_case("FORMAT"))
-        });
+    let need_info = info_overwrite_all || column_modes.iter().any(|(k, _)| column_targets_info(k));
     let need_format = want_format;
 
     let mut bundles = Vec::with_capacity(alt_alleles.len());
@@ -341,10 +490,8 @@ fn annotate_record_with_alts(
         .iter()
         .map(|s| normalize_sample_values(&s.raw))
         .collect();
-    let format_modified = format_overwrite_all
-        || column_modes
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("FMT") || k.eq_ignore_ascii_case("FORMAT"));
+    let format_modified =
+        format_overwrite_all || column_modes.iter().any(|(k, _)| column_targets_format(k));
     if !format_modified {
         if let Some(raw) = raw_samples {
             if new_samples.len() != raw.len() {
@@ -408,25 +555,26 @@ fn annotate_record_with_alts(
         let bundle = &bundles[0].1;
 
         for (key, mode) in column_modes {
-            match key.as_str() {
+            let (src_ref, dst_ref) = split_mapped_ref(key);
+            match dst_ref {
                 "ID" => {
-                    if let Some(ref db_id) = bundle.id {
-                        if should_replace(&parsed.id, db_id, *mode) {
-                            new_id = db_id.clone();
+                    if let Some(db_id) = read_scalar_from_bundle(bundle, src_ref) {
+                        if let Some(v) = merge_scalar_field(&new_id, &db_id, *mode, ";") {
+                            new_id = v;
                         }
                     }
                 }
                 "QUAL" => {
-                    if let Some(ref db_qual) = bundle.qual {
-                        if should_replace(&parsed.qual, db_qual, *mode) {
-                            new_qual = db_qual.clone();
+                    if let Some(db_qual) = read_scalar_from_bundle(bundle, src_ref) {
+                        if let Some(v) = merge_scalar_field(&new_qual, &db_qual, *mode, ";") {
+                            new_qual = v;
                         }
                     }
                 }
                 "FILTER" => {
-                    if let Some(ref db_filter) = bundle.filter {
-                        if should_replace(&parsed.filter, db_filter, *mode) {
-                            new_filter = db_filter.clone();
+                    if let Some(db_filter) = read_scalar_from_bundle(bundle, src_ref) {
+                        if let Some(v) = merge_scalar_field(&new_filter, &db_filter, *mode, ";") {
+                            new_filter = v;
                         }
                     }
                 }
@@ -446,6 +594,13 @@ fn annotate_record_with_alts(
                 _ => {}
             }
         }
+        apply_format_field_mappings(
+            &mut new_format,
+            &mut new_samples,
+            bundle,
+            column_modes,
+            sample_map,
+        );
     }
 
     let mut out = String::new();
@@ -549,10 +704,8 @@ fn annotate_record_with_alts_and_info(
         .iter()
         .map(|s| normalize_sample_values(&s.raw))
         .collect();
-    let format_modified = format_overwrite_all
-        || column_modes
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("FMT") || k.eq_ignore_ascii_case("FORMAT"));
+    let format_modified =
+        format_overwrite_all || column_modes.iter().any(|(k, _)| column_targets_format(k));
     if !format_modified {
         if let Some(raw) = raw_samples {
             if new_samples.len() != raw.len() {
@@ -622,25 +775,26 @@ fn annotate_record_with_alts_and_info(
         let bundle = &bundles[0].1;
 
         for (key, mode) in column_modes {
-            match key.as_str() {
+            let (src_ref, dst_ref) = split_mapped_ref(key);
+            match dst_ref {
                 "ID" => {
-                    if let Some(ref db_id) = bundle.id {
-                        if should_replace(&parsed.id, db_id, *mode) {
-                            new_id = db_id.clone();
+                    if let Some(db_id) = read_scalar_from_bundle(bundle, src_ref) {
+                        if let Some(v) = merge_scalar_field(&new_id, &db_id, *mode, ";") {
+                            new_id = v;
                         }
                     }
                 }
                 "QUAL" => {
-                    if let Some(ref db_qual) = bundle.qual {
-                        if should_replace(&parsed.qual, db_qual, *mode) {
-                            new_qual = db_qual.clone();
+                    if let Some(db_qual) = read_scalar_from_bundle(bundle, src_ref) {
+                        if let Some(v) = merge_scalar_field(&new_qual, &db_qual, *mode, ";") {
+                            new_qual = v;
                         }
                     }
                 }
                 "FILTER" => {
-                    if let Some(ref db_filter) = bundle.filter {
-                        if should_replace(&parsed.filter, db_filter, *mode) {
-                            new_filter = db_filter.clone();
+                    if let Some(db_filter) = read_scalar_from_bundle(bundle, src_ref) {
+                        if let Some(v) = merge_scalar_field(&new_filter, &db_filter, *mode, ";") {
+                            new_filter = v;
                         }
                     }
                 }
@@ -660,6 +814,13 @@ fn annotate_record_with_alts_and_info(
                 _ => {}
             }
         }
+        apply_format_field_mappings(
+            &mut new_format,
+            &mut new_samples,
+            bundle,
+            column_modes,
+            sample_map,
+        );
     }
 
     let mut out = String::new();
@@ -712,6 +873,32 @@ fn should_replace(existing: &str, new_val: &str, mode: AnnotateMode) -> bool {
     }
 
     false
+}
+
+fn merge_scalar_field(
+    existing: &str,
+    new_val: &str,
+    mode: AnnotateMode,
+    sep: &str,
+) -> Option<String> {
+    let existing_missing = is_missing_value(existing);
+    let new_missing = is_missing_value(new_val);
+    if mode.set_or_append {
+        if new_missing && !mode.carry_over_missing {
+            return None;
+        }
+        if existing_missing {
+            return Some(new_val.to_string());
+        }
+        if new_missing {
+            return None;
+        }
+        return Some(format!("{existing}{sep}{new_val}"));
+    }
+    if should_replace(existing, new_val, mode) {
+        return Some(new_val.to_string());
+    }
+    None
 }
 
 fn merge_all_format(

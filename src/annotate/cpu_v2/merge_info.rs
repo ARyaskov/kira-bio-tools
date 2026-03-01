@@ -6,6 +6,40 @@ use super::merge_info_helpers::*;
 use crate::annotate::structs::annotate_mode::AnnotateMode;
 use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber};
 
+fn split_mapped_ref(raw: &str) -> (&str, &str) {
+    if let Some((src, dst)) = raw.split_once("=>") {
+        (src, dst)
+    } else {
+        (raw, raw)
+    }
+}
+
+fn strip_info_prefix(raw: &str) -> &str {
+    raw.strip_prefix("INFO/").unwrap_or(raw)
+}
+
+fn read_record_value_from_bundle(
+    bundle: &AnnotationBundle,
+    src_raw: &str,
+    src_key: &str,
+) -> Option<String> {
+    let src_upper = src_raw.to_ascii_uppercase();
+    if src_upper == "ID" {
+        return bundle.id.clone().map(|v| v.replace(';', ","));
+    }
+    if src_upper == "QUAL" {
+        return bundle.qual.clone();
+    }
+    if src_upper == "FILTER" {
+        return bundle.filter.clone();
+    }
+    bundle
+        .info
+        .iter()
+        .find(|f| f.key == src_key)
+        .map(|f| join_values_commas(&f.values))
+}
+
 pub fn merge_info_fields(
     existing_info: &str,
     bundles: &[(usize, AnnotationBundle)],
@@ -38,7 +72,7 @@ pub fn merge_info_fields(
         }
     }
 
-    if let Some(ref bundle) = multiallelic_bundle {
+    if let Some(bundle) = multiallelic_bundle {
         for field in &bundle.info {
             if let Some(field_number) = field_meta.get(&field.key) {
                 if *field_number == FieldNumber::R && !bundle_ref_values.contains_key(&field.key) {
@@ -56,21 +90,37 @@ pub fn merge_info_fields(
     }
 
     for (spec_key, mode) in column_specs {
-        let key = spec_key.strip_prefix("INFO/").unwrap_or(spec_key);
-
-        if debug {
-            eprintln!("[MERGE] Processing field: {} (mode: {})", key, mode);
+        let (src_raw, dst_raw) = split_mapped_ref(spec_key);
+        let src_key = strip_info_prefix(src_raw);
+        let dst_key = strip_info_prefix(dst_raw);
+        let dst_upper = dst_raw.to_ascii_uppercase();
+        if dst_upper == "ID"
+            || dst_upper == "QUAL"
+            || dst_upper == "FILTER"
+            || dst_upper == "FMT"
+            || dst_upper == "FORMAT"
+            || dst_upper.starts_with("FMT/")
+            || dst_upper.starts_with("FORMAT/")
+        {
+            continue;
         }
 
-        let field_number = field_meta.get(key).copied().unwrap_or(FieldNumber::One);
-        let vcf_has_field = info_map.contains_key(key);
-        let existing_val = info_map.get(key).map(|s| s.as_str()).unwrap_or("");
+        if debug {
+            eprintln!(
+                "[MERGE] Processing field: {} -> {} (mode: {})",
+                src_key, dst_key, mode
+            );
+        }
+
+        let field_number = field_meta.get(src_key).copied().unwrap_or(FieldNumber::One);
+        let vcf_has_field = info_map.contains_key(dst_key);
+        let existing_val = info_map.get(dst_key).map(|s| s.as_str()).unwrap_or("");
         let mut existing_parts: Vec<&str> = if !existing_val.is_empty() && existing_val != "." {
             existing_val.split(',').collect()
         } else {
             Vec::new()
         };
-        let field_type = infer_field_type(key);
+        let field_type = infer_field_type(src_key);
         let is_integer = field_type == "Integer";
         if is_integer {
             if let Some(idx) = existing_parts.iter().position(|v| is_missing_value(v)) {
@@ -81,13 +131,13 @@ pub fn merge_info_fields(
         if field_number == FieldNumber::Zero {
             let has_flag = bundles
                 .iter()
-                .any(|(_, bundle)| bundle.info.iter().any(|f| f.key == key));
+                .any(|(_, bundle)| bundle.info.iter().any(|f| f.key == src_key));
             let has_annotation_data = has_flag;
 
             if debug {
                 eprintln!(
                     "[MERGE] Field {} (Flag): vcf_has_field={}, existing_val='{}', has_annotation_data={}",
-                    key, vcf_has_field, existing_val, has_annotation_data
+                    src_key, vcf_has_field, existing_val, has_annotation_data
                 );
             }
 
@@ -103,7 +153,7 @@ pub fn merge_info_fields(
                 };
 
             if should_transfer && has_flag {
-                info_map.insert(key.to_string(), String::new());
+                info_map.insert(dst_key.to_string(), String::new());
             }
 
             continue;
@@ -121,8 +171,7 @@ pub fn merge_info_fields(
         if effective_number != FieldNumber::A && effective_number != FieldNumber::R {
             let mut annotated_val: Option<String> = None;
             for (_vcf_idx, bundle) in bundles {
-                if let Some(field) = bundle.info.iter().find(|f| f.key == key) {
-                    let joined = join_values_commas(&field.values);
+                if let Some(joined) = read_record_value_from_bundle(bundle, src_raw, src_key) {
                     if !is_missing_value(&joined) {
                         annotated_val = Some(joined);
                         break;
@@ -138,7 +187,7 @@ pub fn merge_info_fields(
             if debug {
                 eprintln!(
                     "[MERGE] Field {} (Record): vcf_has_field={}, existing_val='{}', annotated_val={:?}",
-                    key, vcf_has_field, existing_val, annotated_val
+                    src_key, vcf_has_field, existing_val, annotated_val
                 );
             }
 
@@ -155,7 +204,7 @@ pub fn merge_info_fields(
 
             if should_transfer {
                 if let Some(val) = annotated_val {
-                    info_map.insert(key.to_string(), val);
+                    info_map.insert(dst_key.to_string(), val);
                 }
             }
 
@@ -163,7 +212,7 @@ pub fn merge_info_fields(
         }
 
         let vcf_values = collect_annotations_for_field(
-            key,
+            src_key,
             bundles,
             multiallelic_bundle,
             vcf_alt_alleles,
@@ -179,8 +228,10 @@ pub fn merge_info_fields(
         });
 
         if debug {
-            eprintln!("[MERGE] Field {}: vcf_values={:?}, vcf_has_field={}, existing_val='{}', has_annotation_data={}",
-                      key, vcf_values, vcf_has_field, existing_val, has_annotation_data);
+            eprintln!(
+                "[MERGE] Field {}: vcf_values={:?}, vcf_has_field={}, existing_val='{}', has_annotation_data={}",
+                src_key, vcf_values, vcf_has_field, existing_val, has_annotation_data
+            );
         }
 
         let should_transfer =
@@ -197,7 +248,7 @@ pub fn merge_info_fields(
         if debug {
             eprintln!(
                 "[MERGE] Field {}: should_transfer={} (special +TAG logic: {})",
-                key,
+                src_key,
                 should_transfer,
                 mode.replace_missing && !mode.replace_non_missing && !mode.replace_all
             );
@@ -210,15 +261,19 @@ pub fn merge_info_fields(
         if debug {
             eprintln!(
                 "[MERGE] Field {}: field_number={:?}, existing_parts={:?}",
-                key, effective_number, existing_parts
+                src_key, effective_number, existing_parts
             );
         }
 
         let final_values: Vec<String> = match effective_number {
             FieldNumber::A => merge_field_number_a(&vcf_values, &existing_parts, *mode),
-            FieldNumber::R => {
-                merge_field_number_r(&vcf_values, &bundle_ref_values, key, &existing_parts, *mode)
-            }
+            FieldNumber::R => merge_field_number_r(
+                &vcf_values,
+                &bundle_ref_values,
+                src_key,
+                &existing_parts,
+                *mode,
+            ),
             _ => vcf_values
                 .iter()
                 .filter_map(|v| v.map(|s| s.to_string()))
@@ -226,16 +281,19 @@ pub fn merge_info_fields(
         };
 
         if debug {
-            eprintln!("[MERGE] Field {}: final_values={:?}", key, final_values);
+            eprintln!("[MERGE] Field {}: final_values={:?}", src_key, final_values);
         }
 
         if !final_values.is_empty() && !final_values.iter().all(|v| is_missing_value(v)) {
-            info_map.insert(key.to_string(), join_values_commas(&final_values));
+            info_map.insert(dst_key.to_string(), join_values_commas(&final_values));
             if debug {
-                eprintln!("[MERGE] Field {}: inserted into info_map", key);
+                eprintln!("[MERGE] Field {}: inserted into info_map", dst_key);
             }
         } else if debug {
-            eprintln!("[MERGE] Field {}: not inserted (empty or all missing)", key);
+            eprintln!(
+                "[MERGE] Field {}: not inserted (empty or all missing)",
+                src_key
+            );
         }
     }
 
@@ -308,7 +366,7 @@ fn collect_annotations_for_field<'a>(
         }
     }
 
-    if let Some(ref bundle) = multiallelic_bundle {
+    if let Some(bundle) = multiallelic_bundle {
         if let Some(field) = bundle.info.iter().find(|f| f.key == key) {
             if debug {
                 eprintln!(
@@ -329,7 +387,10 @@ fn collect_annotations_for_field<'a>(
                                 if let Some(val) = field.values.get(db_idx) {
                                     values[vcf_idx] = Some(val.as_str());
                                     if debug {
-                                        eprintln!("[COLLECT] Multiallelic A match: VCF[{}]={} -> DB[{}]={}", vcf_idx, vcf_alt, db_idx, val);
+                                        eprintln!(
+                                            "[COLLECT] Multiallelic A match: VCF[{}]={} -> DB[{}]={}",
+                                            vcf_idx, vcf_alt, db_idx, val
+                                        );
                                     }
                                 }
                             }
@@ -345,7 +406,13 @@ fn collect_annotations_for_field<'a>(
                                 if let Some(val) = field.values.get(db_idx + 1) {
                                     values[vcf_idx] = Some(val.as_str());
                                     if debug {
-                                        eprintln!("[COLLECT] Multiallelic R match: VCF[{}]={} -> DB[{}]={}", vcf_idx, vcf_alt, db_idx + 1, val);
+                                        eprintln!(
+                                            "[COLLECT] Multiallelic R match: VCF[{}]={} -> DB[{}]={}",
+                                            vcf_idx,
+                                            vcf_alt,
+                                            db_idx + 1,
+                                            val
+                                        );
                                     }
                                 }
                             }
@@ -560,11 +627,7 @@ pub fn format_info_string(info_map: &IndexMap<String, String>, field_order: &[St
         }
     }
 
-    if out.is_empty() {
-        ".".to_string()
-    } else {
-        out
-    }
+    if out.is_empty() { ".".to_string() } else { out }
 }
 
 fn join_values_commas(values: &[String]) -> String {

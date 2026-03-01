@@ -1,4 +1,4 @@
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use flate2::Compression;
 use libdeflater::Compressor;
 use std::fs::File;
@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 use super::simd::{compute_crc32, fast_copy_bgzf_header, fast_memcpy};
-use super::structs::{CompressedBlock, WritePool, BGZF_EOF, CHUNK_SIZE};
+use super::structs::{BGZF_EOF, CHUNK_SIZE, CompressedBlock, WritePool};
 
 const CHANNEL_DEPTH: usize = 256;
 const WRITER_BUFFER_SIZE: usize = 128 * 1024 * 1024;

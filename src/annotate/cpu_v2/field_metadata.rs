@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 
-use crate::annotate::structs::ani::{AniIndex, ANI_HEADER_END};
+use crate::annotate::structs::ani::{ANI_HEADER_END, AniIndex};
 use crate::annotate::structs::bundle::FieldNumber;
 use crate::util::{
     choose_best_number, extract_info_key, extract_info_number, url_decode_info_value,

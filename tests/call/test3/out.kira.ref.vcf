@@ -1,0 +1,15 @@
+##fileformat=VCFv4.2
+##reference=file://ref.fa
+##contig=<ID=chr1>
+##contig=<ID=chr2>
+##contig=<ID=chr3>
+##INFO=<ID=I16,Number=16,Type=Float,Description="Auxiliary tag used for calling, see description of bcf_callret1_t in bam2bcf.h">
+##INFO=<ID=QS,Number=R,Type=Float,Description="Auxiliary tag used for calling">
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description="List of Phred-scaled genotype likelihoods">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##INFO=<ID=AC,Number=A,Type=Integer,Description="Allele count in genotypes">
+##INFO=<ID=AN,Number=1,Type=Integer,Description="Total number of alleles in called genotypes">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	621	.	A	C	0	.	AC=0;AN=0;I16=11,0,1,0,407,15059,37,1369,440,17600,60,3600,252,6032,25,625;QS=8,1,0
+chr2	621	.	A	C	0	.	AC=0;AN=0;I16=11,0,1,0,407,15059,37,1369,440,17600,60,3600,252,6032,25,625;QS=8,1,0
+chr3	621	.	A	C	0	.	AC=0;AN=0;I16=11,0,1,0,407,15059,37,1369,440,17600,60,3600,252,6032,25,625;QS=8,1,0

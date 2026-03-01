@@ -1,0 +1,99 @@
+##fileformat=VCFv4.2
+##source=kira-bt mpileup(native)
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total depth">
+##INFO=<ID=DV,Number=1,Type=Integer,Description="Total non-reference depth">
+##INFO=<ID=DPR,Number=2,Type=Integer,Description="Ref/Alt depth">
+##INFO=<ID=DP4,Number=4,Type=Integer,Description="Ref/Alt fwd/rev counts">
+##INFO=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
+##INFO=<ID=ADF,Number=R,Type=Integer,Description="Allelic depths on forward strand">
+##INFO=<ID=ADR,Number=R,Type=Integer,Description="Allelic depths on reverse strand">
+##INFO=<ID=SP,Number=1,Type=Integer,Description="Strand bias metric">
+##INFO=<ID=SCR,Number=1,Type=Float,Description="Soft clipping ratio proxy">
+##INFO=<ID=NMBZ,Number=1,Type=Float,Description="Mismatch bias Z-score proxy">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Sample depth">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
+##FORMAT=<ID=ADF,Number=R,Type=Integer,Description="Allelic depths on forward strand">
+##FORMAT=<ID=ADR,Number=R,Type=Integer,Description="Allelic depths on reverse strand">
+##FORMAT=<ID=DV,Number=1,Type=Integer,Description="Sample non-reference depth">
+##FORMAT=<ID=DPR,Number=2,Type=Integer,Description="Sample ref/alt depth">
+##FORMAT=<ID=SCR,Number=1,Type=Float,Description="Soft clipping ratio proxy">
+##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype quality">
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description="Phred-scaled genotype likelihoods">
+##contig=<ID=11>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	sample
+11	75	.	G	.	.	PASS	DP=68	GT:DP:AD	0/0:68:68,0
+11	76	.	T	.	.	PASS	DP=58	GT:DP:AD	0/0:58:58,0
+11	77	.	A	.	.	PASS	DP=51	GT:DP:AD	0/0:51:51,0
+11	78	.	A	.	.	PASS	DP=51	GT:DP:AD	0/0:51:51,0
+11	79	.	A	.	.	PASS	DP=51	GT:DP:AD	0/0:51:51,0
+11	80	.	A	.	.	PASS	DP=45	GT:DP:AD	0/0:45:45,0
+11	81	.	T	.	.	PASS	DP=42	GT:DP:AD	0/0:42:42,0
+11	82	.	A	.	.	PASS	DP=41	GT:DP:AD	0/0:41:41,0
+11	83	.	A	.	.	PASS	DP=38	GT:DP:AD	0/0:38:38,0
+11	84	.	A	.	.	PASS	DP=34	GT:DP:AD	0/0:34:34,0
+11	85	.	A	.	.	PASS	DP=32	GT:DP:AD	0/0:32:32,0
+11	86	.	T	.	.	PASS	DP=28	GT:DP:AD	0/0:28:28,0
+11	87	.	A	.	.	PASS	DP=26	GT:DP:AD	0/0:26:26,0
+11	88	.	A	.	.	PASS	DP=24	GT:DP:AD	0/0:24:24,0
+11	89	.	A	.	.	PASS	DP=24	GT:DP:AD	0/0:24:24,0
+11	90	.	A	.	.	PASS	DP=23	GT:DP:AD	0/0:23:23,0
+11	91	.	T	.	.	PASS	DP=23	GT:DP:AD	0/0:23:23,0
+11	92	.	A	.	.	PASS	DP=21	GT:DP:AD	0/0:21:21,0
+11	93	.	A	.	.	PASS	DP=21	GT:DP:AD	0/0:21:21,0
+11	94	.	A	.	.	PASS	DP=19	GT:DP:AD	0/0:19:19,0
+11	95	.	A	.	.	PASS	DP=17	GT:DP:AD	0/0:17:17,0
+11	96	.	T	.	.	PASS	DP=17	GT:DP:AD	0/0:17:17,0
+11	97	.	A	.	.	PASS	DP=16	GT:DP:AD	0/0:16:16,0
+11	98	.	A	.	.	PASS	DP=15	GT:DP:AD	0/0:15:15,0
+11	99	.	A	.	.	PASS	DP=21	GT:DP:AD	0/0:21:21,0
+11	100	.	G	.	.	PASS	DP=20	GT:DP:AD	0/0:20:20,0
+11	101	.	T	.	.	PASS	DP=20	GT:DP:AD	0/0:20:20,0
+11	102	.	T	.	.	PASS	DP=19	GT:DP:AD	0/0:19:19,0
+11	103	.	C	.	.	PASS	DP=19	GT:DP:AD	0/0:19:19,0
+11	104	.	C	.	.	PASS	DP=19	GT:DP:AD	0/0:19:19,0
+11	105	.	T	.	.	PASS	DP=19	GT:DP:AD	0/0:19:19,0
+11	106	.	G	.	.	PASS	DP=17	GT:DP:AD	0/0:17:17,0
+11	107	.	A	.	.	PASS	DP=16	GT:DP:AD	0/0:16:16,0
+11	108	.	A	.	.	PASS	DP=16	GT:DP:AD	0/0:16:16,0
+11	109	.	A	.	.	PASS	DP=16	GT:DP:AD	0/0:16:16,0
+11	110	.	G	.	.	PASS	DP=15	GT:DP:AD	0/0:15:15,0
+11	111	.	A	.	.	PASS	DP=15	GT:DP:AD	0/0:15:15,0
+11	112	.	A	.	.	PASS	DP=15	GT:DP:AD	0/0:15:15,0
+11	113	.	T	.	.	PASS	DP=15	GT:DP:AD	0/0:15:15,0
+11	114	.	A	.	.	PASS	DP=13	GT:DP:AD	0/0:13:13,0
+11	115	.	T	.	.	PASS	DP=13	GT:DP:AD	0/0:13:13,0
+11	116	.	C	.	.	PASS	DP=13	GT:DP:AD	0/0:13:13,0
+11	117	.	A	.	.	PASS	DP=12	GT:DP:AD	0/0:12:12,0
+11	118	.	A	.	.	PASS	DP=12	GT:DP:AD	0/0:12:12,0
+11	119	.	T	.	.	PASS	DP=10	GT:DP:AD	0/0:10:10,0
+11	120	.	A	.	.	PASS	DP=8	GT:DP:AD	0/0:8:8,0
+11	121	.	T	.	.	PASS	DP=7	GT:DP:AD	0/0:7:7,0
+11	122	.	T	.	.	PASS	DP=6	GT:DP:AD	0/0:6:6,0
+11	123	.	T	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	124	.	T	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	125	.	G	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	126	.	A	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	127	.	C	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	128	.	A	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	129	.	A	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	130	.	G	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	131	.	G	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	132	.	A	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	133	.	A	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	134	.	G	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	135	.	G	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	136	.	A	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	137	.	G	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	138	.	A	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	139	.	A	.	.	PASS	DP=5	GT:DP:AD	0/0:5:5,0
+11	140	.	G	.	.	PASS	DP=4	GT:DP:AD	0/0:4:4,0
+11	141	.	A	.	.	PASS	DP=4	GT:DP:AD	0/0:4:4,0
+11	142	.	G	.	.	PASS	DP=4	GT:DP:AD	0/0:4:4,0
+11	143	.	G	.	.	PASS	DP=3	GT:DP:AD	0/0:3:3,0
+11	144	.	G	.	.	PASS	DP=3	GT:DP:AD	0/0:3:3,0
+11	145	.	A	.	.	PASS	DP=3	GT:DP:AD	0/0:3:3,0
+11	146	.	A	.	.	PASS	DP=3	GT:DP:AD	0/0:3:3,0
+11	147	.	A	.	.	PASS	DP=3	GT:DP:AD	0/0:3:3,0
+11	148	.	A	.	.	PASS	DP=2	GT:DP:AD	0/0:2:2,0
+11	149	.	T	.	.	PASS	DP=2	GT:DP:AD	0/0:2:2,0

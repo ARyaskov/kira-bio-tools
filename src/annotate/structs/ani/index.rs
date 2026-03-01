@@ -1,8 +1,8 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytemuck::{self, Pod, Zeroable};
 #[cfg(feature = "gpu")]
 use cust::memory::DeviceCopy;
-use kira_kv_engine::HybridIndex;
+use kira_kv_engine::Index;
 use libdeflater::Decompressor;
 use memchr::memchr;
 use memmap2::{Mmap, MmapOptions};
@@ -16,8 +16,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use super::header::{
-    AniBlockEntry, AniEntry, AniEntryV2, AniHeader, AniHeaderV3, AniHeaderV6, ANI_HEADER_END,
-    ANI_MAGIC, ANI_STR_NONE, ANI_VERSION,
+    ANI_HEADER_END, ANI_MAGIC, ANI_STR_NONE, ANI_VERSION, AniBlockEntry, AniEntry, AniEntryV2,
+    AniHeader, AniHeaderV3, AniHeaderV6,
 };
 use crate::annotate::structs::bundle::{
     AnnotationBundle, FieldNumber, FieldType, StructuredInfoField,
@@ -286,7 +286,7 @@ pub struct AniInfoCache {
 
 pub struct AniIndex {
     pub header: AniHeader,
-    pub index: HybridIndex,
+    pub index: Index,
     pub entries: Vec<AniEntry>,
     intervals: Vec<Vec<IntervalEntry>>,
     strings: StringSource,
@@ -479,7 +479,7 @@ impl AniIndex {
                                 data: CStrData::Borrowed(&[]),
                                 start: 0,
                                 end: 0,
-                            }
+                            };
                         }
                     }
                 };
@@ -497,7 +497,7 @@ impl AniIndex {
                                     data: CStrData::Borrowed(&[]),
                                     start: 0,
                                     end: 0,
-                                }
+                                };
                             }
                         };
                         let mut guard = cache.lock().unwrap();
@@ -1037,13 +1037,13 @@ fn read_header(mmap: &Mmap) -> Result<AniHeader> {
     }
 }
 
-fn load_index(mmap: &Mmap, header: &AniHeader) -> Result<HybridIndex> {
+fn load_index(mmap: &Mmap, header: &AniHeader) -> Result<Index> {
     let start = header.off_index as usize;
     let end = start + header.index_len as usize;
     if end > mmap.len() {
         return Err(anyhow!("ANI index out of range"));
     }
-    HybridIndex::from_bytes(&mmap[start..end]).map_err(|e| anyhow!(e))
+    Index::deserialize(&mmap[start..end]).map_err(|e| anyhow!(e))
 }
 
 fn load_entries(mmap: &Mmap, header: &AniHeader) -> Result<Vec<AniEntry>> {

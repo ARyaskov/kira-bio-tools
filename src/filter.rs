@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -76,6 +76,7 @@ enum FuncName {
     Count,
     StrLen,
     Phred,
+    Binom,
     NPass,
     FPass,
     SMplMax,
@@ -591,6 +592,7 @@ impl<'a> Parser<'a> {
                 return Ok(Expr::Literal(Literal::StrList(list)));
             }
             let ident = self.parse_ident()?;
+            let ident = self.maybe_qualified_ident(ident)?;
             if self.consume_char('(') {
                 let args = self.parse_args()?;
                 let name = parse_func_name(&ident)?;
@@ -637,6 +639,9 @@ impl<'a> Parser<'a> {
             || upper == "QUAL"
             || upper == "FILTER"
             || upper == "TYPE"
+            || upper == "N_ALT"
+            || upper == "N_SAMPLES"
+            || upper == "MAC"
             || upper == "%ILEN"
             || upper == "ILEN"
             || upper == "F_MISSING"
@@ -790,7 +795,7 @@ impl<'a> Parser<'a> {
     fn parse_ident(&mut self) -> Result<String> {
         let start = self.pos;
         while let Some(ch) = self.peek_char() {
-            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '/' || ch == '%' {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '%' {
                 self.pos += 1;
                 continue;
             }
@@ -800,6 +805,15 @@ impl<'a> Parser<'a> {
             return Err(anyhow!("Expected identifier"));
         }
         Ok(self.chars[start..self.pos].iter().collect())
+    }
+
+    fn maybe_qualified_ident(&mut self, ident: String) -> Result<String> {
+        let upper = ident.to_ascii_uppercase();
+        if (upper == "INFO" || upper == "FORMAT" || upper == "FMT") && self.consume_char('/') {
+            let tail = self.parse_ident()?;
+            return Ok(format!("{}/{}", ident, tail));
+        }
+        Ok(ident)
     }
 
     fn parse_file_list(&mut self) -> Result<HashSet<String>> {
@@ -881,6 +895,7 @@ fn parse_func_name(name: &str) -> Result<FuncName> {
         "COUNT" => FuncName::Count,
         "STRLEN" => FuncName::StrLen,
         "PHRED" => FuncName::Phred,
+        "BINOM" => FuncName::Binom,
         "N_PASS" => FuncName::NPass,
         "F_PASS" => FuncName::FPass,
         "SMPL_MAX" | "SMPLMAX" | "SMAX" => FuncName::SMplMax,
@@ -1220,11 +1235,7 @@ fn fast_cmp_values(op: BinaryOp, values: Vec<f64>, rhs: f64) -> bool {
             return true;
         }
     }
-    if any_value {
-        false
-    } else {
-        miss_one
-    }
+    if any_value { false } else { miss_one }
 }
 fn eval_bool(expr: &Expr, ctx: &mut EvalContext) -> Result<EvalResult> {
     match expr {
@@ -1358,7 +1369,11 @@ fn eval_std_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValue> 
             kind: ValueKind::Normal,
         })),
         "ALT" => Ok(EvalValue::Scalar(ValueVec {
-            values: split_to_values(&rec.alt, FieldType::String),
+            values: if rec.alt == "." {
+                vec![Value::Str(".".to_string())]
+            } else {
+                split_to_values(&rec.alt, FieldType::String)
+            },
             is_str: true,
             kind: ValueKind::Normal,
         })),
@@ -1377,8 +1392,66 @@ fn eval_std_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValue> 
             is_str: false,
             kind: ValueKind::Type,
         })),
+        "N_ALT" => {
+            let n = if rec.alt == "." || rec.alt.is_empty() {
+                0
+            } else {
+                rec.alt
+                    .split(',')
+                    .filter(|a| !a.is_empty() && *a != ".")
+                    .count() as i64
+            };
+            Ok(EvalValue::Scalar(ValueVec {
+                values: vec![Value::Int(n)],
+                is_str: false,
+                kind: ValueKind::Normal,
+            }))
+        }
+        "N_SAMPLES" => Ok(EvalValue::Scalar(ValueVec {
+            values: vec![Value::Int(ctx.header.samples.len() as i64)],
+            is_str: false,
+            kind: ValueKind::Normal,
+        })),
+        "MAC" => {
+            let mut values = Vec::new();
+            let ac_s = ctx.info_value("AC").map(|s| s.to_string());
+            let an_s = ctx.info_value("AN").map(|s| s.to_string());
+            if let Some(ac) = ac_s {
+                let an = ctx
+                    .info_value("AN")
+                    .and_then(|v| v.split(',').next())
+                    .and_then(|v| v.trim().parse::<i64>().ok());
+                let an = an.or_else(|| {
+                    an_s.as_deref()
+                        .and_then(|v| v.split(',').next())
+                        .and_then(|v| v.trim().parse::<i64>().ok())
+                });
+                for v in ac.split(',') {
+                    if let Ok(ai) = v.trim().parse::<i64>() {
+                        let mac = an.map(|x| ai.min(x - ai)).unwrap_or(ai);
+                        values.push(Value::Int(mac));
+                    }
+                }
+            }
+            if let Some(sel) = &field.value_sel {
+                values = select_values(&values, sel);
+            }
+            Ok(EvalValue::Scalar(ValueVec {
+                values,
+                is_str: false,
+                kind: ValueKind::Normal,
+            }))
+        }
         "%ILEN" | "ILEN" => Ok(EvalValue::Scalar(ValueVec {
-            values: vec![Value::Int(variant_ilen(rec) as i64)],
+            values: if let Some(v) = ctx
+                .info_value("ILEN")
+                .and_then(|x| x.split(',').next())
+                .and_then(|x| x.trim().parse::<i64>().ok())
+            {
+                vec![Value::Int(v)]
+            } else {
+                vec![Value::Int(variant_ilen(rec) as i64)]
+            },
             is_str: false,
             kind: ValueKind::Normal,
         })),
@@ -1446,7 +1519,7 @@ fn eval_format_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValu
                 mask: Vec::new(),
                 is_str: false,
                 kind: ValueKind::Normal,
-            }))
+            }));
         }
     };
     if !cache.has_key(&field.name) {
@@ -1487,6 +1560,8 @@ fn eval_format_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValu
                 }
             }
             values[i] = vals;
+        } else {
+            values[i] = vec![Value::Missing];
         }
     }
 
@@ -1526,8 +1601,11 @@ fn info_has_flag(info: &str, key: &str) -> bool {
 }
 
 fn split_to_values(input: &str, field_type: FieldType) -> Vec<Value> {
-    if input.is_empty() || input == "." {
+    if input.is_empty() {
         return Vec::new();
+    }
+    if input == "." {
+        return vec![Value::Missing];
     }
     let parts: Vec<&str> = input.split(',').collect();
     let mut out = Vec::with_capacity(parts.len());
@@ -1687,11 +1765,7 @@ fn variant_type_mask(rec: &crate::vcf::VcfRecord) -> u32 {
         let t = variant_type_for_alt(ref_bytes, alt.as_bytes());
         mask |= t;
     }
-    if mask == 0 {
-        1
-    } else {
-        mask << 1
-    }
+    if mask == 0 { 1 } else { mask << 1 }
 }
 
 fn variant_type_for_alt(ref_bytes: &[u8], alt_bytes: &[u8]) -> u32 {
@@ -2466,8 +2540,13 @@ fn compare_vec(op: BinaryOp, a: &[Value], b: &[Value]) -> bool {
 }
 
 fn compare_value(op: BinaryOp, a: &Value, b: &Value, miss_one: bool, miss_two: bool) -> bool {
+    let a_dot = matches!(a, Value::Str(s) if s == ".");
+    let b_dot = matches!(b, Value::Str(s) if s == ".");
     let a_miss = matches!(a, Value::Missing);
     let b_miss = matches!(b, Value::Missing);
+    if (a_miss && b_dot) || (b_miss && a_dot) {
+        return miss_two;
+    }
     if a_miss && b_miss {
         return miss_two;
     }
@@ -2492,7 +2571,17 @@ fn value_eq(a: &Value, b: &Value) -> bool {
         (Value::Float(x), Value::Float(y)) => x == y,
         (Value::Int(x), Value::Float(y)) => (*x as f64) == *y,
         (Value::Float(x), Value::Int(y)) => *x == (*y as f64),
-        (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::Str(x), Value::Str(y)) => {
+            if x == y {
+                true
+            } else if x.contains(',') || y.contains(',') {
+                let xs: Vec<&str> = x.split(',').collect();
+                let ys: Vec<&str> = y.split(',').collect();
+                xs.iter().any(|a| ys.iter().any(|b| a == b))
+            } else {
+                false
+            }
+        }
         _ => false,
     }
 }
@@ -2521,11 +2610,7 @@ fn value_regex(a: &Value, b: &Value, negate: bool) -> bool {
         _ => return false,
     };
     let m = re.is_match(target);
-    if negate {
-        !m
-    } else {
-        m
-    }
+    if negate { !m } else { m }
 }
 
 fn value_to_bool(v: EvalValue) -> EvalResult {
@@ -2773,6 +2858,7 @@ fn eval_func(name: FuncName, args: &[Expr], ctx: &mut EvalContext) -> Result<Eva
             )?;
             Ok(apply_phred(v))
         }
+        FuncName::Binom => apply_binom(args, ctx),
         FuncName::Max
         | FuncName::Min
         | FuncName::Avg
@@ -2838,17 +2924,18 @@ fn apply_count(v: EvalValue) -> EvalValue {
             })
         }
         EvalValue::Samples(vs) => {
-            let mut out = Vec::with_capacity(vs.values.len());
-            for sample in vs.values {
-                let count = sample
+            let mut count = 0i64;
+            for (i, sample) in vs.values.iter().enumerate() {
+                if !vs.mask.get(i).copied().unwrap_or(true) {
+                    continue;
+                }
+                count += sample
                     .iter()
                     .filter(|v| !matches!(v, Value::Missing))
                     .count() as i64;
-                out.push(vec![Value::Int(count)]);
             }
-            EvalValue::Samples(SampleValues {
-                values: out,
-                mask: vs.mask,
+            EvalValue::Scalar(ValueVec {
+                values: vec![Value::Int(count)],
                 is_str: false,
                 kind: ValueKind::Normal,
             })
@@ -2935,6 +3022,168 @@ fn apply_phred(v: EvalValue) -> EvalValue {
         }
         EvalValue::StrList(s) => EvalValue::StrList(s),
     }
+}
+
+fn apply_binom(args: &[Expr], ctx: &mut EvalContext) -> Result<EvalValue> {
+    match args.len() {
+        1 => {
+            let v = eval_value(&args[0], ctx)?;
+            match v {
+                EvalValue::Samples(vs) => {
+                    let mut out = Vec::with_capacity(vs.values.len());
+                    for (i, sample_vals) in vs.values.iter().enumerate() {
+                        let (a, b) = if let Some((x, y)) = ad_pair_from_gt(ctx, i, sample_vals) {
+                            (x, y)
+                        } else {
+                            first_two_numbers(sample_vals).unwrap_or((0.0, 0.0))
+                        };
+                        out.push(vec![Value::Float(binom_two_sided(a, b))]);
+                    }
+                    Ok(EvalValue::Samples(SampleValues {
+                        values: out,
+                        mask: vs.mask,
+                        is_str: false,
+                        kind: ValueKind::Normal,
+                    }))
+                }
+                EvalValue::Scalar(vs) => {
+                    let (a, b) = first_two_numbers(&vs.values).unwrap_or((0.0, 0.0));
+                    Ok(EvalValue::Scalar(ValueVec {
+                        values: vec![Value::Float(binom_two_sided(a, b))],
+                        is_str: false,
+                        kind: ValueKind::Normal,
+                    }))
+                }
+                EvalValue::StrList(s) => Ok(EvalValue::StrList(s)),
+            }
+        }
+        2 => {
+            let a = eval_value(&args[0], ctx)?;
+            let b = eval_value(&args[1], ctx)?;
+            Ok(apply_binom_two_args(a, b))
+        }
+        _ => Err(anyhow!("BINOM needs 1 or 2 args")),
+    }
+}
+
+fn apply_binom_two_args(a: EvalValue, b: EvalValue) -> EvalValue {
+    match (a, b) {
+        (EvalValue::Scalar(av), EvalValue::Scalar(bv)) => {
+            let x = first_number(&av.values).unwrap_or(0.0);
+            let y = first_number(&bv.values).unwrap_or(0.0);
+            EvalValue::Scalar(ValueVec {
+                values: vec![Value::Float(binom_two_sided(x, y))],
+                is_str: false,
+                kind: ValueKind::Normal,
+            })
+        }
+        (EvalValue::Samples(av), EvalValue::Scalar(bv)) => {
+            let y = first_number(&bv.values).unwrap_or(0.0);
+            let mut out = Vec::with_capacity(av.values.len());
+            for vals in &av.values {
+                let x = first_number(vals).unwrap_or(0.0);
+                out.push(vec![Value::Float(binom_two_sided(x, y))]);
+            }
+            EvalValue::Samples(SampleValues {
+                values: out,
+                mask: av.mask,
+                is_str: false,
+                kind: ValueKind::Normal,
+            })
+        }
+        (EvalValue::Scalar(av), EvalValue::Samples(bv)) => {
+            let x = first_number(&av.values).unwrap_or(0.0);
+            let mut out = Vec::with_capacity(bv.values.len());
+            for vals in &bv.values {
+                let y = first_number(vals).unwrap_or(0.0);
+                out.push(vec![Value::Float(binom_two_sided(x, y))]);
+            }
+            EvalValue::Samples(SampleValues {
+                values: out,
+                mask: bv.mask,
+                is_str: false,
+                kind: ValueKind::Normal,
+            })
+        }
+        (EvalValue::Samples(av), EvalValue::Samples(bv)) => {
+            let len = av.values.len().min(bv.values.len());
+            let mut out = Vec::with_capacity(len);
+            for i in 0..len {
+                let x = first_number(&av.values[i]).unwrap_or(0.0);
+                let y = first_number(&bv.values[i]).unwrap_or(0.0);
+                out.push(vec![Value::Float(binom_two_sided(x, y))]);
+            }
+            EvalValue::Samples(SampleValues {
+                values: out,
+                mask: av.mask,
+                is_str: false,
+                kind: ValueKind::Normal,
+            })
+        }
+        (a, _) => a,
+    }
+}
+
+fn first_number(values: &[Value]) -> Option<f64> {
+    values.iter().find_map(|v| match v {
+        Value::Int(i) => Some(*i as f64),
+        Value::Float(f) => Some(*f),
+        _ => None,
+    })
+}
+
+fn first_two_numbers(values: &[Value]) -> Option<(f64, f64)> {
+    let mut it = values.iter().filter_map(|v| match v {
+        Value::Int(i) => Some(*i as f64),
+        Value::Float(f) => Some(*f),
+        _ => None,
+    });
+    let a = it.next()?;
+    let b = it.next()?;
+    Some((a, b))
+}
+
+fn ad_pair_from_gt(
+    ctx: &mut EvalContext,
+    sample_idx: usize,
+    values: &[Value],
+) -> Option<(f64, f64)> {
+    let gt = parse_gt(ctx, sample_idx);
+    if gt.len() < 2 {
+        return None;
+    }
+    let a = gt[0];
+    let b = gt[1];
+    if a < 0 || b < 0 {
+        return None;
+    }
+    let ai = a as usize;
+    let bi = b as usize;
+    let get = |i: usize| -> Option<f64> {
+        match values.get(i)? {
+            Value::Int(v) => Some(*v as f64),
+            Value::Float(v) => Some(*v),
+            _ => None,
+        }
+    };
+    Some((get(ai)?, get(bi)?))
+}
+
+fn binom_two_sided(a: f64, b: f64) -> f64 {
+    let x = a.max(0.0).round() as usize;
+    let y = b.max(0.0).round() as usize;
+    let n = x + y;
+    if n == 0 {
+        return 0.0;
+    }
+    let k = x.min(y);
+    let mut prob = (0.5f64).powi(n as i32);
+    let mut cdf = prob;
+    for i in 1..=k {
+        prob *= (n - i + 1) as f64 / i as f64;
+        cdf += prob;
+    }
+    (2.0 * cdf).min(1.0)
 }
 
 fn apply_reduce(name: FuncName, v: EvalValue) -> EvalValue {
@@ -3039,6 +3288,24 @@ fn reduce_values(name: FuncName, values: &[Value]) -> Value {
 }
 
 fn value_from_bool(res: EvalResult) -> EvalValue {
+    if let Some(samples) = res.pass_samples {
+        let values = samples
+            .iter()
+            .map(|b| {
+                if *b {
+                    vec![Value::Int(1)]
+                } else {
+                    vec![Value::Missing]
+                }
+            })
+            .collect::<Vec<_>>();
+        return EvalValue::Samples(SampleValues {
+            values,
+            mask: vec![true; samples.len()],
+            is_str: false,
+            kind: ValueKind::Normal,
+        });
+    }
     let v = if res.pass_site { 1 } else { 0 };
     EvalValue::Scalar(ValueVec {
         values: vec![Value::Int(v)],

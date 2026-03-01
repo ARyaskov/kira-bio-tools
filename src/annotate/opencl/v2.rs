@@ -2,7 +2,7 @@
 
 use crate::util::fast_hash64;
 use anyhow::Result;
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use ocl::core::{ProgramInfo, ProgramInfoResult};
 use ocl::{Context as OclContext, Device, DeviceType, Platform, ProQue, Program, Queue};
 use rayon::prelude::*;
@@ -19,28 +19,28 @@ use crate::annotate::constants::CHANNEL_DEPTH;
 use crate::annotate::cpu_v2::field_metadata::{iter_ani_header_lines, load_and_infer_metadata};
 use crate::annotate::cpu_v2::vcf_parsing::{parse_vcf_record, patch_samples_from_line};
 use crate::annotate::cpu_v2::{
-    annotate_record_with_bundles, build_sample_map, expand_column_specs,
-    extract_samples_from_headers, merge_annotation_headers, writer_thread, ColumnSpec,
+    ColumnSpec, annotate_record_with_bundles, build_sample_map, expand_column_specs,
+    extract_samples_from_headers, merge_annotation_headers, writer_thread,
 };
 use crate::annotate::reader::{StreamingVcfReader, VcfAnnotationReader};
 use crate::annotate::structs::ani::AniIndex;
 use crate::annotate::structs::annotate_mode::AnnotateMode;
 use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber};
-use crate::util::{chr_name_to_id, detect_format, VcfFormat};
-use kira_kv_engine::HybridIndex;
+use crate::util::{VcfFormat, chr_name_to_id, detect_format};
+use kira_kv_engine::Index;
 
 const LINE_BATCH: usize = 200_000;
 
 pub struct OpenCLv2 {
-    index: HybridIndex,
+    index: Index,
     entry_keys: Vec<u64>,
     batch_cap: usize,
 }
 
 impl OpenCLv2 {
     pub fn new(ani: &AniIndex, batch_cap: usize) -> Result<Self> {
-        let index_bytes = ani.index.to_bytes()?;
-        let index = HybridIndex::from_bytes(&index_bytes)?;
+        let index_bytes = ani.index.serialize()?;
+        let index = Index::deserialize(&index_bytes)?;
         let entry_keys = build_entry_keys(ani);
         Ok(Self {
             index,
@@ -339,10 +339,11 @@ pub fn annotate_vcf_opencl_v2_with_gpu(
     let mut column_specs = ColumnSpec::parse_all(columns);
     let info_overwrite_all = column_specs
         .iter()
-        .any(|c| c.key.eq_ignore_ascii_case("INFO"));
-    let format_overwrite_all = column_specs
-        .iter()
-        .any(|c| c.key.eq_ignore_ascii_case("FMT") || c.key.eq_ignore_ascii_case("FORMAT"));
+        .any(|c| c.key.eq_ignore_ascii_case("INFO") && c.mode.replace_all);
+    let format_overwrite_all = column_specs.iter().any(|c| {
+        (c.key.eq_ignore_ascii_case("FMT") || c.key.eq_ignore_ascii_case("FORMAT"))
+            && c.mode.replace_all
+    });
 
     let field_meta = load_and_infer_metadata(ani, false)?;
     let ani_headers = iter_ani_header_lines(ani);
@@ -355,7 +356,7 @@ pub fn annotate_vcf_opencl_v2_with_gpu(
     let input_format = detect_format(input)?;
     let output_ext = output.extension().and_then(|s| s.to_str()).unwrap_or("");
     let output_wants_bgzf = matches!(output_ext, "gz" | "bgz" | "bgzf");
-    let use_bgzf = matches!(input_format, VcfFormat::Bgzf) || output_wants_bgzf;
+    let use_bgzf = output_wants_bgzf;
 
     let input_reader = VcfAnnotationReader::open(input)?;
     let streaming_reader = StreamingVcfReader::new(input_reader);
@@ -738,7 +739,12 @@ fn worker_thread_opencl(
                 if last_report.elapsed().as_secs_f64() >= 2.0 {
                     eprintln!(
                         "[opencl] lines: {}, parse: {:.3}s, key: {:.3}s, pack: {:.3}s, lookup: {:.3}s, annotate: {:.3}s",
-                        total_lines, parse_total, key_total, pack_total, lookup_total, annotate_total
+                        total_lines,
+                        parse_total,
+                        key_total,
+                        pack_total,
+                        lookup_total,
+                        annotate_total
                     );
                     eprintln!(
                         "[opencl] kernel: {:.3}s, upload: {:.3}s, download: {:.3}s, bundle: {:.3}s, send: {:.3}s (max {:.3}s)",
@@ -1048,10 +1054,7 @@ fn worker_thread_opencl(
         );
         eprintln!(
             "[opencl] bundle_read: {:.3}s, bundle_info: {:.3}s, bundle_optional: {:.3}s, bundle_samples: {:.3}s",
-            bundle_read_total,
-            bundle_info_total,
-            bundle_optional_total,
-            bundle_samples_total
+            bundle_read_total, bundle_info_total, bundle_optional_total, bundle_samples_total
         );
     }
 

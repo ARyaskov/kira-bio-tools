@@ -8,26 +8,60 @@ pub struct ColumnSpec {
 }
 
 impl ColumnSpec {
+    fn canonical_ref(raw: &str) -> String {
+        if let Some(rest) = raw.strip_prefix("FORMAT/") {
+            return format!("FMT/{rest}");
+        }
+        raw.to_string()
+    }
+
+    fn is_fixed_column(raw: &str) -> bool {
+        raw.eq_ignore_ascii_case("ID")
+            || raw.eq_ignore_ascii_case("QUAL")
+            || raw.eq_ignore_ascii_case("FILTER")
+            || raw.eq_ignore_ascii_case("INFO")
+            || raw.eq_ignore_ascii_case("FMT")
+            || raw.eq_ignore_ascii_case("FORMAT")
+            || raw.eq_ignore_ascii_case("ALT")
+    }
+
     pub fn parse(spec: &str) -> Self {
         let (mode, rest) = AnnotateMode::parse(spec);
 
         let (src_key, dst_key) = if rest.contains(":=") {
             let parts: Vec<&str> = rest.splitn(2, ":=").collect();
             if parts.len() == 2 {
-                let dst = parts[0].strip_prefix("INFO/").unwrap_or(parts[0]);
-                let src = parts[1].strip_prefix("INFO/").unwrap_or(parts[1]);
-                (src.to_string(), dst.to_string())
+                let dst = Self::canonical_ref(parts[0]);
+                let mut src = Self::canonical_ref(parts[1]);
+                if !src.contains('/')
+                    && !Self::is_fixed_column(&src)
+                    && dst.to_ascii_uppercase().starts_with("FMT/")
+                {
+                    src = format!("FMT/{src}");
+                } else if !src.contains('/')
+                    && !Self::is_fixed_column(&src)
+                    && dst.to_ascii_uppercase().starts_with("INFO/")
+                {
+                    src = format!("INFO/{src}");
+                }
+                (src, dst)
             } else {
-                let key = rest.strip_prefix("INFO/").unwrap_or(rest).to_string();
+                let key = Self::canonical_ref(rest);
                 (key.clone(), key)
             }
         } else {
-            let key = rest.strip_prefix("INFO/").unwrap_or(rest).to_string();
+            let key = Self::canonical_ref(rest);
             (key.clone(), key)
         };
 
+        let runtime_key = if src_key == dst_key {
+            src_key.clone()
+        } else {
+            format!("{src_key}=>{dst_key}")
+        };
+
         Self {
-            key: src_key,
+            key: runtime_key,
             dst_key,
             mode,
         }

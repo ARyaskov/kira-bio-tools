@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 pub const ANI_MAGIC: u64 = 0x494E4149524B4256;
 pub const ANI_VERSION: u64 = 6;

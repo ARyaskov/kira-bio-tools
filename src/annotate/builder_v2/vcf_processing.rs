@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::entry_processing::{insert_or_update_entry, make_position_key, parse_chrom_and_pos};
 use super::multiallelic::split_info_for_allele;
 use crate::annotate::builder_v2::StringPool;
-use crate::annotate::structs::ani::AniEntry;
 use crate::annotate::structs::ani::ANI_STR_NONE;
+use crate::annotate::structs::ani::AniEntry;
 use crate::annotate::structs::bundle::FieldNumber;
 use crate::util::url_encode_info_value;
 use crate::vcf::simd::SimdVcfParser;
@@ -71,20 +71,26 @@ pub fn process_vcf_line_multiallelic_simd(
 
     for (alt_idx, alt_single) in alt_alleles.iter().enumerate() {
         let alt_single = alt_single.trim();
+        if debug && pos <= 5 {
+            eprintln!(
+                "[VCF-INDEX] {}:{} {}>{} info='{}' alts={}",
+                parsed.chrom, pos, parsed.ref_allele, alt_single, parsed.info, parsed.alt
+            );
+        }
         let key = make_position_key(chr_id, pos, parsed.ref_allele.trim(), alt_single);
 
         let alt_ofs = pool.append_cstr(alt_single);
 
-        let info_ofs = if !parsed.info.is_empty() && parsed.info != "." {
+        let (info_ofs, info_len) = if !parsed.info.is_empty() && parsed.info != "." {
             let final_info = if alt_alleles.len() > 1 {
                 split_info_for_allele(parsed.info, alt_idx, alt_alleles.len(), field_meta)
             } else {
                 parsed.info.to_string()
             };
             let encoded = url_encode_info_value(&final_info);
-            pool.append_cstr(&encoded) as u32
+            (pool.append_cstr(&encoded) as u32, encoded.len() as u32)
         } else {
-            pool.append_cstr(".") as u32
+            (pool.append_cstr(".") as u32, 1)
         };
 
         let entry = AniEntry {
@@ -96,7 +102,7 @@ pub fn process_vcf_line_multiallelic_simd(
             qual_ofs: qual_ofs as u32,
             filter_ofs: filter_ofs as u32,
             info_ofs,
-            info_len: 0,
+            info_len,
             format_ofs,
             samples_ofs,
         };

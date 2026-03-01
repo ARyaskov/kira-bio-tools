@@ -1,7 +1,8 @@
 [package]
 name = "kira-bio-tools"
 version = "0.3.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.95"
 description = "High-performance VCF indexer with full tabix compatibility"
 license = "MIT"
 repository = "https://github.com/ARyaskov/kira-bio-tools"
@@ -9,7 +10,7 @@ keywords = ["vcf", "bioinformatics", "genomics", "tabix", "index"]
 categories = ["science", "command-line-utilities"]
 
 [dependencies]
-kira_kv_engine = "0.2.1"
+kira_kv_engine = "0.3.0"
 thiserror = "2.0"
 memmap2 = "0.9"
 bytemuck = { version = "1.21", features = ["derive"] }

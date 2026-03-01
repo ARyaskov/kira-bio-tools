@@ -1,0 +1,15 @@
+# This file was produced by kira-bt stats (native)
+# ID	[2]id	[3]file
+ID	0	stats.vaf.vcf.gz
+SN	0	number_of_samples	2
+SN	0	number_of_records	0
+SN	0	number_of_no-ALTs	0
+SN	0	number_of_SNPs	0
+SN	0	number_of_MNPs	0
+SN	0	number_of_indels	0
+SN	0	number_of_others	0
+SN	0	number_of_multiallelic_sites	0
+SN	0	number_of_multiallelic_snp_sites	0
+TSTV	0	0	0	inf
+PSC	0	a	0	0	0	0	0.00
+PSC	0	b	0	0	0	0	0.00

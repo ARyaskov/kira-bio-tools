@@ -2,7 +2,7 @@ use std::io::{BufRead, Seek};
 use std::path::Path;
 
 use crate::bgzf::{BgzfReader, VirtualPosition};
-use crate::util::{detect_format, VcfFormat};
+use crate::util::{VcfFormat, detect_format};
 use crate::vcf::structs::Result;
 
 pub fn fetch_line<P: AsRef<Path>>(path: P, offset: u64) -> Result<String> {

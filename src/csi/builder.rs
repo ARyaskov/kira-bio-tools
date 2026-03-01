@@ -6,8 +6,8 @@ use std::path::Path;
 use indexmap::IndexMap;
 use noodles_bgzf::VirtualPosition as NoodlesVirtualPosition;
 use noodles_csi as csi;
-use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
 use noodles_csi::binning_index::index::reference_sequence::Bin;
+use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
 
 use crate::csi::structs::Result;
 use crate::csi::utils::reg2bin;

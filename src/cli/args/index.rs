@@ -3,6 +3,15 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 pub struct IndexArgs {
+    #[arg(help = "Input VCF/BCF file")]
+    pub input: PathBuf,
+
+    #[arg(last = true, trailing_var_arg = true)]
+    pub bcftools_args: Vec<String>,
+}
+
+#[derive(Parser)]
+pub struct RegionIndexArgs {
     #[arg(help = "Input VCF file (.vcf, .vcf.gz with BGZF)")]
     pub input: PathBuf,
 

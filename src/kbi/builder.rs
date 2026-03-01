@@ -1,4 +1,4 @@
-use kira_kv_engine::{HybridBuilder, HybridConfig};
+use kira_kv_engine::{IndexBuilder, IndexConfig};
 use rayon::prelude::*;
 
 use crate::kbi::index::KbiIndex;
@@ -82,13 +82,13 @@ impl KbiBuilder {
 
         let key_bytes: Vec<[u8; 8]> = keys.iter().map(|k| k.to_le_bytes()).collect();
 
-        let mut config = HybridConfig::default();
+        let mut config = IndexConfig::default();
         config.mph_config.gamma = self.gamma;
         config.mph_config.rehash_limit = self.rehash_limit;
         config.mph_config.salt = self.salt;
         config.auto_detect_numeric = true;
 
-        let index = HybridBuilder::new()
+        let index = IndexBuilder::new()
             .with_config(config)
             .build_index(key_bytes.clone())?;
 
