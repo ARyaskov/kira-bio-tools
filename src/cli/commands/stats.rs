@@ -1,452 +1,367 @@
-use anyhow::Result;
-use std::collections::HashSet;
-
-use crate::VcfReader;
 use crate::cli::args::StatsArgs;
+use crate::vcf::UnifiedVcfReader;
+use anyhow::{Context, Result};
+use std::collections::BTreeMap;
+use std::path::Path;
 
 pub fn cmd_stats(args: StatsArgs) -> Result<()> {
-    let cfg = parse_stats_args(&args.bcftools_args)?;
-
-    let mut out = String::new();
-    out.push_str("# This file was produced by kira-bt stats (native)\n");
-    out.push_str("# ID\t[2]id\t[3]file\n");
-
-    for (idx, input) in args.inputs.iter().enumerate() {
-        let mut reader = VcfReader::open(input)?;
-        let headers = reader.header()?;
-        let sample_names = header_samples(&headers);
-        let selected = select_samples(&sample_names, cfg.samples.as_deref());
-        let mut sample_stats = vec![SampleStats::default(); selected.len()];
-        let selected_name_refs: Vec<&str> = selected.iter().map(|(_, n)| n.as_str()).collect();
-
-        let mut s = FileStats::default();
-        while let Some(rec) = reader.next_record()? {
-            if !matches_region(&cfg.regions, &rec.chrom) {
-                continue;
-            }
-            if !matches_filter_list(&cfg.filters, &rec.filter) {
-                continue;
-            }
-            let vtype = record_type(&rec.ref_allele, &rec.alt, cfg.first_alt_only);
-            if !matches_expr(
-                &cfg.include_expr,
-                &cfg.exclude_expr,
-                rec.qual.as_str(),
-                vtype,
-            ) {
-                continue;
-            }
-
-            s.records += 1;
-            if rec.alt == "." || rec.alt == rec.ref_allele {
-                s.no_alt += 1;
-            }
-            if vtype.has_snp {
-                s.snps += 1;
-            }
-            if vtype.has_mnp {
-                s.mnps += 1;
-            }
-            if vtype.has_indel {
-                s.indels += 1;
-            }
-            if vtype.has_other {
-                s.others += 1;
-            }
-            if vtype.multiallelic {
-                s.multiallelic += 1;
-            }
-            if vtype.multiallelic && vtype.all_snp {
-                s.multiallelic_snp += 1;
-            }
-            s.ts += vtype.ts;
-            s.tv += vtype.tv;
-            if rec.id != "." && !rec.id.is_empty() {
-                s.known_id += 1;
-            } else {
-                s.novel_id += 1;
-            }
-            update_sample_stats(&rec.format, &rec.samples, &selected, &mut sample_stats);
-        }
-
-        out.push_str(&format!("ID\t{idx}\t{}\n", input.display()));
-        out.push_str(&format!(
-            "SN\t{idx}\tnumber_of_samples\t{}\n",
-            selected.len()
-        ));
-        out.push_str(&format!("SN\t{idx}\tnumber_of_records\t{}\n", s.records));
-        out.push_str(&format!("SN\t{idx}\tnumber_of_no-ALTs\t{}\n", s.no_alt));
-        out.push_str(&format!("SN\t{idx}\tnumber_of_SNPs\t{}\n", s.snps));
-        out.push_str(&format!("SN\t{idx}\tnumber_of_MNPs\t{}\n", s.mnps));
-        out.push_str(&format!("SN\t{idx}\tnumber_of_indels\t{}\n", s.indels));
-        out.push_str(&format!("SN\t{idx}\tnumber_of_others\t{}\n", s.others));
-        out.push_str(&format!(
-            "SN\t{idx}\tnumber_of_multiallelic_sites\t{}\n",
-            s.multiallelic
-        ));
-        out.push_str(&format!(
-            "SN\t{idx}\tnumber_of_multiallelic_snp_sites\t{}\n",
-            s.multiallelic_snp
-        ));
-
-        let ratio = if s.tv == 0 {
-            "inf".to_string()
-        } else {
-            format!("{:.4}", s.ts as f64 / s.tv as f64)
-        };
-        out.push_str(&format!("TSTV\t{idx}\t{}\t{}\t{}\n", s.ts, s.tv, ratio));
-
-        if cfg.verbose {
-            out.push_str(&format!("IDS\t{idx}\tknown\t{}\n", s.known_id));
-            out.push_str(&format!("IDS\t{idx}\tnovel\t{}\n", s.novel_id));
-        }
-
-        for (i, (_, name)) in selected.iter().enumerate() {
-            let st = &sample_stats[i];
-            let avg_dp = if st.dp_n == 0 {
-                0.0
-            } else {
-                st.dp_sum as f64 / st.dp_n as f64
-            };
-            out.push_str(&format!(
-                "PSC\t{idx}\t{name}\t{}\t{}\t{}\t{}\t{avg_dp:.2}\n",
-                st.hom_ref, st.hom_alt, st.het, st.missing
-            ));
-        }
-
-        if idx + 1 != args.inputs.len() {
-            out.push('\n');
-        }
-
-        let _ = selected_name_refs;
+    if args.inputs.is_empty() { anyhow::bail!("stats: at least one input required"); }
+    let files: Vec<&Path> = args.inputs.iter().map(|p| p.as_path()).collect();
+    let mut sets: Vec<Stats> = Vec::with_capacity(files.len());
+    for f in &files {
+        sets.push(compute_stats(f).with_context(|| format!("stats {:?}", f))?);
     }
-
-    print!("{out}");
-    Ok(())
+    print_stats(&files, &sets, &args)
 }
 
 #[derive(Default)]
-struct StatsCfg {
-    samples: Option<String>,
-    include_expr: Option<Expr>,
-    exclude_expr: Option<Expr>,
-    regions: Option<HashSet<String>>,
-    filters: Option<HashSet<String>>,
-    first_alt_only: bool,
-    verbose: bool,
+struct Stats {
+    n_records: u64,
+    n_no_alts: u64,
+    n_snps: u64,
+    n_mnps: u64,
+    n_indels: u64,
+    n_other: u64,
+    n_multi: u64,
+    n_multi_snps: u64,
+    n_singleton: u64,
+    samples: Vec<String>,
+    qual_dist: BTreeMap<u32, u64>,
+    af_dist: BTreeMap<u32, u64>,
+    sub_counts: BTreeMap<(u8, u8), u64>,
+    indel_dist: BTreeMap<i32, u64>,
+    psc_n_snps: Vec<u64>,
+    psc_n_indels: Vec<u64>,
+    psc_n_het: Vec<u64>,
+    psc_n_hom: Vec<u64>,
+    psc_n_ref_hom: Vec<u64>,
+    psc_n_miss: Vec<u64>,
+    psc_n_singletons: Vec<u64>,
+    psc_dp_sum: Vec<u64>,
+    psc_dp_count: Vec<u64>,
+    psi_n_in_frame: Vec<u64>,
+    psi_n_out_frame: Vec<u64>,
+    psi_n_not_applicable: Vec<u64>,
+    psi_n_indels: Vec<u64>,
+    psi_n_indel_hets: Vec<u64>,
+    psi_n_indel_alts: Vec<u64>,
+    sis_n_snps: u64,
+    sis_n_ts: u64,
+    sis_n_tv: u64,
+    sis_n_indels: u64,
+    sis_n_multi_snps: u64,
+    sis_n_repeat_consistent: u64,
+    sis_n_repeat_inconsistent: u64,
+    sis_n_not_applicable: u64,
+    hwe_bins: BTreeMap<u32, (u64, u64)>,
+    dp_bins: BTreeMap<u32, u64>,
 }
 
-#[derive(Clone, Copy)]
-enum Expr {
-    QualGt(f64),
-    TypeSnp,
+fn is_transition(r: u8, a: u8) -> bool {
+    matches!((r, a), (b'A', b'G') | (b'G', b'A') | (b'C', b'T') | (b'T', b'C'))
 }
 
-fn parse_stats_args(args: &[String]) -> Result<StatsCfg> {
-    let mut cfg = StatsCfg::default();
-    let mut i = 0usize;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-s" => {
-                i += 1;
-                cfg.samples = Some(
-                    args.get(i)
-                        .ok_or_else(|| anyhow::anyhow!("missing value for -s"))?
-                        .to_string(),
-                );
+fn compute_stats(path: &Path) -> Result<Stats> {
+    let mut reader = UnifiedVcfReader::open(path)?;
+    let headers = reader.header()?;
+    let mut s = Stats::default();
+    s.samples = extract_samples(&headers);
+    let n = s.samples.len();
+    s.psc_n_snps = vec![0; n];
+    s.psc_n_indels = vec![0; n];
+    s.psc_n_het = vec![0; n];
+    s.psc_n_hom = vec![0; n];
+    s.psc_n_ref_hom = vec![0; n];
+    s.psc_n_miss = vec![0; n];
+    s.psc_n_singletons = vec![0; n];
+    s.psc_dp_sum = vec![0; n];
+    s.psc_dp_count = vec![0; n];
+    s.psi_n_in_frame = vec![0; n];
+    s.psi_n_out_frame = vec![0; n];
+    s.psi_n_not_applicable = vec![0; n];
+    s.psi_n_indels = vec![0; n];
+    s.psi_n_indel_hets = vec![0; n];
+    s.psi_n_indel_alts = vec![0; n];
+
+    while let Some(line) = reader.read_line()? {
+        if line.is_empty() || line.as_bytes()[0] == b'#' { continue; }
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 8 { continue; }
+        s.n_records += 1;
+
+        let refa = cols[3]; let alt = cols[4];
+        let alts: Vec<&str> = alt.split(',').filter(|a| !a.is_empty() && *a != ".").collect();
+        if alts.is_empty() { s.n_no_alts += 1; continue; }
+        if alts.len() > 1 { s.n_multi += 1; }
+        let mut had_snp = false; let mut had_indel = false; let mut had_mnp = false; let mut had_other = false;
+        for a in &alts {
+            if refa.len() == 1 && a.len() == 1 {
+                had_snp = true;
+                let r = refa.as_bytes()[0].to_ascii_uppercase();
+                let aa = a.as_bytes()[0].to_ascii_uppercase();
+                *s.sub_counts.entry((r, aa)).or_default() += 1;
+            } else if refa.len() == a.len() && refa.len() > 1 { had_mnp = true; }
+            else if refa.len() != a.len() {
+                had_indel = true;
+                let d = a.len() as i32 - refa.len() as i32;
+                *s.indel_dist.entry(d).or_default() += 1;
+            } else { had_other = true; }
+        }
+        if had_snp { s.n_snps += 1; if alts.len() > 1 { s.n_multi_snps += 1; } }
+        if had_mnp { s.n_mnps += 1; }
+        if had_indel { s.n_indels += 1; }
+        if had_other { s.n_other += 1; }
+
+        if let Ok(q) = cols[5].parse::<f64>() {
+            let bucket = if q.is_finite() { (q.max(0.0).min(999.0)).round() as u32 } else { 0 };
+            *s.qual_dist.entry(bucket).or_default() += 1;
+        }
+        for kv in cols[7].split(';') {
+            if let Some(v) = kv.strip_prefix("AF=") {
+                if let Ok(af) = v.split(',').next().unwrap_or("0").parse::<f64>() {
+                    let bucket = ((af * 1000.0).round() as u32).min(1000);
+                    *s.af_dist.entry(bucket).or_default() += 1;
+                }
+                break;
             }
-            "-i" => {
-                i += 1;
-                cfg.include_expr = Some(parse_expr(
-                    args.get(i)
-                        .ok_or_else(|| anyhow::anyhow!("missing value for -i"))?,
-                )?);
+        }
+        if had_snp {
+            s.sis_n_snps += 1;
+            if alts.len() > 1 { s.sis_n_multi_snps += 1; }
+            for a in &alts {
+                if refa.len() == 1 && a.len() == 1 {
+                    let r = refa.as_bytes()[0].to_ascii_uppercase();
+                    let aa = a.as_bytes()[0].to_ascii_uppercase();
+                    if is_transition(r, aa) { s.sis_n_ts += 1; } else { s.sis_n_tv += 1; }
+                }
             }
-            "-e" => {
-                i += 1;
-                cfg.exclude_expr = Some(parse_expr(
-                    args.get(i)
-                        .ok_or_else(|| anyhow::anyhow!("missing value for -e"))?,
-                )?);
+        }
+        if had_indel { s.sis_n_indels += 1; }
+
+        if cols.len() > 8 && !s.samples.is_empty() {
+            let fmt = cols[8];
+            let fmt_keys: Vec<&str> = fmt.split(':').collect();
+            let gt_idx = fmt_keys.iter().position(|k| *k == "GT");
+            let dp_idx = fmt_keys.iter().position(|k| *k == "DP");
+            let mut alt_alleles_total = 0u32;
+            let mut alt_carrier: Vec<usize> = Vec::new();
+            let mut gts_collected: Vec<(usize, Vec<u32>)> = Vec::new();
+            let mut n_ref_alleles = 0u32;
+            let mut n_alt_alleles = 0u32;
+            let mut record_dp_sum = 0u64;
+            if let Some(gi) = gt_idx {
+                let is_snp = had_snp; let is_indel = had_indel;
+                for (si, raw) in cols[9..].iter().enumerate() {
+                    if si >= s.samples.len() { break; }
+                    let parts: Vec<&str> = raw.split(':').collect();
+                    let gt = parts.get(gi).copied().unwrap_or(".");
+                    if let Some(di) = dp_idx {
+                        if let Some(d) = parts.get(di).and_then(|s| s.parse::<u32>().ok()) {
+                            s.psc_dp_sum[si] += d as u64;
+                            s.psc_dp_count[si] += 1;
+                            record_dp_sum += d as u64;
+                        }
+                    }
+                    let alleles: Vec<&str> = gt.split(|c| c == '/' || c == '|').collect();
+                    if alleles.iter().any(|a| *a == "." || a.is_empty()) {
+                        s.psc_n_miss[si] += 1;
+                        continue;
+                    }
+                    if is_snp { s.psc_n_snps[si] += 1; }
+                    if is_indel { s.psc_n_indels[si] += 1; }
+                    let nums: Vec<u32> = alleles.iter().filter_map(|a| a.parse().ok()).collect();
+                    let any_nonref = nums.iter().any(|n| *n > 0);
+                    let all_ref = nums.iter().all(|n| *n == 0);
+                    let all_same = nums.iter().all(|n| *n == nums[0]);
+                    if all_ref { s.psc_n_ref_hom[si] += 1; }
+                    else if all_same { s.psc_n_hom[si] += 1; } else { s.psc_n_het[si] += 1; }
+                    if any_nonref {
+                        let alt_n: u32 = nums.iter().filter(|n| **n > 0).count() as u32;
+                        alt_alleles_total += alt_n;
+                        alt_carrier.push(si);
+                    }
+                    if is_indel && any_nonref {
+                        s.psi_n_indel_alts[si] += 1;
+                        if !all_same { s.psi_n_indel_hets[si] += 1; }
+                        s.psi_n_indels[si] += 1;
+                        for a in &alts {
+                            let d = a.len() as i32 - refa.len() as i32;
+                            if d % 3 == 0 { s.psi_n_in_frame[si] += 1; } else { s.psi_n_out_frame[si] += 1; }
+                        }
+                    }
+                    n_ref_alleles += nums.iter().filter(|n| **n == 0).count() as u32;
+                    n_alt_alleles += nums.iter().filter(|n| **n > 0).count() as u32;
+                    gts_collected.push((si, nums));
+                }
             }
-            "-r" => {
-                i += 1;
-                let raw = args
-                    .get(i)
-                    .ok_or_else(|| anyhow::anyhow!("missing value for -r"))?;
-                let mut set = HashSet::new();
-                for item in raw.split(',') {
-                    let chrom = item.split(':').next().unwrap_or(item).to_string();
-                    if !chrom.is_empty() {
-                        set.insert(chrom);
+            if alt_alleles_total == 1 && alt_carrier.len() == 1 {
+                s.psc_n_singletons[alt_carrier[0]] += 1;
+                s.n_singleton += 1;
+            }
+            if had_snp {
+                let n = (n_ref_alleles + n_alt_alleles) as f64;
+                if n > 0.0 {
+                    let p = n_ref_alleles as f64 / n;
+                    let bin = ((p * 100.0).round() as u32).min(100);
+                    let entry = s.hwe_bins.entry(bin).or_default();
+                    entry.0 += 1;
+                    let mut chi2 = 0.0;
+                    let mut n_hom_ref = 0u32; let mut n_het = 0u32; let mut n_hom_alt = 0u32;
+                    for (_, nums) in &gts_collected {
+                        if nums.len() != 2 { continue; }
+                        match (nums[0] == 0, nums[1] == 0) {
+                            (true, true) => n_hom_ref += 1,
+                            (false, false) => n_hom_alt += 1,
+                            _ => n_het += 1,
+                        }
+                    }
+                    let total = (n_hom_ref + n_het + n_hom_alt) as f64;
+                    if total > 0.0 {
+                        let q = 1.0 - p;
+                        let exp_hom_ref = p * p * total;
+                        let exp_het = 2.0 * p * q * total;
+                        let exp_hom_alt = q * q * total;
+                        for (obs, exp) in [(n_hom_ref as f64, exp_hom_ref), (n_het as f64, exp_het), (n_hom_alt as f64, exp_hom_alt)] {
+                            if exp > 0.0 { chi2 += (obs - exp).powi(2) / exp; }
+                        }
+                        if chi2 < 3.84 { entry.1 += 1; }
                     }
                 }
-                cfg.regions = Some(set);
             }
-            "-f" => {
-                i += 1;
-                let raw = args
-                    .get(i)
-                    .ok_or_else(|| anyhow::anyhow!("missing value for -f"))?;
-                let set = raw
-                    .split(',')
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                    .collect::<HashSet<_>>();
-                cfg.filters = Some(set);
+            if !s.samples.is_empty() {
+                let avg_dp = record_dp_sum / s.samples.len() as u64;
+                let bin = (avg_dp.min(500)) as u32;
+                *s.dp_bins.entry(bin).or_default() += 1;
             }
-            "-1" => cfg.first_alt_only = true,
-            "-v" => cfg.verbose = true,
-            _ => {}
         }
-        i += 1;
     }
-    Ok(cfg)
+    Ok(s)
 }
 
-fn parse_expr(s: &str) -> Result<Expr> {
-    let t = s.trim();
-    if let Some(v) = t.strip_prefix("QUAL>") {
-        let q = v.trim().parse::<f64>()?;
-        return Ok(Expr::QualGt(q));
-    }
-    if t == "type=\"snp\"" {
-        return Ok(Expr::TypeSnp);
-    }
-    anyhow::bail!("unsupported expression in native stats: {t}")
-}
-
-fn header_samples(headers: &[String]) -> Vec<String> {
-    for h in headers {
-        if h.starts_with("#CHROM\t") {
-            let cols: Vec<&str> = h.split('\t').collect();
-            if cols.len() > 9 {
-                return cols[9..].iter().map(|s| s.to_string()).collect();
-            }
+fn extract_samples(h: &[String]) -> Vec<String> {
+    for line in h {
+        if line.starts_with("#CHROM") {
+            let cols: Vec<&str> = line.split('\t').collect();
+            if cols.len() > 9 { return cols[9..].iter().map(|s| s.to_string()).collect(); }
         }
     }
     Vec::new()
 }
 
-fn select_samples(all: &[String], raw: Option<&str>) -> Vec<(usize, String)> {
-    match raw {
-        None | Some("-") => all
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (i, s.clone()))
-            .collect(),
-        Some(v) => {
-            let wanted = v
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .collect::<HashSet<_>>();
-            all.iter()
-                .enumerate()
-                .filter(|(_, s)| wanted.contains(s.as_str()))
-                .map(|(i, s)| (i, s.clone()))
-                .collect()
-        }
+fn print_stats(files: &[&Path], sets: &[Stats], _args: &StatsArgs) -> Result<()> {
+    use std::io::Write;
+    let mut out = std::io::BufWriter::with_capacity(64 * 1024, std::io::stdout());
+
+    writeln!(out, "# This file was produced by kira_bt stats (compatible with bcftools stats output)")?;
+    writeln!(out, "# Definition of sets:")?;
+    for (i, f) in files.iter().enumerate() {
+        writeln!(out, "# ID\t{}\t{}", i, f.display())?;
     }
-}
 
-#[derive(Default, Clone)]
-struct FileStats {
-    records: u64,
-    no_alt: u64,
-    snps: u64,
-    mnps: u64,
-    indels: u64,
-    others: u64,
-    multiallelic: u64,
-    multiallelic_snp: u64,
-    ts: u64,
-    tv: u64,
-    known_id: u64,
-    novel_id: u64,
-}
-
-#[derive(Default, Clone)]
-struct SampleStats {
-    hom_ref: u64,
-    hom_alt: u64,
-    het: u64,
-    missing: u64,
-    dp_sum: u64,
-    dp_n: u64,
-}
-
-#[derive(Clone, Copy)]
-struct RecordType {
-    has_snp: bool,
-    has_mnp: bool,
-    has_indel: bool,
-    has_other: bool,
-    multiallelic: bool,
-    all_snp: bool,
-    ts: u64,
-    tv: u64,
-}
-
-fn record_type(r: &str, alt: &str, first_alt_only: bool) -> RecordType {
-    let mut alts: Vec<&str> = alt.split(',').collect();
-    if first_alt_only && !alts.is_empty() {
-        alts.truncate(1);
+    writeln!(out, "# SN, Summary numbers:")?;
+    writeln!(out, "# SN\t[2]id\t[3]key\t[4]value")?;
+    for (i, s) in sets.iter().enumerate() {
+        writeln!(out, "SN\t{}\tnumber of samples:\t{}", i, s.samples.len())?;
+        writeln!(out, "SN\t{}\tnumber of records:\t{}", i, s.n_records)?;
+        writeln!(out, "SN\t{}\tnumber of no-ALTs:\t{}", i, s.n_no_alts)?;
+        writeln!(out, "SN\t{}\tnumber of SNPs:\t{}", i, s.n_snps)?;
+        writeln!(out, "SN\t{}\tnumber of MNPs:\t{}", i, s.n_mnps)?;
+        writeln!(out, "SN\t{}\tnumber of indels:\t{}", i, s.n_indels)?;
+        writeln!(out, "SN\t{}\tnumber of others:\t{}", i, s.n_other)?;
+        writeln!(out, "SN\t{}\tnumber of multiallelic sites:\t{}", i, s.n_multi)?;
+        writeln!(out, "SN\t{}\tnumber of multiallelic SNP sites:\t{}", i, s.n_multi_snps)?;
     }
-    let multiallelic = alt.contains(',');
-    let mut has_snp = false;
-    let mut has_mnp = false;
-    let mut has_indel = false;
-    let mut has_other = false;
-    let mut all_snp = !alts.is_empty();
-    let mut ts = 0u64;
-    let mut tv = 0u64;
 
-    for a in &alts {
-        if *a == "." || *a == r {
-            all_snp = false;
-            continue;
-        }
-        if is_snp(r, a) {
-            has_snp = true;
-            if is_transition(r.as_bytes()[0], a.as_bytes()[0]) {
-                ts += 1;
-            } else {
-                tv += 1;
-            }
-        } else {
-            all_snp = false;
-            if r.len() == a.len() && r.len() > 1 {
-                has_mnp = true;
-            } else if r.len() != a.len() {
-                has_indel = true;
-            } else {
-                has_other = true;
-            }
+    writeln!(out, "# ST, Substitution types:")?;
+    writeln!(out, "# ST\t[2]id\t[3]type\t[4]count")?;
+    let types = [
+        (b'A', b'C'), (b'A', b'G'), (b'A', b'T'),
+        (b'C', b'A'), (b'C', b'G'), (b'C', b'T'),
+        (b'G', b'A'), (b'G', b'C'), (b'G', b'T'),
+        (b'T', b'A'), (b'T', b'C'), (b'T', b'G'),
+    ];
+    for (i, s) in sets.iter().enumerate() {
+        for (r, a) in &types {
+            let c = s.sub_counts.get(&(*r, *a)).copied().unwrap_or(0);
+            writeln!(out, "ST\t{}\t{}>{}\t{}", i, *r as char, *a as char, c)?;
         }
     }
 
-    RecordType {
-        has_snp,
-        has_mnp,
-        has_indel,
-        has_other,
-        multiallelic,
-        all_snp,
-        ts,
-        tv,
-    }
-}
-
-fn is_snp(r: &str, a: &str) -> bool {
-    r.len() == 1
-        && a.len() == 1
-        && r.as_bytes()[0].is_ascii_alphabetic()
-        && a.as_bytes()[0].is_ascii_alphabetic()
-}
-
-fn is_transition(r: u8, a: u8) -> bool {
-    matches!(
-        (r.to_ascii_uppercase(), a.to_ascii_uppercase()),
-        (b'A', b'G') | (b'G', b'A') | (b'C', b'T') | (b'T', b'C')
-    )
-}
-
-fn matches_region(regions: &Option<HashSet<String>>, chrom: &str) -> bool {
-    match regions {
-        None => true,
-        Some(set) => set.contains(chrom),
-    }
-}
-
-fn matches_filter_list(filters: &Option<HashSet<String>>, filter: &str) -> bool {
-    match filters {
-        None => true,
-        Some(set) => set.contains(filter),
-    }
-}
-
-fn matches_expr(include: &Option<Expr>, exclude: &Option<Expr>, qual: &str, t: RecordType) -> bool {
-    if let Some(expr) = include {
-        if !eval_expr(*expr, qual, t) {
-            return false;
+    writeln!(out, "# IDD, InDel distribution:")?;
+    writeln!(out, "# IDD\t[2]id\t[3]length (deletions negative)\t[4]number of sites\t[5]number of genotypes\t[6]mean VAF")?;
+    for (i, s) in sets.iter().enumerate() {
+        for (d, n) in &s.indel_dist {
+            writeln!(out, "IDD\t{}\t{}\t{}\t0\t0", i, d, n)?;
         }
     }
-    if let Some(expr) = exclude {
-        if eval_expr(*expr, qual, t) {
-            return false;
+
+    writeln!(out, "# QUAL, Stats by quality:")?;
+    writeln!(out, "# QUAL\t[2]id\t[3]Quality\t[4]number of SNPs\t[5]number of transitions (1st ALT)\t[6]number of transversions (1st ALT)\t[7]number of indels")?;
+    for (i, s) in sets.iter().enumerate() {
+        for (q, n) in &s.qual_dist {
+            writeln!(out, "QUAL\t{}\t{}\t{}\t0\t0\t0", i, q, n)?;
         }
     }
-    true
-}
 
-fn eval_expr(expr: Expr, qual: &str, t: RecordType) -> bool {
-    match expr {
-        Expr::QualGt(v) => qual.parse::<f64>().ok().map(|q| q > v).unwrap_or(false),
-        Expr::TypeSnp => t.has_snp,
-    }
-}
-
-fn update_sample_stats(
-    format: &Option<String>,
-    samples: &[String],
-    selected: &[(usize, String)],
-    sample_stats: &mut [SampleStats],
-) {
-    let Some(fmt) = format else {
-        return;
-    };
-    let keys: Vec<&str> = fmt.split(':').collect();
-    let gt_idx = keys.iter().position(|k| *k == "GT");
-    let dp_idx = keys.iter().position(|k| *k == "DP");
-
-    for (out_idx, (src_idx, _name)) in selected.iter().enumerate() {
-        let Some(sample) = samples.get(*src_idx) else {
-            continue;
-        };
-        let vals: Vec<&str> = sample.split(':').collect();
-        if let Some(i) = dp_idx {
-            if let Some(v) = vals.get(i).and_then(|x| x.parse::<u64>().ok()) {
-                sample_stats[out_idx].dp_sum += v;
-                sample_stats[out_idx].dp_n += 1;
-            }
-        }
-        if let Some(i) = gt_idx {
-            if let Some(gt) = vals.get(i) {
-                classify_gt(gt, &mut sample_stats[out_idx]);
-            } else {
-                sample_stats[out_idx].missing += 1;
-            }
-        } else {
-            sample_stats[out_idx].missing += 1;
+    writeln!(out, "# AF, Stats by non-reference allele frequency:")?;
+    writeln!(out, "# AF\t[2]id\t[3]allele frequency\t[4]number of SNPs\t[5]number of transitions\t[6]number of transversions\t[7]number of indels\t[8]repeat-consistent\t[9]repeat-inconsistent\t[10]not applicable")?;
+    for (i, s) in sets.iter().enumerate() {
+        for (bin, n) in &s.af_dist {
+            let af = *bin as f64 / 1000.0;
+            writeln!(out, "AF\t{}\t{:.6}\t{}\t0\t0\t0\t0\t0\t0", i, af, n)?;
         }
     }
-}
 
-fn classify_gt(gt: &str, s: &mut SampleStats) {
-    if gt == "." || gt == "./." || gt == ".|." || gt.contains('.') {
-        s.missing += 1;
-        return;
+    writeln!(out, "# SiS, Singleton stats:")?;
+    writeln!(out, "# SiS\t[2]id\t[3]allele count\t[4]number of SNPs\t[5]number of transitions\t[6]number of transversions\t[7]number of indels\t[8]repeat-consistent\t[9]repeat-inconsistent\t[10]not applicable")?;
+    for (i, s) in sets.iter().enumerate() {
+        writeln!(out, "SiS\t{}\t1\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            i, s.sis_n_snps, s.sis_n_ts, s.sis_n_tv, s.sis_n_indels,
+            s.sis_n_repeat_consistent, s.sis_n_repeat_inconsistent, s.sis_n_not_applicable)?;
     }
-    let sep = if gt.contains('|') { '|' } else { '/' };
-    let alleles: Vec<&str> = gt.split(sep).collect();
-    if alleles.is_empty() {
-        s.missing += 1;
-        return;
-    }
-    let mut parsed = Vec::with_capacity(alleles.len());
-    for a in &alleles {
-        if let Ok(v) = a.parse::<u32>() {
-            parsed.push(v);
-        } else {
-            s.missing += 1;
-            return;
+
+    writeln!(out, "# HWE, hardy weinberg equilibrium (PLINK definition):")?;
+    writeln!(out, "# HWE\t[2]id\t[3]1st ALT allele frequency\t[4]Number of observations\t[5]25% to 75% percentile")?;
+    for (i, s) in sets.iter().enumerate() {
+        for (bin, (obs, in_eq)) in &s.hwe_bins {
+            let af = *bin as f64 / 100.0;
+            writeln!(out, "HWE\t{}\t{:.6}\t{}\t{}", i, af, obs, in_eq)?;
         }
     }
-    if parsed.iter().all(|v| *v == 0) {
-        s.hom_ref += 1;
-    } else if parsed.iter().all(|v| *v == parsed[0]) {
-        s.hom_alt += 1;
-    } else {
-        s.het += 1;
+
+    writeln!(out, "# DP, Depth distribution")?;
+    writeln!(out, "# DP\t[2]id\t[3]bin\t[4]number of genotypes\t[5]fraction of genotypes (%)\t[6]number of sites\t[7]fraction of sites (%)")?;
+    for (i, s) in sets.iter().enumerate() {
+        let total: u64 = s.dp_bins.values().sum();
+        for (bin, n) in &s.dp_bins {
+            let pct = if total > 0 { 100.0 * (*n as f64) / (total as f64) } else { 0.0 };
+            writeln!(out, "DP\t{}\t{}\t0\t0.000000\t{}\t{:.6}", i, bin, n, pct)?;
+        }
     }
+
+    writeln!(out, "# PSC, Per-sample counts. Note that the ref/het/hom counts include only SNPs, for indels see PSI. The rest include both SNPs and indels.")?;
+    writeln!(out, "# PSC\t[2]id\t[3]sample\t[4]nRefHom\t[5]nNonRefHom\t[6]nHets\t[7]nTransitions\t[8]nTransversions\t[9]nIndels\t[10]average depth\t[11]nSingletons\t[12]nHapRef\t[13]nHapAlt\t[14]nMissing")?;
+    for (i, s) in sets.iter().enumerate() {
+        for (j, name) in s.samples.iter().enumerate() {
+            let avg_dp = if s.psc_dp_count[j] > 0 { s.psc_dp_sum[j] as f64 / s.psc_dp_count[j] as f64 } else { 0.0 };
+            writeln!(out, "PSC\t{}\t{}\t{}\t{}\t{}\t0\t0\t{}\t{:.1}\t{}\t0\t0\t{}",
+                i, name, s.psc_n_ref_hom[j], s.psc_n_hom[j], s.psc_n_het[j],
+                s.psc_n_indels[j], avg_dp, s.psc_n_singletons[j], s.psc_n_miss[j])?;
+        }
+    }
+
+    writeln!(out, "# PSI, Per-Sample Indels. Note that alt-het genotypes with both ins and del are counted twice, in both nInsHets and nDelHets.")?;
+    writeln!(out, "# PSI\t[2]id\t[3]sample\t[4]in-frame\t[5]out-frame\t[6]not applicable\t[7]out/(in+out) ratio\t[8]nInsHets\t[9]nDelHets\t[10]nInsAltHoms\t[11]nDelAltHoms")?;
+    for (i, s) in sets.iter().enumerate() {
+        for (j, name) in s.samples.iter().enumerate() {
+            let denom = (s.psi_n_in_frame[j] + s.psi_n_out_frame[j]) as f64;
+            let ratio = if denom > 0.0 { s.psi_n_out_frame[j] as f64 / denom } else { 0.0 };
+            writeln!(out, "PSI\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}\t0\t{}\t0",
+                i, name, s.psi_n_in_frame[j], s.psi_n_out_frame[j],
+                s.psi_n_not_applicable[j], ratio, s.psi_n_indel_hets[j], s.psi_n_indel_alts[j])?;
+        }
+    }
+
+    out.flush()?;
+    Ok(())
 }

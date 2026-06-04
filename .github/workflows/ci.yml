@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: Format check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
+      - run: cargo clippy --features cli --all-targets -- -D warnings -A clippy::all -W clippy::correctness -W clippy::suspicious
+
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-${{ matrix.os }}
+      - name: Build (default features)
+        run: cargo build --release
+      - name: Build (no default features)
+        run: cargo build --release --no-default-features
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kira-bt-${{ matrix.os }}
+          path: |
+            target/release/kira-bt
+            target/release/kira-bt.exe
+          if-no-files-found: ignore
+          retention-days: 7
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - name: cargo test --features cli --lib
+        run: cargo test --features cli --lib --no-fail-fast
+      - name: cargo test --features cli --doc
+        run: cargo test --features cli --doc --no-fail-fast
+
+  doc:
+    name: Doc build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: doc
+      - run: cargo doc --features cli --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"

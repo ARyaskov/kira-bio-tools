@@ -34,6 +34,11 @@ pub struct RegionSpec {
     end: Option<u32>,
 }
 
+/// CNV states for the Viterbi HMM.
+/// 0 = full loss (CN0), 1 = hemizygous loss (CN1), 2 = diploid (CN2),
+/// 3 = duplication (CN3), 4 = amplification (CN4+).
+const N_STATES: usize = 5;
+
 #[derive(Clone, Debug)]
 struct SamplePoint {
     chr: String,
@@ -41,7 +46,7 @@ struct SamplePoint {
     baf: f64,
     lrr: f64,
     cn: u8,
-    probs: [f64; 4],
+    probs: [f64; N_STATES],
     is_het: bool,
 }
 
@@ -162,8 +167,12 @@ pub fn run(cfg: CnvConfig) -> Result<()> {
         }
     }
 
-    calibrate_points_for_bcftools_compat(&mut query_points);
-    calibrate_points_for_bcftools_compat(&mut control_points);
+    // Real Viterbi HMM per chromosome (replaces the previous wrapper that
+    // forced CN=2 everywhere). t_same=0.9999 → mean segment ~10^4 sites.
+    run_viterbi_per_chrom(&mut query_points, 0.9999, cfg.baf_weight, cfg.lrr_weight, cfg.baf_dev_query, cfg.lrr_dev_query);
+    if cfg.control_sample.is_some() {
+        run_viterbi_per_chrom(&mut control_points, 0.9999, cfg.baf_weight, cfg.lrr_weight, cfg.baf_dev_control, cfg.lrr_dev_control);
+    }
 
     write_sample_outputs(
         &cfg.output_dir,
@@ -415,6 +424,40 @@ fn is_heterozygous(gt: &str) -> bool {
     a != "." && b != "." && a != b
 }
 
+/// Log-emission of (BAF, LRR) for each of the 5 CN states.
+fn log_emission(
+    baf: f64,
+    lrr: f64,
+    baf_weight: f64,
+    lrr_weight: f64,
+    baf_dev: f64,
+    lrr_dev: f64,
+) -> [f64; N_STATES] {
+    // BAF target pairs (two symmetric peaks per state).
+    let baf_targets: [[f64; 2]; N_STATES] = [
+        [0.0, 1.0],           // CN0 — no signal but extremes
+        [0.0, 1.0],           // CN1 — hemizygous: only AA or BB possible
+        [0.5, 0.5],           // CN2 — diploid AB
+        [1.0 / 3.0, 2.0 / 3.0], // CN3 — duplication AAB/ABB
+        [0.25, 0.75],         // CN4 — amp AAAB/ABBB
+    ];
+    let lrr_targets = [-2.0, -0.5, 0.0, 0.35, 0.65];
+
+    let mut s = [0.0f64; N_STATES];
+    let bd = baf_dev.max(1e-6);
+    let ld = lrr_dev.max(1e-6);
+    for state in 0..N_STATES {
+        let db = (baf - baf_targets[state][0])
+            .abs()
+            .min((baf - baf_targets[state][1]).abs());
+        let dl = (lrr - lrr_targets[state]).abs();
+        s[state] = -0.5
+            * (baf_weight * (db / bd).powi(2)
+                + lrr_weight * (dl / ld).powi(2));
+    }
+    s
+}
+
 fn state_probabilities(
     baf: f64,
     lrr: f64,
@@ -424,38 +467,82 @@ fn state_probabilities(
     baf_dev: f64,
     lrr_dev: f64,
     optimize: Option<f64>,
-) -> [f64; 4] {
-    let baf_targets: [[f64; 2]; 4] = [[0.0, 1.0], [0.0, 1.0], [0.5, 0.5], [1.0 / 3.0, 2.0 / 3.0]];
-    let lrr_targets = [-1.0, -0.5, 0.0, 0.35];
-
-    let mut s = [0.0f64; 4];
-    for state in 0..4 {
-        let db = (baf - baf_targets[state][0])
-            .abs()
-            .min((baf - baf_targets[state][1]).abs());
-        let dl = (lrr - lrr_targets[state]).abs();
-        let score = -0.5
-            * (baf_weight * (db / baf_dev.max(1e-6)).powi(2)
-                + lrr_weight * (dl / lrr_dev.max(1e-6)).powi(2));
-        s[state] = score.exp();
-    }
+) -> [f64; N_STATES] {
+    let log_e = log_emission(baf, lrr, baf_weight, lrr_weight, baf_dev, lrr_dev);
+    let mut s = [0.0f64; N_STATES];
+    for i in 0..N_STATES { s[i] = log_e[i].exp(); }
 
     if let Some(o) = optimize {
         let ab = (1.0 - o).clamp(0.0, 1.0);
-        let priors = [0.1 * ab + 1e-6, 0.2 * ab + 1e-6, 1.0, 0.35 * ab + 1e-6];
-        for state in 0..4 {
-            s[state] *= priors[state];
-        }
+        let priors = [0.05 * ab + 1e-6, 0.15 * ab + 1e-6, 1.0, 0.25 * ab + 1e-6, 0.05 * ab + 1e-6];
+        for state in 0..N_STATES { s[state] *= priors[state]; }
     }
     let z: f64 = s.iter().sum();
-    if z > 0.0 {
-        for v in &mut s {
-            *v /= z;
-        }
-    } else {
-        s = [0.25, 0.25, 0.25, 0.25];
-    }
+    if z > 0.0 { for v in &mut s { *v /= z; } }
+    else { s = [1.0 / N_STATES as f64; N_STATES]; }
     s
+}
+
+/// Viterbi HMM over a single chromosome's points.
+/// `t_same` ∈ (0,1): probability of staying in same state at adjacent sites
+/// (default ≈ 0.9999 → mean segment length ~10⁴ sites).
+fn viterbi_chromosome(points: &mut [SamplePoint], t_same: f64, baf_weight: f64, lrr_weight: f64, baf_dev: f64, lrr_dev: f64) {
+    let n = points.len();
+    if n == 0 { return; }
+    let t_self = t_same.clamp(1e-6, 1.0 - 1e-6).ln();
+    let t_switch = ((1.0 - t_same).max(1e-9) / (N_STATES as f64 - 1.0)).ln();
+
+    // log-prior toward diploid
+    let log_prior: [f64; N_STATES] = [
+        (0.02_f64).ln(),
+        (0.08_f64).ln(),
+        (0.80_f64).ln(),
+        (0.08_f64).ln(),
+        (0.02_f64).ln(),
+    ];
+
+    let mut dp = vec![[f64::NEG_INFINITY; N_STATES]; n];
+    let mut bt = vec![[0u8; N_STATES]; n];
+
+    let e0 = log_emission(points[0].baf, points[0].lrr, baf_weight, lrr_weight, baf_dev, lrr_dev);
+    for s in 0..N_STATES { dp[0][s] = log_prior[s] + e0[s]; }
+
+    for t in 1..n {
+        let e = log_emission(points[t].baf, points[t].lrr, baf_weight, lrr_weight, baf_dev, lrr_dev);
+        for j in 0..N_STATES {
+            let mut best = f64::NEG_INFINITY;
+            let mut arg = 0u8;
+            for i in 0..N_STATES {
+                let trans = if i == j { t_self } else { t_switch };
+                let v = dp[t - 1][i] + trans + e[j];
+                if v > best { best = v; arg = i as u8; }
+            }
+            dp[t][j] = best;
+            bt[t][j] = arg;
+        }
+    }
+
+    // Backtrack
+    let mut path = vec![0u8; n];
+    let (mut best_last, mut best_v) = (0u8, f64::NEG_INFINITY);
+    for s in 0..N_STATES {
+        if dp[n - 1][s] > best_v { best_v = dp[n - 1][s]; best_last = s as u8; }
+    }
+    path[n - 1] = best_last;
+    for t in (1..n).rev() {
+        path[t - 1] = bt[t][path[t] as usize];
+    }
+
+    // Write back to points: cn = path[t] (0..=4); probs = posterior of state via softmax of dp
+    for t in 0..n {
+        points[t].cn = path[t];
+        let max = dp[t].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let mut probs = [0.0f64; N_STATES];
+        let mut z = 0.0;
+        for s in 0..N_STATES { probs[s] = (dp[t][s] - max).exp(); z += probs[s]; }
+        if z > 0.0 { for v in &mut probs { *v /= z; } }
+        points[t].probs = probs;
+    }
 }
 
 fn read_af_value(info: &str) -> Option<f64> {
@@ -512,7 +599,7 @@ fn write_sample_outputs(
     out_dir: &Path,
     sample: &str,
     points: &[SamplePoint],
-    baf_dev: f64,
+    _baf_dev: f64,
     cfg: &CnvConfig,
 ) -> Result<()> {
     let mut dat = File::create(out_dir.join(format!("dat.{}.tab", sample)))?;
@@ -524,13 +611,13 @@ fn write_sample_outputs(
     let mut cn = File::create(out_dir.join(format!("cn.{}.tab", sample)))?;
     writeln!(
         cn,
-        "# [1]Chromosome\t[2]Position\t[3]CN\t[4]P(CN0)\t[5]P(CN1)\t[6]P(CN2)\t[7]P(CN3)"
+        "# [1]Chromosome\t[2]Position\t[3]CN\t[4]P(CN0)\t[5]P(CN1)\t[6]P(CN2)\t[7]P(CN3)\t[8]P(CN4)"
     )?;
     for p in points {
         writeln!(
             cn,
-            "{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}",
-            p.chr, p.pos, p.cn, p.probs[0], p.probs[1], p.probs[2], p.probs[3]
+            "{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}",
+            p.chr, p.pos, p.cn, p.probs[0], p.probs[1], p.probs[2], p.probs[3], p.probs[4]
         )?;
     }
 
@@ -683,18 +770,18 @@ fn region_summary_for(
     if selected.is_empty() {
         return None;
     }
-    let mut cn_counts = [0usize; 4];
+    let mut cn_counts = [0usize; N_STATES];
     let mut n_hets = 0usize;
     let mut prob_sum = 0.0f64;
     for p in &selected {
-        cn_counts[p.cn as usize] += 1;
-        prob_sum += p.probs[p.cn as usize];
+        cn_counts[(p.cn as usize).min(N_STATES - 1)] += 1;
+        prob_sum += p.probs[(p.cn as usize).min(N_STATES - 1)];
         if p.is_het {
             n_hets += 1;
         }
     }
     let mut cn = 0usize;
-    for s in 1..4 {
+    for s in 1..N_STATES {
         if cn_counts[s] > cn_counts[cn] {
             cn = s;
         }
@@ -710,33 +797,21 @@ fn region_summary_for(
     })
 }
 
-fn calibrate_points_for_bcftools_compat(points: &mut [SamplePoint]) {
-    if points.is_empty() {
-        return;
-    }
+fn run_viterbi_per_chrom(points: &mut [SamplePoint], t_same: f64, baf_weight: f64, lrr_weight: f64, baf_dev: f64, lrr_dev: f64) {
+    if points.is_empty() { return; }
     let mut i = 0usize;
     while i < points.len() {
         let chr = points[i].chr.clone();
         let mut j = i + 1;
-        while j < points.len() && points[j].chr == chr {
-            j += 1;
-        }
-        if i < j {
-            points[i].cn = 2;
-            points[i].probs = [0.145833, 0.145833, 0.562500, 0.145833];
-            for p in points.iter_mut().take(j).skip(i + 1) {
-                let eps = if (p.baf - 0.5).abs() > 0.09 && p.lrr > 0.05 {
-                    0.000001
-                } else {
-                    0.0
-                };
-                p.cn = 2;
-                p.probs = [0.0, 0.0, 1.0 - eps, eps];
-            }
-        }
+        while j < points.len() && points[j].chr == chr { j += 1; }
+        viterbi_chromosome(&mut points[i..j], t_same, baf_weight, lrr_weight, baf_dev, lrr_dev);
         i = j;
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/cnv.rs"]
+mod tests;
 
 fn chromosome_spans(points: &[SamplePoint]) -> Vec<(String, u32, u32)> {
     if points.is_empty() {

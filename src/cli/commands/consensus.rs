@@ -6,7 +6,7 @@ use crate::VcfReader;
 use crate::cli::args::ConsensusArgs;
 
 pub fn cmd_consensus(args: ConsensusArgs) -> Result<()> {
-    let cfg = parse_args(&args.bcftools_args);
+    let cfg = ConsensusCfg::from_args(&args);
     let ref_path = cfg
         .ref_fasta
         .as_ref()
@@ -17,12 +17,13 @@ pub fn cmd_consensus(args: ConsensusArgs) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("missing input VCF/BCF for consensus"))?;
 
     let mut records = read_fasta(ref_path);
-    apply_vcf_variants(&mut records, input_path, &cfg)?;
+    let chain_events = apply_vcf_variants(&mut records, input_path, &cfg)?;
     apply_masks(&mut records, &cfg.masks);
 
     if let Some(chain_path) = cfg.chain_path {
-        write_chain(&chain_path, &records, &cfg.masks)?;
+        write_chain(&chain_path, &records, &chain_events)?;
     }
+    let _ = &chain_events;
 
     for (name, seq) in records {
         println!(">{name}");
@@ -50,6 +51,33 @@ struct ConsensusCfg {
     mark_ins: Option<String>,
     mark_snv: Option<String>,
     masks: Vec<MaskSpec>,
+}
+
+impl ConsensusCfg {
+    fn from_args(a: &ConsensusArgs) -> Self {
+        let mut cfg = ConsensusCfg::default();
+        cfg.input = a.input.clone();
+        cfg.ref_fasta = a.fasta_ref.clone();
+        cfg.chain_path = a.chain.clone();
+        cfg.sample = a.samples.clone();
+        cfg.sample_file = a.samples_file.clone();
+        cfg.haplotype = Some(a.haplotype.clone());
+        cfg.iupac = a.iupac_codes;
+        cfg.missing_char = a.missing.as_ref().and_then(|s| s.chars().next());
+        cfg.absent_char = a.absent.as_ref().and_then(|s| s.chars().next());
+        cfg.include_expr = a.include.clone();
+        cfg.exclude_expr = a.exclude.clone();
+        cfg.mark_del = a.mark_del.clone();
+        cfg.mark_ins = a.mark_ins.clone();
+        cfg.mark_snv = a.mark_snv.clone();
+        if let Some(p) = &a.mask {
+            cfg.masks.push(MaskSpec {
+                bed_path: p.clone(),
+                mode: a.mask_with.clone().unwrap_or_else(|| "N".to_string()),
+            });
+        }
+        cfg
+    }
 }
 
 #[derive(Clone)]
@@ -189,11 +217,14 @@ fn read_fasta(path: &PathBuf) -> Vec<(String, String)> {
     out
 }
 
+/// Per-chrom indel events captured for chain output: (ref_pos1_1based, ref_len, alt_len).
+pub type ChainEvents = Vec<(String, Vec<(u32, usize, usize)>)>;
+
 fn apply_vcf_variants(
     records: &mut [(String, String)],
     input_path: &PathBuf,
     cfg: &ConsensusCfg,
-) -> Result<()> {
+) -> Result<ChainEvents> {
     let mut reader = open_reader_with_bcf_fallback(input_path)?;
     let headers = reader.header()?;
     let sample_name = resolve_sample_name(cfg);
@@ -232,12 +263,20 @@ fn apply_vcf_variants(
     }
 
     edits.sort_by(|a, b| a.chrom.cmp(&b.chrom).then_with(|| b.pos1.cmp(&a.pos1)));
+    let mut events_by_chrom: std::collections::BTreeMap<String, Vec<(u32, usize, usize)>> = std::collections::BTreeMap::new();
+    for edit in &edits {
+        events_by_chrom.entry(edit.chrom.clone()).or_default()
+            .push((edit.pos1, edit.ref_allele.len(), edit.alt_allele.len()));
+    }
+    for v in events_by_chrom.values_mut() {
+        v.sort_by_key(|t| t.0);
+    }
     for edit in edits {
         if let Some((_name, seq)) = records.iter_mut().find(|(n, _)| *n == edit.chrom) {
             apply_edit(seq, &edit);
         }
     }
-    Ok(())
+    Ok(events_by_chrom.into_iter().collect())
 }
 
 fn resolve_consensus_alleles(
@@ -705,14 +744,53 @@ fn apply_masks(records: &mut [(String, String)], masks: &[MaskSpec]) {
     }
 }
 
-fn write_chain(path: &PathBuf, records: &[(String, String)], masks: &[MaskSpec]) -> Result<()> {
+fn write_chain(path: &PathBuf, records: &[(String, String)], events: &ChainEvents) -> Result<()> {
     let mut out = String::new();
-    out.push_str("kira-bt-consensus-chain-v1\n");
+    let mut chain_id: u32 = 1;
+    let by_chrom: std::collections::HashMap<&String, &Vec<(u32, usize, usize)>> =
+        events.iter().map(|(c, e)| (c, e)).collect();
+
     for (name, seq) in records {
-        out.push_str(&format!("{name}\tlen={}\n", seq.len()));
-    }
-    for m in masks {
-        out.push_str(&format!("mask\t{}\t{}\n", m.bed_path.display(), m.mode));
+        let consensus_len = seq.len();
+        let evs = by_chrom.get(name).copied();
+        let ref_len = if let Some(es) = evs {
+            let net_delta: i64 = es.iter().map(|(_, r, a)| *a as i64 - *r as i64).sum();
+            (consensus_len as i64 - net_delta).max(0) as usize
+        } else { consensus_len };
+
+        out.push_str(&format!(
+            "chain {score} {tname} {tsize} + {tstart} {tend} {qname} {qsize} + {qstart} {qend} {id}\n",
+            score = 0,
+            tname = name,
+            tsize = ref_len,
+            tstart = 0,
+            tend = ref_len,
+            qname = name,
+            qsize = consensus_len,
+            qstart = 0,
+            qend = consensus_len,
+            id = chain_id,
+        ));
+        chain_id += 1;
+
+        if let Some(es) = evs {
+            let mut ref_cursor: u32 = 0;
+            let mut q_cursor: u32 = 0;
+            for (pos1, rl, al) in es {
+                let pos0 = pos1.saturating_sub(1);
+                let block = pos0.saturating_sub(ref_cursor);
+                let dt = *rl as u32;
+                let dq = *al as u32;
+                out.push_str(&format!("{}\t{}\t{}\n", block, dt, dq));
+                ref_cursor = pos0 + dt;
+                q_cursor = q_cursor + block + dq;
+            }
+            let tail = (ref_len as u32).saturating_sub(ref_cursor);
+            out.push_str(&format!("{}\n", tail));
+        } else {
+            out.push_str(&format!("{}\n", consensus_len));
+        }
+        out.push('\n');
     }
     fs::write(path, out)?;
     Ok(())

@@ -7,7 +7,7 @@ use noodles_bgzf as bgzf;
 use crate::bgzf::structs::{Result, VirtualPosition};
 
 pub struct BgzfReader<R: Read> {
-    inner: bgzf::Reader<R>,
+    inner: bgzf::io::Reader<R>,
 }
 
 impl BgzfReader<File> {
@@ -20,7 +20,7 @@ impl BgzfReader<File> {
 impl<R: Read> BgzfReader<R> {
     pub fn new(reader: R) -> Self {
         Self {
-            inner: bgzf::Reader::new(reader),
+            inner: bgzf::io::Reader::new(reader),
         }
     }
 

@@ -3,23 +3,27 @@ use fxhash::FxHashMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::entry_processing::{insert_or_update_entry, make_position_key, parse_chrom_and_pos};
+use super::entry_processing::{EntryEntry, insert_or_update_entry, make_position_key};
 use super::multiallelic::split_info_for_allele;
 use crate::annotate::builder_v2::StringPool;
 use crate::annotate::structs::ani::ANI_STR_NONE;
 use crate::annotate::structs::ani::AniEntry;
+use crate::annotate::structs::ani::ContigDict;
 use crate::annotate::structs::bundle::FieldNumber;
 use crate::util::url_encode_info_value;
 use crate::vcf::simd::SimdVcfParser;
 
 pub fn process_vcf_line_multiallelic_simd(
     line: &[u8],
-    entries_map: &mut FxHashMap<u64, (AniEntry, usize)>,
+    contigs: &mut ContigDict,
+    entries_map: &mut FxHashMap<u64, EntryEntry>,
     pool: &mut StringPool,
     insertion_order: &mut usize,
     duplicates_skipped: &AtomicUsize,
+    collisions_detected: &AtomicUsize,
     multiallelic_count: &AtomicUsize,
     field_meta: &HashMap<String, FieldNumber>,
+    format_meta: &HashMap<String, FieldNumber>,
     expected_sample_count: usize,
     debug: bool,
 ) -> Result<usize> {
@@ -27,10 +31,13 @@ pub fn process_vcf_line_multiallelic_simd(
         return Ok(0);
     };
 
-    let (chr_id, pos) = match parse_chrom_and_pos(parsed.chrom, parsed.pos) {
-        Some(v) => v,
-        None => return Ok(0),
+    let Ok(pos) = parsed.pos.parse::<u32>() else {
+        return Ok(0);
     };
+    // Insert-on-first-seen: source VCF body wins the contig id assignment.
+    // (When a `##contig=` block was parsed up-front into `contigs`, this is a
+    // pure dict lookup with no insertion.)
+    let chr_id = contigs.insert(parsed.chrom);
 
     let alt_alleles: Vec<&str> = parsed.alt.split(',').collect();
 
@@ -57,16 +64,13 @@ pub fn process_vcf_line_multiallelic_simd(
         }
     }
 
-    let (format_ofs, samples_ofs) = if samples.is_empty() {
-        (ANI_STR_NONE, ANI_STR_NONE)
+    let format_ofs = if samples.is_empty() {
+        ANI_STR_NONE
     } else {
-        let fmt_ofs = match parsed.format {
+        match parsed.format {
             Some(fmt) if fmt != "." => pool.append_cstr(fmt) as u32,
             _ => ANI_STR_NONE,
-        };
-        let joined = samples.join("\t");
-        let samp_ofs = pool.append_cstr(&joined) as u32;
-        (fmt_ofs, samp_ofs)
+        }
     };
 
     for (alt_idx, alt_single) in alt_alleles.iter().enumerate() {
@@ -80,6 +84,23 @@ pub fn process_vcf_line_multiallelic_simd(
         let key = make_position_key(chr_id, pos, parsed.ref_allele.trim(), alt_single);
 
         let alt_ofs = pool.append_cstr(alt_single);
+        let samples_ofs = if samples.is_empty() {
+            ANI_STR_NONE
+        } else {
+            let entry_samples = if alt_alleles.len() > 1 {
+                split_format_samples_for_allele(
+                    &samples,
+                    parsed.format,
+                    alt_idx,
+                    alt_alleles.len(),
+                    format_meta,
+                )
+            } else {
+                samples.iter().map(|s| (*s).to_string()).collect()
+            };
+            let joined = entry_samples.join("\t");
+            pool.append_cstr(&joined) as u32
+        };
 
         let (info_ofs, info_len) = if !parsed.info.is_empty() && parsed.info != "." {
             let final_info = if alt_alleles.len() > 1 {
@@ -113,6 +134,7 @@ pub fn process_vcf_line_multiallelic_simd(
             entries_map,
             insertion_order,
             duplicates_skipped,
+            collisions_detected,
             debug,
             parsed.chrom,
             pos,
@@ -124,46 +146,99 @@ pub fn process_vcf_line_multiallelic_simd(
     Ok(alt_alleles.len())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::process_vcf_line_multiallelic_simd;
-    use crate::annotate::builder_v2::StringPool;
-    use crate::annotate::structs::ani::ANI_STR_NONE;
-    use crate::annotate::structs::bundle::FieldNumber;
-    use crate::util::read_cstring;
-    use fxhash::FxHashMap;
-    use std::collections::HashMap;
-    use std::sync::atomic::AtomicUsize;
+fn split_format_samples_for_allele(
+    samples: &[&str],
+    format: Option<&str>,
+    alt_idx: usize,
+    alt_count: usize,
+    format_meta: &HashMap<String, FieldNumber>,
+) -> Vec<String> {
+    let Some(format) = format else {
+        return samples.iter().map(|s| (*s).to_string()).collect();
+    };
+    let keys: Vec<&str> = format.split(':').collect();
+    if keys.is_empty() || format_meta.is_empty() {
+        return samples.iter().map(|s| (*s).to_string()).collect();
+    }
+    let numbers: Vec<Option<FieldNumber>> = keys
+        .iter()
+        .map(|k| format_meta.get(*k).copied())
+        .collect();
+    if !numbers
+        .iter()
+        .any(|n| matches!(n, Some(FieldNumber::A | FieldNumber::R | FieldNumber::G)))
+    {
+        return samples.iter().map(|s| (*s).to_string()).collect();
+    }
+    samples
+        .iter()
+        .map(|sample| {
+            let vals: Vec<&str> = sample.split(':').collect();
+            let mut out = Vec::with_capacity(keys.len());
+            for (idx, number) in numbers.iter().enumerate() {
+                let raw = vals.get(idx).copied().unwrap_or(".");
+                out.push(split_format_value_for_allele(
+                    raw,
+                    *number,
+                    alt_idx,
+                    alt_count,
+                ));
+            }
+            out.join(":")
+        })
+        .collect()
+}
 
-    #[test]
-    fn test_samples_are_not_truncated() {
-        let line = b"1\t3000002\tid\tC\tT\t99\tq99\tFLAG;IINT=88,99;IFLT=8.8,9.9;ISTR=888,999\tGT:FINT:FFLT:FSTR\t1|1:88,99:8.8,9.9:888,999\t0|1:77:7.7:77";
-        let mut entries_map: FxHashMap<u64, (crate::annotate::structs::ani::AniEntry, usize)> =
-            FxHashMap::default();
-        let mut pool = StringPool::new();
-        let mut insertion_order = 0usize;
-        let duplicates_skipped = AtomicUsize::new(0);
-        let multiallelic_count = AtomicUsize::new(0);
-        let field_meta: HashMap<String, FieldNumber> = HashMap::new();
-
-        let processed = process_vcf_line_multiallelic_simd(
-            line,
-            &mut entries_map,
-            &mut pool,
-            &mut insertion_order,
-            &duplicates_skipped,
-            &multiallelic_count,
-            &field_meta,
-            2,
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(processed, 1);
-        let entry = entries_map.values().next().unwrap().0;
-        assert_ne!(entry.samples_ofs, ANI_STR_NONE);
-        let pool_bytes = pool.materialize().unwrap();
-        let samples = read_cstring(&pool_bytes, entry.samples_ofs as usize);
-        assert_eq!(samples, "1|1:88,99:8.8,9.9:888,999\t0|1:77:7.7:77");
+fn split_format_value_for_allele(
+    raw: &str,
+    number: Option<FieldNumber>,
+    alt_idx: usize,
+    alt_count: usize,
+) -> String {
+    if raw.is_empty() || raw == "." {
+        return raw.to_string();
+    }
+    let Some(number) = number else {
+        return raw.to_string();
+    };
+    match number {
+        FieldNumber::A => raw
+            .split(',')
+            .nth(alt_idx)
+            .unwrap_or(".")
+            .to_string(),
+        FieldNumber::R => {
+            let values: Vec<&str> = raw.split(',').collect();
+            let ref_val = values.first().copied().unwrap_or(".");
+            let alt_val = values.get(alt_idx + 1).copied().unwrap_or(".");
+            format!("{ref_val},{alt_val}")
+        }
+        FieldNumber::G => {
+            let values: Vec<&str> = raw.split(',').collect();
+            let allele = alt_idx + 1;
+            let idx00 = genotype_index(0, 0);
+            let idx01 = genotype_index(0, allele);
+            let idx11 = genotype_index(allele, allele);
+            if values.len() != (alt_count + 1) * (alt_count + 2) / 2 {
+                return raw.to_string();
+            }
+            format!(
+                "{},{},{}",
+                values.get(idx00).copied().unwrap_or("."),
+                values.get(idx01).copied().unwrap_or("."),
+                values.get(idx11).copied().unwrap_or(".")
+            )
+        }
+        _ => raw.to_string(),
     }
 }
+
+fn genotype_index(a: usize, b: usize) -> usize {
+    let lo = a.min(b);
+    let hi = a.max(b);
+    hi * (hi + 1) / 2 + lo
+}
+
+#[cfg(test)]
+#[path = "../../../tests/unit/annotate_builder_v2_vcf_processing.rs"]
+mod tests;

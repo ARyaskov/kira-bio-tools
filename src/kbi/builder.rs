@@ -9,7 +9,9 @@ use crate::vcf::VcfRecord;
 pub struct KbiBuilder {
     entries: Vec<(u64, u64)>,
     gamma: f64,
-    rehash_limit: u32,
+    // Renamed in kira_kv_engine 0.6.0: BuildConfig::rehash_limit -> max_rehash.
+    // Kept locally as max_rehash so we map 1:1 to the underlying field.
+    max_rehash: u32,
     salt: u64,
 }
 
@@ -18,7 +20,7 @@ impl KbiBuilder {
         Self {
             entries: Vec::new(),
             gamma: 1.27,
-            rehash_limit: 16,
+            max_rehash: 16,
             salt: 0xC0FF_EE00_D15E_A5E,
         }
     }
@@ -84,8 +86,9 @@ impl KbiBuilder {
 
         let mut config = IndexConfig::default();
         config.mph_config.gamma = self.gamma;
-        config.mph_config.rehash_limit = self.rehash_limit;
-        config.mph_config.salt = self.salt;
+        // kira_kv_engine 0.6.0: BuildConfig field renamed rehash_limit -> max_rehash.
+        config.mph_config.max_rehash = self.max_rehash;
+        config.mph_config.seed = self.salt;
         config.auto_detect_numeric = true;
 
         let index = IndexBuilder::new()

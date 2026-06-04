@@ -1,336 +1,296 @@
-use anyhow::Result;
-use flate2::read::MultiGzDecoder;
-use std::collections::{BTreeMap, HashMap};
-use std::fs;
-use std::io::{Cursor, Read};
-
-use crate::VcfReader;
 use crate::cli::args::IsecArgs;
+use crate::vcf::UnifiedVcfReader;
+use anyhow::{Context, Result, bail};
+use fxhash::FxHashMap;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::PathBuf;
+
+#[derive(Clone, Copy, Debug)]
+enum Collapse { None, All, Snps, Indels, Both, Some_, Id }
+
+fn parse_collapse(s: Option<&str>) -> Result<Collapse> {
+    let Some(s) = s else { return Ok(Collapse::None); };
+    match s {
+        "none" => Ok(Collapse::None),
+        "all" => Ok(Collapse::All),
+        "snps" => Ok(Collapse::Snps),
+        "indels" => Ok(Collapse::Indels),
+        "both" => Ok(Collapse::Both),
+        "some" => Ok(Collapse::Some_),
+        "id" => Ok(Collapse::Id),
+        _ => bail!("-c: unknown collapse mode '{}', expected none|all|snps|indels|both|some|id", s),
+    }
+}
+
+fn parse_apply_filters(s: Option<&str>) -> Option<Vec<String>> {
+    s.map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
+}
+
+fn filter_passes(line: &str, allow: &Option<Vec<String>>) -> bool {
+    let Some(allow) = allow else { return true; };
+    let cols: Vec<&str> = line.splitn(8, '\t').collect();
+    if cols.len() < 7 { return true; }
+    let f = cols[6];
+    f.split(';').any(|tok| allow.iter().any(|a| a == tok))
+}
+
+fn is_snp(refa: &str, alt: &str) -> bool {
+    if refa.len() != 1 { return false; }
+    alt.split(',').all(|a| a.len() == 1 && a != "*" && a != ".")
+}
+
+fn is_indel(refa: &str, alt: &str) -> bool {
+    alt.split(',').any(|a| a.len() != refa.len() && a != "*" && a != ".")
+}
+
+fn alt_set(alt: &str) -> Vec<&str> {
+    alt.split(',').filter(|a| *a != "*" && *a != ".").collect()
+}
+
+fn site_key_for(line: &str, mode: Collapse) -> Option<String> {
+    let cols: Vec<&str> = line.splitn(8, '\t').collect();
+    if cols.len() < 5 { return None; }
+    let chrom = cols[0];
+    let pos = cols[1];
+    let id = cols[2];
+    let refa = cols[3];
+    let alt = cols[4];
+    let k = match mode {
+        Collapse::None => format!("{}\t{}\t{}\t{}", chrom, pos, refa, alt),
+        Collapse::All => format!("{}\t{}", chrom, pos),
+        Collapse::Snps => if is_snp(refa, alt) { format!("snp\t{}\t{}", chrom, pos) } else { format!("{}\t{}\t{}\t{}", chrom, pos, refa, alt) },
+        Collapse::Indels => if is_indel(refa, alt) { format!("indel\t{}\t{}", chrom, pos) } else { format!("{}\t{}\t{}\t{}", chrom, pos, refa, alt) },
+        Collapse::Both => {
+            if is_snp(refa, alt) { format!("snp\t{}\t{}", chrom, pos) }
+            else if is_indel(refa, alt) { format!("indel\t{}\t{}", chrom, pos) }
+            else { format!("{}\t{}\t{}\t{}", chrom, pos, refa, alt) }
+        }
+        Collapse::Some_ => {
+            let mut alts = alt_set(alt);
+            alts.sort();
+            format!("some\t{}\t{}\t{}\t{}", chrom, pos, refa, alts.join("|"))
+        }
+        Collapse::Id => format!("id\t{}", id),
+    };
+    Some(k)
+}
+
+fn key_matches_some(a: &str, b: &str) -> bool {
+    let pa: Vec<&str> = a.splitn(5, '\t').collect();
+    let pb: Vec<&str> = b.splitn(5, '\t').collect();
+    if pa.len() < 5 || pb.len() < 5 { return a == b; }
+    if pa[0] != "some" || pa[..4] != pb[..4] { return a == b; }
+    let sa: std::collections::HashSet<&str> = pa[4].split('|').collect();
+    let sb: std::collections::HashSet<&str> = pb[4].split('|').collect();
+    sa.intersection(&sb).next().is_some()
+}
+
+/// BED/region set for `-R`/`-r` filtering. Intervals are stored 0-based half-open per chromosome,
+/// sorted by start; lookup is by 1-based VCF position.
+struct RegionSet {
+    by_chr: FxHashMap<String, Vec<(u32, u32)>>,
+}
+impl RegionSet {
+    fn contains(&self, chrom: &str, pos1: u32) -> bool {
+        let Some(v) = self.by_chr.get(chrom) else { return false };
+        let p0 = pos1.saturating_sub(1);
+        let idx = v.partition_point(|&(s, _)| s <= p0);
+        idx > 0 && {
+            let (s, e) = v[idx - 1];
+            s <= p0 && p0 < e
+        }
+    }
+}
+fn load_regions(file: Option<&std::path::Path>, regions: Option<&str>) -> Result<Option<RegionSet>> {
+    let mut by_chr: FxHashMap<String, Vec<(u32, u32)>> = FxHashMap::default();
+    if let Some(f) = file {
+        for line in BufReader::new(File::open(f).with_context(|| format!("open regions {:?}", f))?).lines() {
+            let l = line?;
+            let t = l.trim();
+            if t.is_empty() || t.starts_with('#') { continue; }
+            let mut it = t.split('\t');
+            let (Some(c), Some(s), Some(e)) = (it.next(), it.next(), it.next()) else { continue };
+            if let (Ok(s), Ok(e)) = (s.parse::<u32>(), e.parse::<u32>()) {
+                by_chr.entry(c.to_string()).or_default().push((s, e));
+            }
+        }
+    } else if let Some(r) = regions {
+        // -r chr[:start-end][,...]  (1-based inclusive)
+        for tok in r.split(',') {
+            let tok = tok.trim();
+            if tok.is_empty() { continue; }
+            match tok.split_once(':') {
+                None => { by_chr.entry(tok.to_string()).or_default().push((0, u32::MAX)); }
+                Some((c, range)) => {
+                    let (a, b) = range.split_once('-').unwrap_or((range, range));
+                    if let (Ok(a), Ok(b)) = (a.parse::<u32>(), b.parse::<u32>()) {
+                        by_chr.entry(c.to_string()).or_default().push((a.saturating_sub(1), b));
+                    }
+                }
+            }
+        }
+    } else {
+        return Ok(None);
+    }
+    for v in by_chr.values_mut() { v.sort_unstable(); }
+    Ok(Some(RegionSet { by_chr }))
+}
 
 pub fn cmd_isec(args: IsecArgs) -> Result<()> {
-    let cfg = parse_isec_args(&args.bcftools_args)?;
-    let mut inputs = Vec::<InputData>::new();
-
-    for path in &args.inputs {
-        let mut r = VcfReader::open(path)?;
-        let headers = r.header()?;
-        let mut recs = Vec::<Rec>::new();
-        while let Some(rec) = r.next_record()? {
-            if !cfg.matches_regions(&rec.chrom, rec.pos) {
-                continue;
-            }
-            if !cfg.matches_expr(&rec.ref_allele) {
-                continue;
-            }
-            let key = format!(
-                "{}\t{}\t{}\t{}",
-                rec.chrom, rec.pos, rec.ref_allele, rec.alt
-            );
-            let full_line = format!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}{}",
-                rec.chrom,
-                rec.pos,
-                rec.id,
-                rec.ref_allele,
-                rec.alt,
-                rec.qual,
-                rec.filter,
-                rec.info,
-                match &rec.format {
-                    Some(f) => {
-                        let mut s = String::new();
-                        s.push('\t');
-                        s.push_str(f);
-                        for sample in &rec.samples {
-                            s.push('\t');
-                            s.push_str(sample);
-                        }
-                        s
-                    }
-                    None => String::new(),
-                }
-            );
-            recs.push(Rec {
-                chrom: rec.chrom,
-                pos: rec.pos,
-                ref_allele: rec.ref_allele,
-                alt: rec.alt,
-                key,
-                full_line,
-            });
-        }
-        inputs.push(InputData {
-            headers,
-            records: recs,
-        });
-    }
-
-    let n_inputs = inputs.len();
-    let mut map = BTreeMap::<String, Vec<bool>>::new();
-    let mut selected_lines = HashMap::<(usize, String), String>::new();
-
-    for (i, inp) in inputs.iter().enumerate() {
-        for r in &inp.records {
-            map.entry(r.key.clone())
-                .or_insert_with(|| vec![false; n_inputs])[i] = true;
-            selected_lines.insert((i, r.key.clone()), r.full_line.clone());
+    let mut inputs: Vec<PathBuf> = args.inputs.clone();
+    if let Some(fl) = &args.file_list {
+        for line in BufReader::new(File::open(fl)?).lines() {
+            let l = line?;
+            let t = l.trim();
+            if t.is_empty() || t.starts_with('#') { continue; }
+            inputs.push(PathBuf::from(t));
         }
     }
+    if inputs.len() < 2 { bail!("isec: need at least 2 inputs"); }
 
-    let mut selected_keys = Vec::<(String, Vec<bool>)>::new();
-    for (k, bits) in map {
-        if cfg.pass_bits(&bits) {
-            selected_keys.push((k, bits));
+    let nfiles_spec = parse_nfiles(args.nfiles.as_deref(), inputs.len(), args.complement)?;
+    let write_files = parse_write(args.write.as_deref(), inputs.len())?;
+    let collapse = parse_collapse(args.collapse.as_deref())?;
+    let apply_filters = parse_apply_filters(args.apply_filters.as_deref());
+    let region_set = load_regions(args.regions_file.as_deref(), args.regions.as_deref())?;
+
+    let mut sites: FxHashMap<String, Vec<bool>> = FxHashMap::default();
+    let mut headers: Vec<Vec<String>> = Vec::with_capacity(inputs.len());
+    let mut records: Vec<Vec<(String, String)>> = Vec::with_capacity(inputs.len());
+
+    for (i, p) in inputs.iter().enumerate() {
+        let mut r = UnifiedVcfReader::open(p).with_context(|| format!("open {:?}", p))?;
+        headers.push(r.header()?);
+        let mut recs: Vec<(String, String)> = Vec::new();
+        while let Some(line) = r.read_line()? {
+            if line.is_empty() || line.as_bytes()[0] == b'#' { continue; }
+            if !filter_passes(&line, &apply_filters) { continue; }
+            if let Some(rs) = &region_set {
+                let mut c = line.splitn(3, '\t');
+                let chrom = c.next().unwrap_or("");
+                let pos: u32 = c.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+                if !rs.contains(chrom, pos) { continue; }
+            }
+            let Some(k) = site_key_for(&line, collapse) else { continue; };
+            sites.entry(k.clone()).or_insert_with(|| vec![false; inputs.len()])[i] = true;
+            recs.push((k, line));
         }
+        records.push(recs);
     }
 
-    if let Some(w) = cfg.write_index {
-        let idx = w.saturating_sub(1);
-        if let Some(inp) = inputs.get(idx) {
-            for h in &inp.headers {
-                println!("{h}");
-            }
-            for (k, _bits) in &selected_keys {
-                if let Some(line) = selected_lines.get(&(idx, k.clone())) {
-                    println!("{line}");
+    if matches!(collapse, Collapse::Some_) {
+        let keys: Vec<String> = sites.keys().cloned().collect();
+        let mut merged: FxHashMap<String, Vec<bool>> = FxHashMap::default();
+        let mut used = vec![false; keys.len()];
+        for i in 0..keys.len() {
+            if used[i] { continue; }
+            used[i] = true;
+            let mut acc = sites.get(&keys[i]).cloned().unwrap_or_default();
+            for j in (i + 1)..keys.len() {
+                if used[j] { continue; }
+                if key_matches_some(&keys[i], &keys[j]) {
+                    used[j] = true;
+                    let other = sites.get(&keys[j]).cloned().unwrap_or_default();
+                    for (a, b) in acc.iter_mut().zip(other.iter()) { *a = *a || *b; }
                 }
             }
+            merged.insert(keys[i].clone(), acc);
         }
-        return Ok(());
+        sites = merged;
     }
 
-    for (k, bits) in selected_keys {
-        let mut cols = k.split('\t');
-        let chrom = cols.next().unwrap_or(".");
-        let pos = cols.next().unwrap_or("0");
-        let r = cols.next().unwrap_or(".");
-        let a = cols.next().unwrap_or(".");
-        let bitmap: String = bits.iter().map(|b| if *b { '1' } else { '0' }).collect();
-        println!("{chrom}\t{pos}\t{r}\t{a}\t{bitmap}");
+    let dst = args.prefix.clone();
+    if let Some(d) = &dst { fs::create_dir_all(d).with_context(|| format!("create dir {:?}", d))?; }
+
+    let mut writers: Vec<Option<BufWriter<File>>> = Vec::with_capacity(inputs.len());
+    if let Some(dir) = &dst {
+        for i in 0..inputs.len() {
+            if write_files.is_some() && !write_files.as_ref().unwrap().contains(&i) {
+                writers.push(None); continue;
+            }
+            let path = dir.join(format!("{:04}.vcf", i));
+            let mut w = BufWriter::with_capacity(1 << 20, File::create(&path)?);
+            for h in &headers[i] { writeln!(w, "{}", h)?; }
+            writers.push(Some(w));
+        }
     }
 
+    for (i, recs) in records.iter().enumerate() {
+        if let Some(d) = &dst {
+            if write_files.as_ref().map_or(false, |w| !w.contains(&i)) { continue; }
+            let path = d.join(format!("sites_{:04}.txt", i));
+            let mut sw = BufWriter::with_capacity(1 << 20, File::create(&path)?);
+            for (k, line) in recs {
+                let presence = sites.get(k).cloned().unwrap_or_default();
+                if !matches_nfiles(&presence, &nfiles_spec) { continue; }
+                if let Some(w) = writers[i].as_mut() { writeln!(w, "{}", line)?; }
+                let bits: String = presence.iter().map(|b| if *b { '1' } else { '0' }).collect();
+                let cols: Vec<&str> = line.splitn(8, '\t').collect();
+                if cols.len() >= 5 {
+                    writeln!(sw, "{}\t{}\t{}\t{}\t{}", cols[0], cols[1], cols[3], cols[4], bits)?;
+                }
+            }
+            sw.flush()?;
+        } else {
+            let mut stdout = BufWriter::with_capacity(1 << 20, std::io::stdout());
+            if i == 0 {
+                for h in &headers[0] { writeln!(stdout, "{}", h)?; }
+            }
+            for (k, line) in recs {
+                let presence = sites.get(k).cloned().unwrap_or_default();
+                if !matches_nfiles(&presence, &nfiles_spec) { continue; }
+                if write_files.as_ref().map_or(true, |w| w.contains(&i)) {
+                    writeln!(stdout, "{}", line)?;
+                }
+            }
+            stdout.flush()?;
+            break;
+        }
+    }
+
+    for w in writers.iter_mut() {
+        if let Some(w) = w { w.flush()?; }
+    }
     Ok(())
 }
 
-#[derive(Default)]
-struct IsecCfg {
-    n_mode: Option<NMode>,
-    complement: bool,
-    write_index: Option<usize>,
-    regions: Vec<Region>,
-    include_strlen_ref_eq_2: bool,
-}
+#[derive(Debug)]
+enum NSpec { Exact(usize), AtLeast(usize), Mask(Vec<bool>) }
 
-#[derive(Clone, Copy)]
-enum NMode {
-    Eq(usize),
-    Ge(usize),
-    Le(usize),
-}
-
-#[derive(Clone)]
-struct Region {
-    chrom: String,
-    start: Option<u32>,
-    end: Option<u32>,
-}
-
-impl IsecCfg {
-    fn matches_regions(&self, chrom: &str, pos: u32) -> bool {
-        if self.regions.is_empty() {
-            return true;
-        }
-        self.regions.iter().any(|r| {
-            if r.chrom != chrom {
-                return false;
-            }
-            if let Some(s) = r.start {
-                if pos < s {
-                    return false;
-                }
-            }
-            if let Some(e) = r.end {
-                if pos > e {
-                    return false;
-                }
-            }
-            true
-        })
+fn parse_nfiles(s: Option<&str>, n: usize, complement: bool) -> Result<NSpec> {
+    if complement { return Ok(NSpec::Mask(std::iter::once(true).chain(std::iter::repeat(false).take(n - 1)).collect())); }
+    let Some(s) = s else { return Ok(NSpec::AtLeast(1)); };
+    if let Some(rest) = s.strip_prefix('=') {
+        return Ok(NSpec::Exact(rest.parse().context("-n =N: parse N")?));
     }
-
-    fn matches_expr(&self, ref_allele: &str) -> bool {
-        if self.include_strlen_ref_eq_2 {
-            return ref_allele.len() == 2;
-        }
-        true
+    if let Some(rest) = s.strip_prefix('+') {
+        return Ok(NSpec::AtLeast(rest.parse().context("-n +N: parse N")?));
     }
+    if let Some(rest) = s.strip_prefix('~') {
+        let bits: Vec<bool> = rest.chars().map(|c| c == '1').collect();
+        if bits.len() != n { bail!("-n ~MASK: mask length {} != #files {}", bits.len(), n); }
+        return Ok(NSpec::Mask(bits));
+    }
+    Ok(NSpec::Exact(s.parse().context("-n N: parse N")?))
+}
 
-    fn pass_bits(&self, bits: &[bool]) -> bool {
-        let c = bits.iter().filter(|b| **b).count();
-        if self.complement {
-            return bits.first().copied().unwrap_or(false) && c == 1;
-        }
-        if let Some(n) = self.n_mode {
-            return match n {
-                NMode::Eq(v) => c == v,
-                NMode::Ge(v) => c >= v,
-                NMode::Le(v) => c <= v,
-            };
-        }
-        true
+fn matches_nfiles(presence: &[bool], spec: &NSpec) -> bool {
+    let n_present = presence.iter().filter(|b| **b).count();
+    match spec {
+        NSpec::Exact(k) => n_present == *k,
+        NSpec::AtLeast(k) => n_present >= *k,
+        NSpec::Mask(mask) => presence.iter().zip(mask.iter()).all(|(p, m)| !*m || *p),
     }
 }
 
-fn parse_isec_args(args: &[String]) -> Result<IsecCfg> {
-    let mut cfg = IsecCfg::default();
-    let mut i = 0usize;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-n" => {
-                i += 1;
-                let v = args
-                    .get(i)
-                    .ok_or_else(|| anyhow::anyhow!("missing value for -n"))?;
-                cfg.n_mode = Some(parse_n(v)?);
-            }
-            "-C" => cfg.complement = true,
-            "-w" => {
-                i += 1;
-                cfg.write_index = Some(
-                    args.get(i)
-                        .ok_or_else(|| anyhow::anyhow!("missing value for -w"))?
-                        .parse::<usize>()?,
-                );
-            }
-            "-r" => {
-                i += 1;
-                let v = args
-                    .get(i)
-                    .ok_or_else(|| anyhow::anyhow!("missing value for -r"))?;
-                for part in v.split(',') {
-                    if let Some(r) = parse_region(part) {
-                        cfg.regions.push(r);
-                    }
-                }
-            }
-            "-R" | "-T" => {
-                i += 1;
-                let p = args
-                    .get(i)
-                    .ok_or_else(|| anyhow::anyhow!("missing value for -R/-T"))?;
-                for r in load_regions_from_file(p)? {
-                    cfg.regions.push(r);
-                }
-            }
-            "-i" => {
-                i += 1;
-                let e = args
-                    .get(i)
-                    .ok_or_else(|| anyhow::anyhow!("missing value for -i"))?;
-                if e.trim() == "STRLEN(REF)==2" {
-                    cfg.include_strlen_ref_eq_2 = true;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    Ok(cfg)
-}
-
-fn parse_n(s: &str) -> Result<NMode> {
-    if let Some(v) = s.strip_prefix('=') {
-        return Ok(NMode::Eq(v.parse::<usize>()?));
-    }
-    if let Some(v) = s.strip_prefix('+') {
-        return Ok(NMode::Ge(v.parse::<usize>()?));
-    }
-    if let Some(v) = s.strip_prefix('-') {
-        return Ok(NMode::Le(v.parse::<usize>()?));
-    }
-    Ok(NMode::Eq(s.parse::<usize>()?))
-}
-
-fn parse_region(s: &str) -> Option<Region> {
-    if let Some((chrom, rest)) = s.split_once(':') {
-        if let Some((a, b)) = rest.split_once('-') {
-            return Some(Region {
-                chrom: chrom.to_string(),
-                start: a.parse::<u32>().ok(),
-                end: b.parse::<u32>().ok(),
-            });
-        }
-        return Some(Region {
-            chrom: chrom.to_string(),
-            start: rest.parse::<u32>().ok(),
-            end: rest.parse::<u32>().ok(),
-        });
-    }
-    Some(Region {
-        chrom: s.to_string(),
-        start: None,
-        end: None,
-    })
-}
-
-fn load_regions_from_file(path: &str) -> Result<Vec<Region>> {
-    let bytes = fs::read(path)?;
-    let text = decode_bytes(&bytes, path)?;
+fn parse_write(s: Option<&str>, n: usize) -> Result<Option<Vec<usize>>> {
+    let Some(s) = s else { return Ok(None); };
     let mut out = Vec::new();
-    for line in text.lines() {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') {
-            continue;
-        }
-        if t.contains(':') {
-            if let Some(r) = parse_region(t) {
-                out.push(r);
-            }
-            continue;
-        }
-        let cols: Vec<&str> = t.split_whitespace().collect();
-        if cols.len() >= 3 {
-            let start0 = cols[1].parse::<u32>().ok();
-            let end = cols[2].parse::<u32>().ok();
-            out.push(Region {
-                chrom: cols[0].to_string(),
-                start: start0.map(|v| v + 1),
-                end,
-            });
-        } else if cols.len() == 2 {
-            let p = cols[1].parse::<u32>().ok();
-            out.push(Region {
-                chrom: cols[0].to_string(),
-                start: p,
-                end: p,
-            });
-        }
+    for tok in s.split(',') {
+        let i: usize = tok.parse().context("-w: parse index")?;
+        if i == 0 || i > n { bail!("-w: index {i} out of range 1..={n}"); }
+        out.push(i - 1);
     }
-    Ok(out)
-}
-
-fn decode_bytes(bytes: &[u8], path_hint: &str) -> Result<String> {
-    let is_gz = (bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b)
-        || path_hint.ends_with(".gz")
-        || path_hint.ends_with(".bgz");
-    if is_gz {
-        let mut s = String::new();
-        MultiGzDecoder::new(Cursor::new(bytes)).read_to_string(&mut s)?;
-        return Ok(s);
-    }
-    String::from_utf8(bytes.to_vec()).map_err(|_| anyhow::anyhow!("non-UTF8 region file"))
-}
-
-struct InputData {
-    headers: Vec<String>,
-    records: Vec<Rec>,
-}
-
-struct Rec {
-    chrom: String,
-    pos: u32,
-    ref_allele: String,
-    alt: String,
-    key: String,
-    full_line: String,
+    Ok(Some(out))
 }

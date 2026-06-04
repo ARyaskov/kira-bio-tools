@@ -4,7 +4,20 @@ use crate::VcfReader;
 use crate::cli::args::RohArgs;
 
 pub fn cmd_roh(args: RohArgs) -> Result<()> {
-    let cfg = parse_roh_args(&args.bcftools_args)?;
+    let mut bopts: Vec<String> = Vec::new();
+    if let Some(s) = &args.samples { bopts.push("-s".into()); bopts.push(s.clone()); }
+    if let Some(p) = &args.samples_file { bopts.push("-S".into()); bopts.push(p.to_string_lossy().into_owned()); }
+    if let Some(s) = &args.regions { bopts.push("-r".into()); bopts.push(s.clone()); }
+    if let Some(p) = &args.regions_file { bopts.push("-R".into()); bopts.push(p.to_string_lossy().into_owned()); }
+    if let Some(s) = &args.targets { bopts.push("-t".into()); bopts.push(s.clone()); }
+    if let Some(p) = &args.targets_file { bopts.push("-T".into()); bopts.push(p.to_string_lossy().into_owned()); }
+    if let Some(s) = &args.include { bopts.push("-i".into()); bopts.push(s.clone()); }
+    if let Some(s) = &args.exclude { bopts.push("-e".into()); bopts.push(s.clone()); }
+    if args.ignore_homref { bopts.push("-I".into()); }
+    if args.include_noalt { bopts.push("--include-noalt".into()); }
+    if args.skip_indels { bopts.push("-X".into()); }
+    bopts.extend(args.passthrough.iter().cloned());
+    let cfg = parse_roh_args(&bopts)?;
     let mut reader = VcfReader::open(&args.input)?;
     let headers = reader.header()?;
     let sample = first_sample_name(&headers).unwrap_or_else(|| "sample".to_string());

@@ -36,6 +36,12 @@ pub struct AnnotationBundle {
     pub info: Vec<StructuredInfoField>,
     pub format_str: Option<String>,
     pub format_samples: Vec<String>,
+    /// REF allele as recorded in the source `.ani` for this entry. Needed by
+    /// the bcftools-style vcmp allele matcher in `cpu_v2::vcmp` so that
+    /// differently-padded indels between source and target VCFs still
+    /// resolve to the same biological event. `String::new()` for the rare
+    /// legacy code paths that don't carry it.
+    pub db_ref: String,
 }
 
 impl AnnotationBundle {
@@ -141,16 +147,15 @@ fn url_decode_info_value(s: &str) -> String {
     }
 }
 
-fn infer_field_type(key: &str) -> FieldType {
-    match key {
-        k if k.starts_with("I") && k.chars().nth(1).map_or(false, |c| c.is_uppercase()) => {
-            FieldType::Integer
-        }
-        k if k.starts_with("F") && k.chars().nth(1).map_or(false, |c| c.is_uppercase()) => {
-            FieldType::Float
-        }
-        _ => FieldType::String,
-    }
+fn infer_field_type(_key: &str) -> FieldType {
+    // bcftools never guesses INFO/FORMAT type from the key name — it requires
+    // an explicit `##INFO=<…,Type=…>` header. The legacy heuristic
+    // ("starts-with I → Integer, F → Float") miscategorised real SnpEff/VEP
+    // keys like IMPACT (String), FATHMM (String), FUNSEQ (String) and
+    // silently corrupted output. Default to String; proper types are loaded
+    // from the embedded `.ani` header by `load_field_metadata` in
+    // cpu_v2::field_metadata.
+    FieldType::String
 }
 
 fn remap_a(values: &[String], allele_map: &[Option<usize>]) -> Vec<String> {

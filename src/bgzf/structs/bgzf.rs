@@ -174,4 +174,4 @@ pub const BGZF_EXTRA_LEN: u16 = 6;
 pub const BGZF_SI1: u8 = 0x42;
 pub const BGZF_SI2: u8 = 0x43;
 pub const BGZF_BLOCK_SIZE: usize = 64 * 1024;
-pub const CHUNK_SIZE: usize = 256 * 1024;
+pub const CHUNK_SIZE: usize = 64 * 1024 - 256;

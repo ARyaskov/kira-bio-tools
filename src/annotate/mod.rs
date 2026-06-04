@@ -1,6 +1,8 @@
 pub mod builder_v2;
 pub mod constants;
 pub mod cpu_v2;
+pub mod ktile;
+pub mod postproc;
 pub mod reader;
 pub mod structs;
 

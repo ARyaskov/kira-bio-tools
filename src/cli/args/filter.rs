@@ -64,5 +64,8 @@ pub struct FilterArgs {
     #[arg(long = "no-version", default_value_t = false)]
     pub no_version: bool,
 
+    #[arg(short = 'W', long = "write-index", num_args = 0..=1, default_missing_value = "csi")]
+    pub write_index: Option<String>,
+
     pub input: PathBuf,
 }

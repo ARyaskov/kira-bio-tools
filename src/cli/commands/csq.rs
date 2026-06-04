@@ -6,7 +6,18 @@ use crate::VcfReader;
 use crate::cli::args::CsqArgs;
 
 pub fn cmd_csq(args: CsqArgs) -> Result<()> {
-    let cfg = parse_args(&args.bcftools_args)?;
+    let mut argv: Vec<String> = Vec::new();
+    if let Some(p) = &args.input { argv.push(p.to_string_lossy().into_owned()); }
+    if let Some(p) = &args.fasta_ref { argv.push("-f".into()); argv.push(p.to_string_lossy().into_owned()); }
+    if let Some(p) = &args.gff { argv.push("-g".into()); argv.push(p.to_string_lossy().into_owned()); }
+    if let Some(s) = &args.samples { argv.push("-s".into()); argv.push(s.clone()); }
+    if let Some(p) = &args.samples_file { argv.push("-S".into()); argv.push(p.to_string_lossy().into_owned()); }
+    if let Some(s) = &args.regions { argv.push("-r".into()); argv.push(s.clone()); }
+    if let Some(p) = &args.regions_file { argv.push("-R".into()); argv.push(p.to_string_lossy().into_owned()); }
+    if let Some(p) = &args.output { argv.push("-o".into()); argv.push(p.to_string_lossy().into_owned()); }
+    if let Some(s) = &args.include { argv.push("-i".into()); argv.push(s.clone()); }
+    if let Some(s) = &args.exclude { argv.push("-e".into()); argv.push(s.clone()); }
+    let cfg = parse_args(&argv)?;
     let gff_path = cfg
         .gff
         .as_ref()
@@ -400,31 +411,63 @@ fn annotate_variant(
             continue;
         }
         let effect = infer_effect(rec, alt, tx, fasta);
+        let aa_field = if tx.biotype == "protein_coding" {
+            coding_aa_change(rec, alt, tx, fasta)
+                .map(|(ar, aa)| {
+                    let cds_pos = build_genome_to_cds_map(tx).get(&rec.pos).copied().unwrap_or(0);
+                    let aa_pos = (cds_pos / 3) + 1;
+                    format!("{}{}>{}", aa_pos, ar, aa)
+                })
+                .unwrap_or_else(|| ".".to_string())
+        } else { ".".to_string() };
+        let dna_change = format!("{}{}>{}", rec.pos, rec.ref_allele, alt);
         let consequence = format!(
-            "{}|{}|{}|{}|{}|{}{}>{}|{}{}>{}",
+            "{}|{}|{}|{}|{}|{}|{}",
             effect,
             tx.gene_name,
             tx.id,
             tx.biotype,
             tx.strand,
-            rec.pos,
-            rec.ref_allele,
-            alt,
-            rec.pos,
-            rec.ref_allele,
-            alt
+            aa_field,
+            dna_change,
         );
         out.push(consequence);
     }
 
     if out.is_empty() {
         out.push(format!(
-            "intergenic|.|.|.|.|{}{}>{}|{}{}>{}",
-            rec.pos, rec.ref_allele, alt, rec.pos, rec.ref_allele, alt
+            "intergenic|.|.|.|.|.|{}{}>{}",
+            rec.pos, rec.ref_allele, alt
         ));
     }
 
     out
+}
+
+/// Combine two adjacent phased SNVs that fall within the same codon
+/// into a single haplotype-aware aa change. Returns Some(combined_aa)
+/// when both variants on the same haplotype hit the same codon.
+fn combine_phased_codon(
+    var_a: (u32, char, char),
+    var_b: (u32, char, char),
+    tx: &Transcript,
+    fasta: &FastaDb,
+) -> Option<(u32, char, char)> {
+    let cds = build_cds_sequence(tx, fasta)?;
+    let g2c = build_genome_to_cds_map(tx);
+    let a_cds = *g2c.get(&var_a.0)? as usize;
+    let b_cds = *g2c.get(&var_b.0)? as usize;
+    let codon_a = a_cds / 3;
+    let codon_b = b_cds / 3;
+    if codon_a != codon_b { return None; }
+    let codon_start = codon_a * 3;
+    if codon_start + 3 > cds.len() { return None; }
+    let mut codon = cds[codon_start..codon_start + 3].as_bytes().to_vec();
+    let aa_ref = translate_codon(&cds[codon_start..codon_start + 3]);
+    codon[a_cds % 3] = if tx.strand == '-' { complement(var_a.2) as u8 } else { var_a.2 as u8 };
+    codon[b_cds % 3] = if tx.strand == '-' { complement(var_b.2) as u8 } else { var_b.2 as u8 };
+    let new_aa = translate_codon(std::str::from_utf8(&codon).ok()?);
+    Some((codon_a as u32 + 1, aa_ref, new_aa))
 }
 
 fn infer_effect(

@@ -18,7 +18,8 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::annotate::structs::ani::AniEntry;
+use crate::annotate::builder_v2::entry_processing::EntryEntry;
+use crate::annotate::structs::ani::{AniEntry, ContigDict};
 use crate::annotate::structs::bundle::FieldNumber;
 use crate::annotate::structs::tab::TabSchema;
 use crate::util::{extract_info_key, extract_info_number};
@@ -32,10 +33,16 @@ pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
     let mut reader = UnifiedVcfReader::open(input)?;
     let headers = reader.header()?;
 
-    let mut entries_map: FxHashMap<u64, (AniEntry, usize)> = FxHashMap::default();
+    // Pre-seed the contig dict from `##contig=` lines in the source VCF — gives
+    // a canonical id-order matching the source genome's declared contigs.
+    // Variants on contigs not declared in the header still get an id via
+    // first-seen insert inside vcf_processing.
+    let mut contigs = ContigDict::from_header_lines(headers.iter().map(String::as_str));
+    let mut entries_map: FxHashMap<u64, EntryEntry> = FxHashMap::default();
     let mut pool = StringPool::new();
 
     let field_meta = extract_info_metadata(&headers);
+    let format_meta = extract_format_metadata(&headers);
     let expected_sample_count = extract_sample_count_from_headers(&headers);
 
     save_vcf_headers_to_pool(&headers, &mut pool)?;
@@ -43,6 +50,7 @@ pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
 
     let total_variants = AtomicUsize::new(0);
     let duplicates_skipped = AtomicUsize::new(0);
+    let collisions_detected = AtomicUsize::new(0);
     let multiallelic_count = AtomicUsize::new(0);
 
     let mut insertion_order = 0usize;
@@ -58,12 +66,15 @@ pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
 
         let processed = process_vcf_line_multiallelic_simd(
             line.as_bytes(),
+            &mut contigs,
             &mut entries_map,
             &mut pool,
             &mut insertion_order,
             &duplicates_skipped,
+            &collisions_detected,
             &multiallelic_count,
             &field_meta,
+            &format_meta,
             expected_sample_count,
             debug,
         )?;
@@ -78,21 +89,24 @@ pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
         print_final_stats(
             &total_variants,
             &duplicates_skipped,
+            &collisions_detected,
             &multiallelic_count,
             &entries_map,
+            &contigs,
+            &pool,
             &start,
         );
     }
 
     let mut rows: Vec<(u64, AniEntry, usize)> = entries_map
         .into_iter()
-        .map(|(key, (entry, order))| (key, entry, order))
+        .map(|(key, ee)| (key, ee.entry, ee.order))
         .collect();
 
     rows.sort_unstable_by_key(|(_, _, order)| *order);
     let rows: Vec<(u64, AniEntry)> = rows.into_iter().map(|(k, e, _)| (k, e)).collect();
 
-    finalize_ani_index(rows, pool, output, timing)?;
+    finalize_ani_index(rows, pool, &contigs, output, timing)?;
 
     Ok(())
 }
@@ -148,7 +162,8 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
     let file = File::open(input)?;
     let reader = BufReader::new(file);
 
-    let mut entries_map: FxHashMap<u64, (AniEntry, usize)> = FxHashMap::default();
+    let mut contigs = ContigDict::default();
+    let mut entries_map: FxHashMap<u64, EntryEntry> = FxHashMap::default();
     let mut pool = StringPool::new();
 
     save_tab_headers_to_pool(&schema, &mut pool)?;
@@ -156,6 +171,7 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
 
     let total_variants = AtomicUsize::new(0);
     let duplicates_skipped = AtomicUsize::new(0);
+    let collisions_detected = AtomicUsize::new(0);
     let multiallelic_count = AtomicUsize::new(0);
 
     let mut insertion_order = 0usize;
@@ -173,10 +189,12 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
         let processed = process_tab_line_multiallelic(
             &line,
             &schema,
+            &mut contigs,
             &mut entries_map,
             &mut pool,
             &mut insertion_order,
             &duplicates_skipped,
+            &collisions_detected,
             &multiallelic_count,
             debug,
         )?;
@@ -191,21 +209,24 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
         print_final_stats(
             &total_variants,
             &duplicates_skipped,
+            &collisions_detected,
             &multiallelic_count,
             &entries_map,
+            &contigs,
+            &pool,
             &start,
         );
     }
 
     let mut rows: Vec<(u64, AniEntry, usize)> = entries_map
         .into_iter()
-        .map(|(key, (entry, order))| (key, entry, order))
+        .map(|(key, ee)| (key, ee.entry, ee.order))
         .collect();
 
     rows.sort_unstable_by_key(|(_, _, order)| *order);
     let rows: Vec<(u64, AniEntry)> = rows.into_iter().map(|(k, e, _)| (k, e)).collect();
 
-    finalize_ani_index(rows, pool, output, timing)?;
+    finalize_ani_index(rows, pool, &contigs, output, timing)?;
 
     Ok(())
 }
@@ -226,23 +247,15 @@ fn save_tab_headers_to_pool(schema: &TabSchema, pool: &mut StringPool) -> Result
             None => ".",
         };
 
-        let type_str = if col.key.starts_with('I') || col.key.ends_with("INT") {
-            "Integer"
-        } else if col.key.starts_with('F') || col.key.ends_with("FLT") || col.key.ends_with("FLOAT")
-        {
-            "Float"
-        } else if col.key.starts_with('S')
-            || col.key.ends_with("STR")
-            || col.key.ends_with("STRING")
-        {
-            "String"
-        } else {
-            "String"
-        };
-
+        // bcftools never guesses Type from the column name; the .tab format
+        // doesn't carry per-column types. We always declare `Type=String`
+        // here — the canonical place to override is a sibling `.hdr` file
+        // (parsed by `TabSchema::parse_header_file`) where the user provides
+        // explicit `##INFO=<…,Type=…>` lines that take precedence at lookup
+        // time (`load_field_metadata` in cpu_v2::field_metadata).
         let header = format!(
-            "##INFO=<ID={},Number={},Type={},Description=\"Annotation field\">",
-            col.key, number_str, type_str
+            "##INFO=<ID={key},Number={number_str},Type=String,Description=\"Annotation field\">",
+            key = col.key
         );
         pool.append_cstr(&header);
     }
@@ -252,7 +265,7 @@ fn save_tab_headers_to_pool(schema: &TabSchema, pool: &mut StringPool) -> Result
 
 fn report_progress(
     total_variants: &AtomicUsize,
-    entries_map: &FxHashMap<u64, (AniEntry, usize)>,
+    entries_map: &FxHashMap<u64, EntryEntry>,
     duplicates_skipped: &AtomicUsize,
 ) {
     let total = total_variants.load(Ordering::Relaxed);
@@ -261,34 +274,47 @@ fn report_progress(
     let dup_rate = (dups as f64 / total as f64) * 100.0;
 
     eprintln!(
-        "[ani-build] Progress: {} variants → {} unique entries ({} dups, {:.1}%)",
-        total, unique, dups, dup_rate
+        "[ani-build] Progress: {total} variants → {unique} unique entries ({dups} dups, {dup_rate:.1}%)"
     );
 }
 
 fn print_final_stats(
     total_variants: &AtomicUsize,
     duplicates_skipped: &AtomicUsize,
+    collisions_detected: &AtomicUsize,
     multiallelic_count: &AtomicUsize,
-    entries_map: &FxHashMap<u64, (AniEntry, usize)>,
+    entries_map: &FxHashMap<u64, EntryEntry>,
+    contigs: &ContigDict,
+    pool: &StringPool,
     start: &std::time::Instant,
 ) {
     let total = total_variants.load(Ordering::Relaxed);
     let dups = duplicates_skipped.load(Ordering::Relaxed);
+    let collisions = collisions_detected.load(Ordering::Relaxed);
     let multi = multiallelic_count.load(Ordering::Relaxed);
 
     eprintln!("[ani-build] Parse complete:");
-    eprintln!("  Total variants:     {}", total);
+    eprintln!("  Total variants:     {total}");
     eprintln!("  Unique entries:     {}", entries_map.len());
+    eprintln!("  Contigs:            {}", contigs.len());
     eprintln!(
-        "  Duplicates skipped: {} ({:.1}%)",
-        dups,
-        (dups as f64 / total.max(1) as f64) * 100.0
+        "  Duplicates skipped: {dups} ({rate:.1}%)",
+        rate = (dups as f64 / total.max(1) as f64) * 100.0
     );
+    if collisions > 0 {
+        eprintln!(
+            "  HASH COLLISIONS:    {collisions}  ← review previous warnings; \
+             previous entries were dropped"
+        );
+    }
     eprintln!(
-        "  Multiallelic:       {} ({:.1}%)",
-        multi,
-        (multi as f64 / total.max(1) as f64) * 100.0
+        "  Multiallelic:       {multi} ({rate:.1}%)",
+        rate = (multi as f64 / total.max(1) as f64) * 100.0
+    );
+    let hits = pool.intern_hits();
+    let saved_mb = pool.intern_bytes_saved() as f64 / (1024.0 * 1024.0);
+    eprintln!(
+        "  Intern hits:        {hits} ({saved_mb:.1} MB saved before deflate)"
     );
     eprintln!("  Parse time: {:.3}s", start.elapsed().as_secs_f64());
 }
@@ -395,6 +421,21 @@ fn extract_info_metadata(headers: &[String]) -> HashMap<String, FieldNumber> {
     meta
 }
 
+fn extract_format_metadata(headers: &[String]) -> HashMap<String, FieldNumber> {
+    let mut meta = HashMap::new();
+    for h in headers {
+        if !h.starts_with("##FORMAT=") {
+            continue;
+        }
+        if let Some(key) = extract_info_key(h) {
+            if let Some(number) = extract_info_number(h) {
+                meta.insert(key, number);
+            }
+        }
+    }
+    meta
+}
+
 fn extract_sample_count_from_headers(headers: &[String]) -> usize {
     for h in headers {
         if h.starts_with("#CHROM") {
@@ -409,42 +450,5 @@ fn extract_sample_count_from_headers(headers: &[String]) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::build_ani_index_from_tab;
-    use crate::annotate::structs::ani::AniIndex;
-    use std::fs;
-
-    #[test]
-    fn test_tab_infers_numbers_for_split_info() {
-        let dir = std::env::temp_dir();
-        let tab_path = dir.join("kira_tab_infer_test.tab");
-        let ani_path = dir.join("kira_tab_infer_test.ani");
-
-        let tab = "1\t1\tC\tA,T\t0,1.1\t1.1,0,2.2\n";
-        fs::write(&tab_path, tab).unwrap();
-
-        build_ani_index_from_tab(&tab_path, &ani_path, Some("CHROM,POS,REF,ALT,FA,FR")).unwrap();
-
-        let ani = AniIndex::open(&ani_path).unwrap();
-        let bundle = ani.lookup_exact("1", 1, "C", "T").unwrap();
-
-        let fa = bundle
-            .info
-            .iter()
-            .find(|f| f.key == "FA")
-            .map(|f| f.values.clone())
-            .unwrap();
-        let fr = bundle
-            .info
-            .iter()
-            .find(|f| f.key == "FR")
-            .map(|f| f.values.clone())
-            .unwrap();
-
-        assert_eq!(fa, vec!["1.1"]);
-        assert_eq!(fr, vec!["1.1", "2.2"]);
-
-        let _ = fs::remove_file(&tab_path);
-        let _ = fs::remove_file(&ani_path);
-    }
-}
+#[path = "../../../tests/unit/annotate_builder_v2.rs"]
+mod tests;

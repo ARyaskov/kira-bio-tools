@@ -75,7 +75,6 @@ impl ColumnSpec {
                 !upper.starts_with("CHROM")
                     && !upper.starts_with("POS")
                     && !upper.starts_with("REF")
-                    && !upper.starts_with("ALT")
                     && !upper.starts_with("FROM")
                     && !upper.starts_with("TO")
                     && !upper.starts_with("BEG")

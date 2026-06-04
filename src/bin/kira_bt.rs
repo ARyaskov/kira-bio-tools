@@ -111,6 +111,18 @@ enum Commands {
 
     #[command(about = "Intersections of VCF/BCF files")]
     Isec(IsecArgs),
+
+    #[command(about = "Build / manage .ktile sidecars for fast re-annotation")]
+    Tile(TileArgs),
+
+    #[command(about = "VCF/BCF conversion, view, subset and filter")]
+    View(ViewArgs),
+
+    #[command(about = "BAM viewer/filter (samtools view -b analog)")]
+    Samview(SamViewArgs),
+
+    #[command(about = "Fused align -> sort/markdup -> mpileup in one process (only VCF on disk)")]
+    Solid(SolidArgs),
 }
 
 fn main() -> Result<()> {
@@ -148,6 +160,10 @@ fn main() -> Result<()> {
         Commands::Polysomy(args) => cmd_polysomy(args),
         Commands::Merge(args) => cmd_merge(args),
         Commands::Isec(args) => cmd_isec(args),
+        Commands::Tile(args) => cmd_tile(args),
+        Commands::View(args) => cmd_view(args),
+        Commands::Samview(args) => cmd_samview(args),
+        Commands::Solid(args) => cmd_solid(args),
     };
 
     if std::env::var("KIRA_BT_TIMING").is_ok() {

@@ -3,14 +3,17 @@ pub mod column_spec;
 pub mod field_metadata;
 pub mod merge_info;
 pub mod merge_info_helpers;
+pub mod read_batch;
 pub mod threads;
 pub mod vcf_output;
 pub mod vcf_parsing;
+pub mod vcmp;
 
 pub use annotation::*;
 pub use column_spec::*;
 pub use field_metadata::*;
 pub use merge_info::*;
+pub use read_batch::ReadBatch;
 pub use threads::*;
 pub use vcf_output::*;
 pub use vcf_parsing::*;
@@ -98,6 +101,32 @@ pub fn annotate_vcf_ani_v2(
     ram_output: bool,
     ram_max_mb: u32,
 ) -> Result<()> {
+    annotate_vcf_ani_v2_with_extra_headers(
+        db,
+        input,
+        output,
+        columns,
+        bgzf_level,
+        mmap_output,
+        mmap_no_flush,
+        ram_output,
+        ram_max_mb,
+        &[],
+    )
+}
+
+pub fn annotate_vcf_ani_v2_with_extra_headers(
+    db: &Path,
+    input: &Path,
+    output: &Path,
+    columns: &[String],
+    bgzf_level: Option<u32>,
+    mmap_output: bool,
+    mmap_no_flush: bool,
+    ram_output: bool,
+    ram_max_mb: u32,
+    extra_header_lines: &[String],
+) -> Result<()> {
     let timing = std::env::var("KIRA_BT_TIMING").is_ok();
     let debug = std::env::var("KIRA_BT_DEBUG").is_ok() || timing;
     let start = Instant::now();
@@ -111,7 +140,7 @@ pub fn annotate_vcf_ani_v2(
             && c.mode.replace_all
     });
 
-    let num_threads = rayon::current_num_threads() / 2;
+    let num_threads = (rayon::current_num_threads() / 2).max(1);
     if debug {
         eprintln!("[annotate] Using {} CPU threads", num_threads);
         eprintln!("[annotate] Batch size: {} lines", BATCH_SIZE);
@@ -164,14 +193,17 @@ pub fn annotate_vcf_ani_v2(
         );
     }
 
-    let merged_headers = merge_annotation_headers(&headers, &ani_headers, &column_specs)?;
+    let mut merged_headers = merge_annotation_headers(&headers, &ani_headers, &column_specs)?;
+    if !extra_header_lines.is_empty() {
+        merged_headers = add_extra_header_lines(merged_headers, extra_header_lines);
+    }
 
     let input_samples = extract_samples_from_headers(&headers);
     let db_samples = extract_samples_from_headers(&ani_headers);
     let sample_map = build_sample_map(&input_samples, &db_samples);
 
-    let (read_tx, read_rx) = bounded::<Vec<String>>(CHANNEL_DEPTH);
-    let (work_tx, work_rx) = bounded::<Vec<String>>(CHANNEL_DEPTH);
+    let (read_tx, read_rx) = bounded::<ReadBatch>(CHANNEL_DEPTH);
+    let (work_tx, work_rx) = bounded::<AnnotatedBatch>(CHANNEL_DEPTH);
 
     let ani_clone = Arc::new(ani);
     let field_meta_clone = Arc::new(field_meta);
@@ -198,7 +230,7 @@ pub fn annotate_vcf_ani_v2(
 
     let output_clone = output.to_path_buf();
     let writer = thread::spawn(move || {
-        writer_thread(
+        writer_thread_annotated(
             work_rx,
             merged_headers,
             &output_clone,
@@ -235,34 +267,79 @@ pub fn annotate_vcf_ani_v2(
     Ok(())
 }
 
+fn add_extra_header_lines(mut headers: Vec<String>, extra: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(headers.len() + extra.len());
+    let mut inserted = false;
+    let existing: std::collections::HashSet<String> = headers.iter().cloned().collect();
+    for h in headers.drain(..) {
+        if !inserted && h.starts_with("#CHROM") {
+            for line in extra {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() && !existing.contains(trimmed) {
+                    out.push(trimmed.to_string());
+                }
+            }
+            inserted = true;
+        }
+        out.push(h);
+    }
+    if !inserted {
+        for line in extra {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !existing.contains(trimmed) {
+                out.push(trimmed.to_string());
+            }
+        }
+    }
+    out
+}
+
 fn read_batches(
     reader: &mut StreamingVcfReader,
-    read_tx: crossbeam_channel::Sender<Vec<String>>,
+    read_tx: crossbeam_channel::Sender<ReadBatch>,
     timing: bool,
 ) -> Result<()> {
-    let mut batch = Vec::with_capacity(BATCH_SIZE);
+    use crate::annotate::constants::{BATCH_MAX_LINES, BATCH_MIN_LINES, batch_target_bytes};
+
+    let byte_target = batch_target_bytes();
+    // Pool sizing: allocate the byte buffer once at full byte budget. Reader
+    // is the cheapest place to over-allocate vs hitting Vec::grow mid-batch.
+    // Lines index sized for typical 600 K-line batch; will grow if needed.
+    let bytes_cap = byte_target + 16 * 1024;
+    let lines_cap = BATCH_MIN_LINES.max(1024);
+    let mut batch = ReadBatch::with_capacity(bytes_cap, lines_cap);
     let mut total_lines = 0usize;
     let mut last_report = Instant::now();
 
-    while let Some(line) = reader.read_line()? {
-        batch.push(line);
+    if timing {
+        eprintln!(
+            "[annotate] reader: byte-bounded batches, target {} MB (min {} lines, max {} lines)",
+            byte_target / (1024 * 1024),
+            BATCH_MIN_LINES,
+            BATCH_MAX_LINES
+        );
+    }
 
-        if batch.len() >= BATCH_SIZE {
+    while let Some(line) = reader.read_line()? {
+        batch.push_line(&line);
+
+        // Cut once we hit the byte budget AND have at least the minimum
+        // line count — protects against a single 30 KB 1000-Genomes record
+        // becoming its own batch on systems with tight memory.
+        let oversized = batch.byte_len() >= byte_target && batch.len() >= BATCH_MIN_LINES;
+        let too_many = batch.len() >= BATCH_MAX_LINES;
+        if oversized || too_many {
             if timing {
                 total_lines += batch.len();
             }
-            if read_tx
-                .send(std::mem::replace(
-                    &mut batch,
-                    Vec::with_capacity(BATCH_SIZE),
-                ))
-                .is_err()
-            {
+            let next_lines_cap = batch.len().clamp(BATCH_MIN_LINES, BATCH_MAX_LINES);
+            let next = ReadBatch::with_capacity(bytes_cap, next_lines_cap);
+            if read_tx.send(std::mem::replace(&mut batch, next)).is_err() {
                 break;
             }
 
             if timing && last_report.elapsed().as_secs() >= 2 {
-                eprintln!("[annotate] Progress: {} lines read", total_lines);
+                eprintln!("[annotate] Progress: {total_lines} lines read");
                 last_report = Instant::now();
             }
         }
@@ -292,7 +369,7 @@ pub(crate) fn merge_annotation_headers(
     for col in column_specs {
         let (src_ref, dst_ref) = split_mapped_ref(&col.key);
         match dst_ref.to_uppercase().as_str() {
-            "ID" | "QUAL" => {}
+            "ID" | "QUAL" | "ALT" => {}
             "FILTER" => need_filter = true,
             "FMT" | "FORMAT" => need_format = true,
             _ => {
@@ -319,15 +396,19 @@ pub(crate) fn merge_annotation_headers(
     let mut input_info_ids = std::collections::HashSet::new();
     let mut input_format_ids = std::collections::HashSet::new();
     let mut input_filter_ids = std::collections::HashSet::new();
+    let mut input_info_by_id = std::collections::HashMap::new();
+    let mut input_format_by_id = std::collections::HashMap::new();
 
     for h in vcf_headers {
         if h.starts_with("##INFO=") {
             if let Some(id) = extract_header_id(h) {
-                input_info_ids.insert(id);
+                input_info_ids.insert(id.clone());
+                input_info_by_id.insert(id, h.clone());
             }
         } else if h.starts_with("##FORMAT=") {
             if let Some(id) = extract_header_id(h) {
-                input_format_ids.insert(id);
+                input_format_ids.insert(id.clone());
+                input_format_by_id.insert(id, h.clone());
             }
         } else if h.starts_with("##FILTER=") {
             if let Some(id) = extract_header_id(h) {
@@ -362,6 +443,27 @@ pub(crate) fn merge_annotation_headers(
 
         for dst_id in &info_needed {
             if input_info_ids.contains(dst_id) {
+                if let Some((_, src_id)) = info_src_to_dst
+                    .iter()
+                    .find(|(_, _, dst)| dst == dst_id)
+                    .map(|(_, src_id, _)| (dst_id.clone(), src_id.clone()))
+                {
+                    if let Some(src_line) = info_header_by_id.get(&src_id) {
+                        ensure_header_compatible(
+                            "INFO",
+                            dst_id,
+                            input_info_by_id.get(dst_id),
+                            src_line,
+                        )?;
+                    }
+                } else if let Some(src_line) = info_header_by_id.get(dst_id) {
+                    ensure_header_compatible(
+                        "INFO",
+                        dst_id,
+                        input_info_by_id.get(dst_id),
+                        src_line,
+                    )?;
+                }
                 continue;
             }
             let mapped_src = info_src_to_dst
@@ -394,6 +496,19 @@ pub(crate) fn merge_annotation_headers(
 
         for dst_id in &format_needed {
             if input_format_ids.contains(dst_id) {
+                let src_line = format_src_to_dst
+                    .iter()
+                    .find(|(_, dst)| dst == dst_id)
+                    .and_then(|(src, _)| format_header_by_id.get(src))
+                    .or_else(|| format_header_by_id.get(dst_id));
+                if let Some(src_line) = src_line {
+                    ensure_header_compatible(
+                        "FORMAT",
+                        dst_id,
+                        input_format_by_id.get(dst_id),
+                        src_line,
+                    )?;
+                }
                 continue;
             }
             let mapped_src = format_src_to_dst
@@ -480,7 +595,7 @@ pub(crate) fn expand_column_specs(
 
         let (_, dst_ref) = split_mapped_ref(&col.key);
         match dst_ref.to_uppercase().as_str() {
-            "ID" | "QUAL" | "FILTER" | "FMT" | "FORMAT" => {}
+            "ID" | "QUAL" | "FILTER" | "ALT" | "FMT" | "FORMAT" => {}
             _ => {
                 if !is_format_ref(dst_ref) {
                     seen_info.insert(info_id_from_ref(dst_ref));
@@ -522,6 +637,41 @@ fn extract_header_id(line: &str) -> Option<String> {
     crate::util::extract_info_key(line)
 }
 
+fn ensure_header_compatible(
+    kind: &str,
+    id: &str,
+    input_line: Option<&String>,
+    annotation_line: &str,
+) -> Result<()> {
+    let Some(input_line) = input_line else {
+        return Ok(());
+    };
+    let input_number = header_attr(input_line, "Number");
+    let input_type = header_attr(input_line, "Type");
+    let ann_number = header_attr(annotation_line, "Number");
+    let ann_type = header_attr(annotation_line, "Type");
+    if input_number != ann_number || input_type != ann_type {
+        anyhow::bail!(
+            "{kind}/{id} header conflict: input Number={:?},Type={:?}; annotation Number={:?},Type={:?}",
+            input_number,
+            input_type,
+            ann_number,
+            ann_type
+        );
+    }
+    Ok(())
+}
+
+fn header_attr(line: &str, key: &str) -> Option<String> {
+    let body = line.split_once("=<")?.1.strip_suffix('>')?;
+    for part in body.split(',') {
+        if let Some(v) = part.strip_prefix(&format!("{key}=")) {
+            return Some(v.trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
 pub(crate) fn extract_samples_from_headers(headers: &[String]) -> Vec<String> {
     for h in headers {
         if h.starts_with("#CHROM") {
@@ -553,14 +703,5 @@ pub(crate) fn build_sample_map(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::build_sample_map;
-
-    #[test]
-    fn test_build_sample_map_by_name() {
-        let input = vec!["A".to_string(), "B".to_string(), "C".to_string()];
-        let db = vec!["B".to_string(), "A".to_string()];
-        let map = build_sample_map(&input, &db);
-        assert_eq!(map, vec![Some(1), Some(0), None]);
-    }
-}
+#[path = "../../../tests/unit/annotate_cpu_v2.rs"]
+mod tests;

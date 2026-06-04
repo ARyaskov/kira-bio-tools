@@ -8,7 +8,13 @@ use std::path::{Path, PathBuf};
 use crate::cli::args::ReheaderArgs;
 
 pub fn cmd_reheader(args: ReheaderArgs) -> Result<()> {
-    let cfg = parse_reheader_args(&args.bcftools_args)?;
+    let mut argv: Vec<String> = Vec::new();
+    if let Some(p) = &args.header { argv.push("-h".into()); argv.push(p.to_string_lossy().into_owned()); }
+    if let Some(p) = &args.samples_file { argv.push("-s".into()); argv.push(p.to_string_lossy().into_owned()); }
+    if let Some(p) = &args.fai { argv.push("-f".into()); argv.push(p.to_string_lossy().into_owned()); }
+    if let Some(p) = &args.output { argv.push("-o".into()); argv.push(p.to_string_lossy().into_owned()); }
+    argv.extend(args.passthrough.iter().cloned());
+    let cfg = parse_reheader_args(&argv)?;
     let (input_text, input_is_bcf) = read_input_text(&args.input)?;
     let (orig_meta, orig_chrom, data_lines) = split_vcf_text(&input_text);
 
@@ -109,21 +115,54 @@ fn read_input_text(input: &Path) -> Result<(String, bool)> {
         return Ok((decode_input_bytes(&bytes, "")?, false));
     }
 
-    if input
-        .extension()
+    let is_bcf_ext = input.extension()
         .and_then(|e| e.to_str())
         .map(|e| e.eq_ignore_ascii_case("bcf"))
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+
+    if is_bcf_ext || is_bcf_magic(input)? {
         let mut sibling = input.to_path_buf();
         sibling.set_extension("vcf");
         if sibling.exists() {
             return Ok((fs::read_to_string(sibling)?, true));
         }
+        return decode_bcf_to_vcf(input).map(|s| (s, true));
     }
 
     let bytes = fs::read(input)?;
     Ok((decode_input_bytes(&bytes, &input.to_string_lossy())?, false))
+}
+
+fn is_bcf_magic(input: &Path) -> Result<bool> {
+    use std::io::Read as _;
+    let mut f = fs::File::open(input)?;
+    let mut probe = [0u8; 5];
+    let n = f.read(&mut probe)?;
+    if n < 5 { return Ok(false); }
+    if probe == *crate::bcf::BCF_MAGIC { return Ok(true); }
+    if probe[0] == 0x1F && probe[1] == 0x8B {
+        let f2 = fs::File::open(input)?;
+        let mut rd = noodles_bgzf::io::Reader::new(f2);
+        let mut probe2 = [0u8; 5];
+        if rd.read_exact(&mut probe2).is_ok() && probe2 == *crate::bcf::BCF_MAGIC {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn decode_bcf_to_vcf(input: &Path) -> Result<String> {
+    let mut r = crate::bcf::BcfReader::open(input)?;
+    let mut out = String::new();
+    for h in &r.header_lines {
+        out.push_str(h);
+        out.push('\n');
+    }
+    while let Some(line) = r.read_record_line()? {
+        out.push_str(&line);
+        if !line.ends_with('\n') { out.push('\n'); }
+    }
+    Ok(out)
 }
 
 fn decode_input_bytes(bytes: &[u8], path_hint: &str) -> Result<String> {
@@ -131,13 +170,32 @@ fn decode_input_bytes(bytes: &[u8], path_hint: &str) -> Result<String> {
     let is_gz_ext = path_hint.ends_with(".gz") || path_hint.ends_with(".bgz");
 
     if is_gz_magic || is_gz_ext {
+        if bytes.len() >= 7 && bytes[0] == 0x1F && bytes[1] == 0x8B {
+            let mut probe = MultiGzDecoder::new(Cursor::new(bytes));
+            let mut head = [0u8; 5];
+            if probe.read_exact(&mut head).is_ok() && head == *crate::bcf::BCF_MAGIC {
+                let tmp = std::env::temp_dir().join(format!("kira-bt-reh-{}.bcf", std::process::id()));
+                fs::write(&tmp, bytes)?;
+                let s = decode_bcf_to_vcf(&tmp);
+                let _ = fs::remove_file(&tmp);
+                return s;
+            }
+        }
         let mut s = String::new();
         MultiGzDecoder::new(Cursor::new(bytes)).read_to_string(&mut s)?;
         return Ok(s);
     }
 
+    if bytes.len() >= 5 && &bytes[..5] == crate::bcf::BCF_MAGIC {
+        let tmp = std::env::temp_dir().join(format!("kira-bt-reh-{}.bcf", std::process::id()));
+        fs::write(&tmp, bytes)?;
+        let s = decode_bcf_to_vcf(&tmp);
+        let _ = fs::remove_file(&tmp);
+        return s;
+    }
+
     String::from_utf8(bytes.to_vec())
-        .map_err(|_| anyhow::anyhow!("non-UTF8 BCF is not yet supported by native reheader"))
+        .map_err(|_| anyhow::anyhow!("input is binary but not BCF; cannot decode"))
 }
 
 fn split_vcf_text(text: &str) -> (Vec<String>, String, Vec<String>) {

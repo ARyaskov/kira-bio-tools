@@ -19,7 +19,10 @@ pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
     )?;
 
     if cfg.list_samples {
-        let mut out = BufWriter::new(std::io::stdout());
+        let mut out: Box<dyn Write> = match &cfg.output {
+            Some(p) => Box::new(BufWriter::new(File::create(p)?)),
+            None => Box::new(BufWriter::new(std::io::stdout())),
+        };
         for &i in &sample_idx {
             if let Some(name) = sample_names.get(i) {
                 writeln!(out, "{name}")?;
@@ -33,10 +36,17 @@ pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
     let filter_expr = include.as_deref().or(exclude.as_deref());
     let filter_engine = FilterEngine::new(&headers, filter_expr, exclude.is_some())?;
 
+    let region_filter = build_region_filter_pair(&cfg)?;
+    let no_nas = cfg.no_nas.clone();
+    let exclude_uncalled = cfg.exclude_uncalled;
+
     let format = decode_escapes(&cfg.format);
     let mut fmt_ctx = QueryFormatContext::new(&headers, &sample_names, sample_idx.clone(), format)?;
 
-    let mut out = BufWriter::new(std::io::stdout());
+    let mut out: Box<dyn Write> = match &cfg.output {
+        Some(p) => Box::new(BufWriter::new(File::create(p)?)),
+        None => Box::new(BufWriter::new(std::io::stdout())),
+    };
     if cfg.header_mode > 0 {
         let hline = fmt_ctx.header_line(cfg.header_mode == 2);
         out.write_all(hline.trim_end_matches('\n').as_bytes())?;
@@ -44,6 +54,9 @@ pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
     }
 
     while let Some(rec) = reader.next_record()? {
+        if let Some(rf) = &region_filter {
+            if !rf.passes(&rec) { continue; }
+        }
         let eval = filter_engine.eval(&rec)?;
         let site_pass = if let Some(ps) = eval.pass_samples.as_ref() {
             sample_idx
@@ -55,7 +68,11 @@ pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
         if !site_pass {
             continue;
         }
-        let s = fmt_ctx.render_record(&rec, eval.pass_samples.as_deref())?;
+        if exclude_uncalled && record_all_missing(&rec) { continue; }
+        let mut s = fmt_ctx.render_record(&rec, eval.pass_samples.as_deref())?;
+        if let Some(repl) = &no_nas {
+            s = s.replace("\t.\t", &format!("\t{}\t", repl)).replace("\t.\n", &format!("\t{}\n", repl));
+        }
         out.write_all(s.as_bytes())?;
         if !s.ends_with('\n') {
             out.write_all(b"\n")?;
@@ -63,6 +80,66 @@ pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+struct RecRegionFilter {
+    regions: Vec<(String, u32, u32)>,
+}
+
+impl RecRegionFilter {
+    fn passes(&self, rec: &crate::vcf::VcfRecord) -> bool {
+        if self.regions.is_empty() { return true; }
+        let pos = rec.pos;
+        let chrom = rec.chrom.as_str();
+        for (c, s, e) in &self.regions {
+            if c == chrom && pos >= *s && pos <= *e { return true; }
+        }
+        false
+    }
+}
+
+fn build_region_filter_pair(cfg: &QueryConfig) -> Result<Option<RecRegionFilter>> {
+    let mut regions: Vec<(String, u32, u32)> = Vec::new();
+    if let Some(s) = cfg.regions.as_deref().or(cfg.targets.as_deref()) {
+        for tok in s.split(',') {
+            if let Some(r) = parse_region_token(tok) { regions.push(r); }
+        }
+    }
+    let file = cfg.regions_file.as_deref().or(cfg.targets_file.as_deref());
+    if let Some(p) = file {
+        let f = File::open(p)?;
+        for line in BufReader::new(f).lines() {
+            let l = line?;
+            let t = l.trim();
+            if t.is_empty() || t.starts_with('#') { continue; }
+            let mut parts = t.split('\t');
+            let chr = parts.next().unwrap_or("").to_string();
+            let beg: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let end: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(u32::MAX);
+            if !chr.is_empty() { regions.push((chr, beg, end)); }
+        }
+    }
+    if regions.is_empty() { Ok(None) } else { Ok(Some(RecRegionFilter { regions })) }
+}
+
+fn parse_region_token(s: &str) -> Option<(String, u32, u32)> {
+    if let Some((c, r)) = s.split_once(':') {
+        if let Some((b, e)) = r.split_once('-') {
+            let b: u32 = b.parse().ok()?; let e: u32 = e.parse().ok()?;
+            return Some((c.to_string(), b, e));
+        }
+        if let Ok(b) = r.parse::<u32>() { return Some((c.to_string(), b, b)); }
+        return Some((c.to_string(), 0, u32::MAX));
+    }
+    Some((s.to_string(), 0, u32::MAX))
+}
+
+fn record_all_missing(rec: &crate::vcf::VcfRecord) -> bool {
+    if rec.samples.is_empty() { return false; }
+    rec.samples.iter().all(|s| {
+        let gt = s.split(':').next().unwrap_or(".");
+        gt.split(|c| c == '/' || c == '|').all(|a| a == "." || a.is_empty())
+    })
 }
 
 pub fn cmd_region_query(args: RegionQueryArgs) -> Result<()> {
@@ -256,11 +333,28 @@ struct QueryConfig {
     samples_file: Option<String>,
     list_samples: bool,
     header_mode: u8,
+    regions: Option<String>,
+    regions_file: Option<String>,
+    regions_overlap: u8,
+    targets: Option<String>,
+    targets_file: Option<String>,
+    output: Option<String>,
+    no_nas: Option<String>,
+    exclude_uncalled: bool,
+    allow_undef_tags: bool,
+    print_header: bool,
 }
 
 fn parse_query_args(args: &[String]) -> Result<QueryConfig> {
     let mut cfg = QueryConfig::default();
+    cfg.regions_overlap = 1;
     let mut i = 0usize;
+    let load_expr = |s: &str| -> String {
+        if let Some(path) = s.strip_prefix('@') {
+            if let Ok(c) = std::fs::read_to_string(path) { return c.trim().to_string(); }
+        }
+        s.to_string()
+    };
     while i < args.len() {
         match args[i].as_str() {
             "-f" | "--format" => {
@@ -269,11 +363,11 @@ fn parse_query_args(args: &[String]) -> Result<QueryConfig> {
             }
             "-i" | "--include" => {
                 i += 1;
-                cfg.include = args.get(i).cloned();
+                cfg.include = args.get(i).map(|s| load_expr(s));
             }
             "-e" | "--exclude" => {
                 i += 1;
-                cfg.exclude = args.get(i).cloned();
+                cfg.exclude = args.get(i).map(|s| load_expr(s));
             }
             "-s" | "--samples" => {
                 i += 1;
@@ -283,6 +377,37 @@ fn parse_query_args(args: &[String]) -> Result<QueryConfig> {
                 i += 1;
                 cfg.samples_file = args.get(i).cloned();
             }
+            "-r" | "--regions" => {
+                i += 1;
+                cfg.regions = args.get(i).cloned();
+            }
+            "-R" | "--regions-file" => {
+                i += 1;
+                cfg.regions_file = args.get(i).cloned();
+            }
+            "-t" | "--targets" => {
+                i += 1;
+                cfg.targets = args.get(i).cloned();
+            }
+            "-T" | "--targets-file" => {
+                i += 1;
+                cfg.targets_file = args.get(i).cloned();
+            }
+            "--regions-overlap" => {
+                i += 1;
+                cfg.regions_overlap = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(1);
+            }
+            "-o" | "--output" => {
+                i += 1;
+                cfg.output = args.get(i).cloned();
+            }
+            "-N" | "--no-NAs" => {
+                i += 1;
+                cfg.no_nas = args.get(i).cloned();
+            }
+            "-X" | "--exclude-uncalled" => cfg.exclude_uncalled = true,
+            "-D" | "--allow-undef-tags" => cfg.allow_undef_tags = true,
+            "--print-header" => cfg.print_header = true,
             "-l" | "--list-samples" => cfg.list_samples = true,
             "-H" => cfg.header_mode = cfg.header_mode.max(1),
             "-HH" => cfg.header_mode = 2,
@@ -291,6 +416,7 @@ fn parse_query_args(args: &[String]) -> Result<QueryConfig> {
         }
         i += 1;
     }
+    if cfg.print_header { cfg.header_mode = cfg.header_mode.max(1); }
     if cfg.input.as_os_str().is_empty() {
         return Err(anyhow::anyhow!("query: missing input file"));
     }
@@ -609,6 +735,26 @@ impl QueryFormatContext {
         if let Some(key) = tok.strip_prefix("INFO/") {
             return Ok(info_value(&rec.info, key).unwrap_or(".").to_string());
         }
+        if tok == "TYPE" {
+            return Ok(classify_variant(&rec.ref_allele, &rec.alt));
+        }
+        if let Some(key) = tok.strip_prefix("FORMAT/").or_else(|| tok.strip_prefix("FMT/")) {
+            if let Some(i) = sample {
+                if let Some(v) = sample_fmt(rec, i, key) { return Ok(v.to_string()); }
+            } else if let Some(fmt) = &rec.format {
+                let mut s = String::new();
+                let mut first = true;
+                for &si in &self.selected {
+                    if sample_mask.map(|m| m.get(si).copied().unwrap_or(false)).unwrap_or(true) {
+                        if !first { s.push(','); }
+                        first = false;
+                        s.push_str(sample_fmt_by_format(fmt, rec.samples.get(si).map(String::as_str), key).unwrap_or("."));
+                    }
+                }
+                return Ok(s);
+            }
+            return Ok(".".to_string());
+        }
         if let Some((k, idx)) = parse_indexed_info(tok) {
             let values = info_value(&rec.info, &k).unwrap_or(".");
             let parts: Vec<&str> = values.split(',').collect();
@@ -628,6 +774,25 @@ impl QueryFormatContext {
         }
         Ok(".".to_string())
     }
+}
+
+fn classify_variant(refa: &str, alt: &str) -> String {
+    let mut tags: Vec<&str> = Vec::new();
+    for a in alt.split(',') {
+        let a = a.trim();
+        if a.is_empty() || a == "." { continue; }
+        let t = if refa.len() == 1 && a.len() == 1 { "SNP" }
+            else if refa.len() == a.len() && refa.len() > 1 { "MNP" }
+            else if refa.len() != a.len() { "INDEL" } else { "OTHER" };
+        if !tags.contains(&t) { tags.push(t); }
+    }
+    if tags.is_empty() { ".".into() } else { tags.join(",") }
+}
+
+fn sample_fmt_by_format<'a>(fmt: &str, sample: Option<&'a str>, key: &str) -> Option<&'a str> {
+    let s = sample?;
+    let idx = fmt.split(':').position(|k| k == key)?;
+    s.split(':').nth(idx)
 }
 
 fn token_label(tok: &str) -> String {
@@ -739,11 +904,14 @@ fn info_value<'a>(info: &'a str, key: &str) -> Option<&'a str> {
 }
 
 fn parse_indexed_info(tok: &str) -> Option<(String, usize)> {
-    if let Some((key, rest)) = tok.split_once('[') {
-        if let Some(r) = rest.strip_suffix(']') {
-            if let Ok(i) = r.parse::<usize>() {
-                let k = key.strip_prefix("INFO/").unwrap_or(key).to_string();
-                return Some((k, i));
+    for open in &['[', '{'] {
+        let close = if *open == '[' { ']' } else { '}' };
+        if let Some((key, rest)) = tok.split_once(*open) {
+            if let Some(r) = rest.strip_suffix(close) {
+                if let Ok(i) = r.parse::<usize>() {
+                    let k = key.strip_prefix("INFO/").unwrap_or(key).to_string();
+                    return Some((k, i));
+                }
             }
         }
     }

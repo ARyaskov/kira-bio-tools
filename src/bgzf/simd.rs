@@ -1,47 +1,11 @@
+#![allow(unsafe_op_in_unsafe_fn)]
+
 use super::structs::BGZF_HEADER;
 
 #[cfg(target_arch = "x86_64")]
 pub mod x86_simd {
     use super::*;
     use core::arch::x86_64::*;
-
-    #[target_feature(enable = "sse4.2")]
-    pub unsafe fn crc32_hw(mut crc: u32, data: &[u8]) -> u32 {
-        let mut i = 0;
-
-        #[cfg(target_feature = "avx2")]
-        {
-            while i + 32 <= data.len() {
-                let ptr = data.as_ptr().add(i) as *const __m256i;
-                let chunk = _mm256_loadu_si256(ptr);
-
-                let a = _mm256_extract_epi64(chunk, 0) as u64;
-                let b = _mm256_extract_epi64(chunk, 1) as u64;
-                let c = _mm256_extract_epi64(chunk, 2) as u64;
-                let d = _mm256_extract_epi64(chunk, 3) as u64;
-
-                crc = _mm_crc32_u64(crc as u64, a) as u32;
-                crc = _mm_crc32_u64(crc as u64, b) as u32;
-                crc = _mm_crc32_u64(crc as u64, c) as u32;
-                crc = _mm_crc32_u64(crc as u64, d) as u32;
-
-                i += 32;
-            }
-        }
-
-        while i + 8 <= data.len() {
-            let chunk = *(data.as_ptr().add(i) as *const u64);
-            crc = _mm_crc32_u64(crc as u64, chunk) as u32;
-            i += 8;
-        }
-
-        while i < data.len() {
-            crc = _mm_crc32_u8(crc, *data.get_unchecked(i));
-            i += 1;
-        }
-
-        crc
-    }
 
     #[target_feature(enable = "avx2")]
     pub unsafe fn memcpy_avx(dst: *mut u8, src: *const u8, len: usize) {
@@ -73,36 +37,6 @@ pub mod arm_simd {
     use super::*;
     use core::arch::aarch64::*;
 
-    #[target_feature(enable = "crc")]
-    pub unsafe fn crc32_hw(mut crc: u32, data: &[u8]) -> u32 {
-        let mut i = 0;
-
-        while i + 8 <= data.len() {
-            let chunk = *(data.as_ptr().add(i) as *const u64);
-            crc = __crc32cd(crc, chunk);
-            i += 8;
-        }
-
-        while i + 4 <= data.len() {
-            let chunk = *(data.as_ptr().add(i) as *const u32);
-            crc = __crc32cw(crc, chunk);
-            i += 4;
-        }
-
-        while i + 2 <= data.len() {
-            let chunk = *(data.as_ptr().add(i) as *const u16);
-            crc = __crc32ch(crc, chunk);
-            i += 2;
-        }
-
-        while i < data.len() {
-            crc = __crc32cb(crc, *data.get_unchecked(i));
-            i += 1;
-        }
-
-        crc
-    }
-
     #[target_feature(enable = "neon")]
     pub unsafe fn memcpy_neon(dst: *mut u8, src: *const u8, len: usize) {
         let mut i = 0;
@@ -128,7 +62,6 @@ pub mod arm_simd {
     }
 }
 
-#[cfg(not(all(target_arch = "aarch64", target_feature = "crc")))]
 #[inline(always)]
 pub fn crc32_fallback(crc: u32, data: &[u8]) -> u32 {
     let mut hasher = crc32fast::Hasher::new_with_initial(crc);
@@ -138,19 +71,6 @@ pub fn crc32_fallback(crc: u32, data: &[u8]) -> u32 {
 
 #[inline(always)]
 pub fn compute_crc32(data: &[u8]) -> u32 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("sse4.2") {
-            return unsafe { x86_simd::crc32_hw(0, data) };
-        }
-    }
-
-    #[cfg(all(target_arch = "aarch64", target_feature = "crc"))]
-    {
-        return unsafe { arm_simd::crc32_hw(0, data) };
-    }
-
-    #[cfg(not(all(target_arch = "aarch64", target_feature = "crc")))]
     crc32_fallback(0, data)
 }
 

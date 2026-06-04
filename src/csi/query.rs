@@ -7,7 +7,7 @@ use crate::csi::structs::Result;
 
 pub fn read_csi_index<P: AsRef<Path>>(path: P) -> Result<csi::Index> {
     let file = File::open(path)?;
-    let mut reader = csi::Reader::new(file);
+    let mut reader = csi::io::Reader::new(file);
     reader
         .read_index()
         .map_err(|e| crate::csi::structs::CsiError::Format(e.to_string()))

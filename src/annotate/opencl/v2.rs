@@ -41,7 +41,22 @@ impl OpenCLv2 {
     pub fn new(ani: &AniIndex, batch_cap: usize) -> Result<Self> {
         let index_bytes = ani.index.serialize()?;
         let index = Index::deserialize(&index_bytes)?;
-        let entry_keys = build_entry_keys(ani);
+        // Prefer the cached entry_keys section in .ani (same fast path as
+        // the CUDA loader). Legacy ANIs without the section fall through
+        // to the eager scan with a warning.
+        let entry_keys = if let Some(cached) = ani.cached_entry_keys() {
+            eprintln!(
+                "[opencl] entry_keys loaded from .ani cache ({} keys, zero-copy mmap)",
+                cached.len()
+            );
+            cached.to_vec()
+        } else {
+            eprintln!(
+                "[opencl] WARNING — .ani lacks cached entry_keys section; \
+                 scanning entries (slow). Rebuild .ani to make this instant."
+            );
+            build_entry_keys(ani)
+        };
         Ok(Self {
             index,
             entry_keys,
@@ -88,7 +103,7 @@ impl OpenCLv2 {
         alt_offsets: &[u32],
         alt_lens: &[u32],
         key_ref_idx: &[u32],
-        key_chr: &[u8],
+        key_chr: &[u32],
         key_pos: &[u32],
         timing: bool,
         write_total: &mut f64,
@@ -131,10 +146,15 @@ impl OpenCLv2 {
     }
 
     fn lookup_batch_cpu(&self, keys: &[u64]) -> Vec<u32> {
+        // kira_kv_engine 0.6.0: SIMD batch lookup. AVX2 4-wide hash + 16-deep
+        // prefetch chain — 2-3× faster than scalar lookup_u64 for batches of
+        // 100K+ keys. Always verify the hit against entry_keys to catch lean_mph
+        // false positives (we don't use lean_mph today, but the check is cheap).
+        let opts = self.index.lookup_batch_u64_simd(keys);
         let mut out = vec![u32::MAX; keys.len()];
-        for (i, &key) in keys.iter().enumerate() {
-            if let Ok(idx) = self.index.lookup_u64(key) {
-                if idx < self.entry_keys.len() && self.entry_keys[idx] == key {
+        for (i, idx_opt) in opts.into_iter().enumerate() {
+            if let Some(idx) = idx_opt {
+                if idx < self.entry_keys.len() && self.entry_keys[idx] == keys[i] {
                     out[i] = idx as u32;
                 }
             }
@@ -151,33 +171,57 @@ impl OpenCLv2 {
         alt_offsets: &[u32],
         alt_lens: &[u32],
         key_ref_idx: &[u32],
-        key_chr: &[u8],
+        key_chr: &[u32],
         key_pos: &[u32],
     ) -> Vec<u32> {
+        use crate::annotate::structs::ani::make_variant_key;
         let n = alt_offsets.len();
-        let mut out = vec![u32::MAX; n];
+        // Stage 1: build the u64 key array so we can hit the SIMD batch path
+        // in a single pass instead of N scalar lookup_u64 calls.
+        let mut keys: Vec<u64> = Vec::with_capacity(n);
+        let mut valid: Vec<bool> = Vec::with_capacity(n);
         for i in 0..n {
             let ref_idx = key_ref_idx[i] as usize;
             if ref_idx >= ref_offsets.len() || ref_idx >= ref_lens.len() {
+                keys.push(0);
+                valid.push(false);
                 continue;
             }
             let ref_start = ref_offsets[ref_idx] as usize;
             let ref_len = ref_lens[ref_idx] as usize;
             if ref_start + ref_len > ref_pool.len() {
+                keys.push(0);
+                valid.push(false);
                 continue;
             }
             let alt_start = alt_offsets[i] as usize;
             let alt_len = alt_lens[i] as usize;
             if alt_start + alt_len > alt_pool.len() {
+                keys.push(0);
+                valid.push(false);
                 continue;
             }
             let chr_id = key_chr[i];
             let pos = key_pos[i];
-            let mut key = (chr_id as u64) << 32 | pos as u64;
-            key ^= fast_hash64(&ref_pool[ref_start..ref_start + ref_len]);
-            key ^= fast_hash64(&alt_pool[alt_start..alt_start + alt_len]);
-            if let Ok(idx) = self.index.lookup_u64(key) {
-                if idx < self.entry_keys.len() && self.entry_keys[idx] == key {
+            // Non-commutative key — identical recipe at build + CPU lookup.
+            let key = make_variant_key(
+                chr_id,
+                pos,
+                &ref_pool[ref_start..ref_start + ref_len],
+                &alt_pool[alt_start..alt_start + alt_len],
+            );
+            keys.push(key);
+            valid.push(true);
+        }
+        // Stage 2: single batched MPH probe.
+        let opts = self.index.lookup_batch_u64_simd(&keys);
+        let mut out = vec![u32::MAX; n];
+        for i in 0..n {
+            if !valid[i] {
+                continue;
+            }
+            if let Some(idx) = opts[i] {
+                if idx < self.entry_keys.len() && self.entry_keys[idx] == keys[i] {
                     out[i] = idx as u32;
                 }
             }
@@ -436,11 +480,16 @@ pub fn annotate_vcf_opencl_v2_with_gpu(
     Ok(())
 }
 
-fn make_key(chr_id: u8, pos: u32, ref_allele: &str, alt: &str) -> u64 {
-    let mut h = (chr_id as u64) << 32 | pos as u64;
-    h ^= fast_hash64(ref_allele.as_bytes());
-    h ^= fast_hash64(alt.as_bytes());
-    h
+/// Thin wrapper over the canonical `make_variant_key` for parity with the
+/// CUDA fallback. Identical wire output, used at both build and lookup time.
+#[inline]
+fn make_key(chr_id: u32, pos: u32, ref_allele: &str, alt: &str) -> u64 {
+    crate::annotate::structs::ani::make_variant_key(
+        chr_id,
+        pos,
+        ref_allele.as_bytes(),
+        alt.as_bytes(),
+    )
 }
 
 fn build_entry_keys(ani: &AniIndex) -> Vec<u64> {
@@ -455,13 +504,13 @@ fn build_entry_keys(ani: &AniIndex) -> Vec<u64> {
 }
 
 struct MinParsed {
-    chr_id: u8,
+    chr_id: u32,
     pos: u32,
     ref_range: (usize, usize),
     alt_range: (usize, usize),
 }
 
-fn fast_parse_min(line: &str) -> Option<MinParsed> {
+fn fast_parse_min(line: &str, ani: &AniIndex) -> Option<MinParsed> {
     let bytes = line.as_bytes();
     let mut tabs = [0usize; 5];
     let mut count = 0usize;
@@ -479,7 +528,9 @@ fn fast_parse_min(line: &str) -> Option<MinParsed> {
     }
 
     let chrom = &line[..tabs[0]];
-    let chr_id = chr_name_to_id(chrom)?;
+    let chr_id = ani
+        .contig_id(chrom)
+        .or_else(|| chr_name_to_id(chrom).map(u32::from))?;
 
     let pos_bytes = &bytes[(tabs[0] + 1)..tabs[1]];
     let pos = parse_u32_bytes(pos_bytes)?;
@@ -589,7 +640,7 @@ fn build_bundles_pos_index_batch(
 fn find_bundle_pos_index(
     ani: &AniIndex,
     entry_indices: &[u32],
-    chr_id: u8,
+    chr_id: u32,
     pos: u32,
     rf: &str,
     alt: &str,
@@ -676,7 +727,7 @@ fn worker_thread_opencl(
 
         let parse_start = Instant::now();
         let mins: Vec<Option<MinParsed>> =
-            pool.install(|| batch.par_iter().map(|line| fast_parse_min(line)).collect());
+            pool.install(|| batch.par_iter().map(|line| fast_parse_min(line, ani)).collect());
         parse_total += parse_start.elapsed().as_secs_f64();
 
         if ani.has_pos_index() {
@@ -789,7 +840,7 @@ fn worker_thread_opencl(
         let mut alt_offsets: Vec<u32> = Vec::new();
         let mut alt_lens: Vec<u32> = Vec::new();
         let mut key_ref_idx: Vec<u32> = Vec::new();
-        let mut key_chr: Vec<u8> = Vec::new();
+        let mut key_chr: Vec<u32> = Vec::new();
         let mut key_pos: Vec<u32> = Vec::new();
 
         if use_gpu_hash {
@@ -1066,34 +1117,43 @@ fn read_batches_opencl(
     read_tx: Sender<Vec<String>>,
     timing: bool,
 ) -> Result<()> {
-    let mut batch = Vec::with_capacity(LINE_BATCH);
+    use crate::annotate::constants::{BATCH_MAX_LINES, BATCH_MIN_LINES, batch_target_bytes};
+
+    let byte_target = batch_target_bytes();
+    let mut batch: Vec<String> = Vec::with_capacity(BATCH_MIN_LINES.max(1024));
+    let mut batch_bytes: usize = 0;
     let mut total_lines = 0usize;
     let mut send_total = 0f64;
     let mut send_max = 0f64;
     if timing {
-        eprintln!("[opencl] read start");
+        eprintln!(
+            "[opencl] reader: byte-bounded batches, target {} MB",
+            byte_target / (1024 * 1024)
+        );
     }
     while let Some(line) = reader.read_line()? {
         if line.starts_with('#') {
             continue;
         }
+        batch_bytes += line.len() + 1;
         batch.push(line);
 
-        if batch.len() >= LINE_BATCH {
+        let oversized = batch_bytes >= byte_target && batch.len() >= BATCH_MIN_LINES;
+        let too_many = batch.len() >= BATCH_MAX_LINES;
+        if oversized || too_many {
             if timing {
                 total_lines += batch.len();
-                eprintln!("[opencl] read: {} lines", total_lines);
+                eprintln!("[opencl] read: {total_lines} lines");
             }
+            let next_capacity = batch.len().clamp(BATCH_MIN_LINES, BATCH_MAX_LINES);
             let send_start = Instant::now();
             if read_tx
-                .send(std::mem::replace(
-                    &mut batch,
-                    Vec::with_capacity(LINE_BATCH),
-                ))
+                .send(std::mem::replace(&mut batch, Vec::with_capacity(next_capacity)))
                 .is_err()
             {
                 break;
             }
+            batch_bytes = 0;
             let send_elapsed = send_start.elapsed().as_secs_f64();
             send_total += send_elapsed;
             if send_elapsed > send_max {

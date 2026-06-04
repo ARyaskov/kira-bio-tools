@@ -6,6 +6,8 @@
 //  - FAST info=...; parser (SIMD / fallback)
 //
 
+#![allow(unsafe_op_in_unsafe_fn)]
+
 use std::collections::HashMap;
 
 //

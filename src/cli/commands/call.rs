@@ -9,7 +9,17 @@ use crate::VcfReader;
 use crate::cli::args::CallArgs;
 
 pub fn cmd_call(args: CallArgs) -> Result<()> {
-    let cfg = parse_call_args(&args.bcftools_args)?;
+    let mut argv: Vec<String> = Vec::new();
+    if args.consensus_caller { argv.push("-c".into()); }
+    if args.multiallelic_caller { argv.push("-m".into()); }
+    if args.variants_only { argv.push("-v".into()); }
+    if let Some(s) = &args.samples { argv.push("-s".into()); argv.push(s.clone()); }
+    if let Some(p) = &args.samples_file { argv.push("-S".into()); argv.push(p.to_string_lossy().into_owned()); }
+    if let Some(s) = &args.regions { argv.push("-r".into()); argv.push(s.clone()); }
+    if let Some(p) = &args.regions_file { argv.push("-R".into()); argv.push(p.to_string_lossy().into_owned()); }
+    if let Some(s) = &args.targets { argv.push("-t".into()); argv.push(s.clone()); }
+    if let Some(p) = &args.targets_file { argv.push("-T".into()); argv.push(p.to_string_lossy().into_owned()); }
+    let cfg = parse_call_args(&argv)?;
     let out_path = args.output.clone().unwrap_or_else(|| {
         let mut p = args.input.clone();
         p.set_extension("call.vcf");
@@ -258,6 +268,99 @@ fn write_headers<W: Write>(
 }
 
 fn call_record(
+    rec: &crate::vcf::structs::VcfRecord,
+    selected: &[usize],
+    cfg: &CallCfg,
+) -> Result<Option<String>> {
+    if cfg.mode == CallMode::Multiallelic {
+        return call_record_mcall(rec, selected, cfg);
+    }
+    call_record_legacy(rec, selected, cfg)
+}
+
+fn call_record_mcall(
+    rec: &crate::vcf::structs::VcfRecord,
+    selected: &[usize],
+    cfg: &CallCfg,
+) -> Result<Option<String>> {
+    use crate::call::{Caller, CallerOpts};
+    use crate::call::mcall::{CallSite, CallResult};
+
+    let raw_alts: Vec<String> = rec.alt.split(',').map(str::trim).filter(|a| !a.is_empty() && *a != "." && !(a.starts_with('<') && a.ends_with('>'))).map(|a| a.to_string()).collect();
+    let n_als = 1 + raw_alts.len();
+    let n_gt = n_als * (n_als + 1) / 2;
+
+    let format_keys: Vec<&str> = rec.format.as_deref().unwrap_or("").split(':').collect();
+    let pl_idx = format_keys.iter().position(|k| *k == "PL");
+    let n_smpl = selected.len();
+    if n_smpl == 0 || pl_idx.is_none() {
+        return call_record_legacy(rec, selected, cfg);
+    }
+    let pl_idx = pl_idx.unwrap();
+
+    let mut pls: Vec<i32> = vec![0; n_smpl * n_gt];
+    for (out_i, &si) in selected.iter().enumerate() {
+        let sval = rec.samples.get(si).map(|s| s.as_str()).unwrap_or(".");
+        let parts: Vec<&str> = sval.split(':').collect();
+        let pl_str = parts.get(pl_idx).copied().unwrap_or(".");
+        let row = &mut pls[out_i * n_gt..(out_i + 1) * n_gt];
+        if pl_str == "." {
+            for v in row.iter_mut() { *v = i32::MIN; }
+            continue;
+        }
+        let parsed: Vec<i32> = pl_str.split(',').map(|s| s.parse::<i32>().unwrap_or(i32::MIN)).collect();
+        for (i, v) in parsed.iter().enumerate().take(n_gt) { row[i] = *v; }
+        for i in parsed.len()..n_gt { row[i] = i32::MIN + 1; }
+    }
+
+    let opts = CallerOpts {
+        theta: 1.1e-3,
+        keep_alts: cfg.mode == CallMode::Consensus,
+        variants_only: cfg.only_alt,
+        min_ac: 0,
+        ploidy: 2,
+        ..CallerOpts::default()
+    };
+    let caller = Caller::new(opts, n_smpl);
+    let is_indel = rec.ref_allele.len() > 1 || raw_alts.iter().any(|a| a.len() != rec.ref_allele.len());
+    let mut site = CallSite { n_samples: n_smpl, n_alleles: n_als, pls, is_indel, depths: None };
+
+    let result = caller.call_site(&mut site);
+    match result {
+        CallResult::Skip => Ok(None),
+        CallResult::Called { alleles_kept, qual, gts, gqs, pls: _, ac, an } => {
+            let out_alts: Vec<String> = alleles_kept.iter().skip(1)
+                .filter_map(|&i| raw_alts.get((i - 1) as usize).cloned()).collect();
+            let alt_field = if out_alts.is_empty() { ".".to_string() } else { out_alts.join(",") };
+
+            let mut info_map = parse_info_map(&rec.info);
+            info_map.insert("AN".to_string(), an.to_string());
+            if out_alts.is_empty() { info_map.remove("AC"); }
+            else { info_map.insert("AC".to_string(), ac.iter().map(u32::to_string).collect::<Vec<_>>().join(",")); }
+            let info = render_info_map(&info_map);
+
+            let mut sample_out: Vec<String> = Vec::with_capacity(n_smpl);
+            for (i, &(a, b)) in gts.iter().enumerate() {
+                let pa = alleles_kept.iter().position(|x| *x == a).map(|p| p.to_string()).unwrap_or_else(|| ".".into());
+                let pb = alleles_kept.iter().position(|x| *x == b).map(|p| p.to_string()).unwrap_or_else(|| ".".into());
+                let gt = format!("{}/{}", pa, pb);
+                let mut fields = vec![gt];
+                if cfg.emit_gq { fields.push(gqs[i].to_string()); }
+                sample_out.push(fields.join(":"));
+            }
+
+            let qual_s = format!("{:.2}", qual);
+            let mut fmt_keys = vec!["GT".to_string()];
+            if cfg.emit_gq { fmt_keys.push("GQ".to_string()); }
+
+            Ok(Some(format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                rec.chrom, rec.pos, rec.id, rec.ref_allele, alt_field, qual_s, rec.filter, info,
+                fmt_keys.join(":"), sample_out.join("\t"))))
+        }
+    }
+}
+
+fn call_record_legacy(
     rec: &crate::vcf::structs::VcfRecord,
     selected: &[usize],
     cfg: &CallCfg,

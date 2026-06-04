@@ -3,21 +3,22 @@ use bytemuck::{self, Pod, Zeroable};
 #[cfg(feature = "gpu")]
 use cust::memory::DeviceCopy;
 use kira_kv_engine::Index;
-use libdeflater::Decompressor;
+use flate2::{Decompress, FlushDecompress, Status};
 use memchr::memchr;
 use memmap2::{Mmap, MmapOptions};
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::mem;
 use std::ops::Deref;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use super::contig_dict::ContigDict;
 use super::header::{
-    ANI_HEADER_END, ANI_MAGIC, ANI_STR_NONE, ANI_VERSION, AniBlockEntry, AniEntry, AniEntryV2,
-    AniHeader, AniHeaderV3, AniHeaderV6,
+    ANI_HEADER_END, ANI_MAGIC, ANI_SENTINEL_CHR_ID, ANI_STR_NONE, ANI_VERSION, AniBlockEntry,
+    AniEntry, AniEntryV2, AniHeader, AniHeaderV3, AniHeaderV6,
 };
 use crate::annotate::structs::bundle::{
     AnnotationBundle, FieldNumber, FieldType, StructuredInfoField,
@@ -25,6 +26,9 @@ use crate::annotate::structs::bundle::{
 
 const BLOCK_CACHE_CAP: usize = 16;
 const CSTR_CACHE_CAP: usize = 256;
+/// Max number of dense `Vec`-indexed contigs in the pos-index lookup table.
+/// Above this, falls back to `HashMap<u32, usize>`.
+const POS_INDEX_DENSE_CONTIG_CAP: usize = 1024;
 
 pub enum StringStorage {
     Owned(Vec<u8>),
@@ -47,37 +51,36 @@ impl StringStorage {
     }
 }
 
+/// LRU cache of decompressed string-pool blocks.
 struct BlockCacheEntry {
     idx: usize,
     data: Arc<Vec<u8>>,
 }
 
 struct BlockCache {
-    entries: Vec<BlockCacheEntry>,
+    entries: VecDeque<BlockCacheEntry>,
 }
 
 impl BlockCache {
     fn new() -> Self {
         Self {
-            entries: Vec::new(),
+            entries: VecDeque::with_capacity(BLOCK_CACHE_CAP),
         }
     }
 
     fn get(&mut self, idx: usize) -> Option<Arc<Vec<u8>>> {
-        if let Some(pos) = self.entries.iter().position(|e| e.idx == idx) {
-            let entry = self.entries.remove(pos);
-            let data = entry.data.clone();
-            self.entries.push(entry);
-            return Some(data);
-        }
-        None
+        let pos = self.entries.iter().position(|e| e.idx == idx)?;
+        let entry = self.entries.remove(pos)?;
+        let data = entry.data.clone();
+        self.entries.push_back(entry);
+        Some(data)
     }
 
     fn insert(&mut self, idx: usize, data: Arc<Vec<u8>>) {
-        self.entries.push(BlockCacheEntry { idx, data });
-        if self.entries.len() > BLOCK_CACHE_CAP {
-            self.entries.remove(0);
+        if self.entries.len() == BLOCK_CACHE_CAP {
+            self.entries.pop_front();
         }
+        self.entries.push_back(BlockCacheEntry { idx, data });
     }
 }
 
@@ -206,8 +209,7 @@ pub struct AniPosIndexHeader {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct AniPosContig {
-    pub chr_id: u16,
-    pub _pad: u16,
+    pub chr_id: u32,
     pub min_pos: u32,
     pub max_pos: u32,
     pub block_start: u32,
@@ -292,8 +294,51 @@ pub struct AniIndex {
     strings: StringSource,
     mmap: Mmap,
     pos_index: Option<AniPosIndex>,
+    /// O(1) chr_id → index-into-`pos_index.contigs`. Dense `Vec` lookup table
+    /// when there are ≤1024 contigs; `HashMap` otherwise.
+    pos_contig_lut: PosContigLut,
     info_blob: Option<AniInfoBlob>,
-    info_cache: Option<AniInfoCache>,
+    /// Lazily computed on first access.
+    info_cache: OnceLock<AniInfoCache>,
+    /// Header-derived `name → id` map for variant lookups.
+    contigs: ContigDict,
+}
+
+enum PosContigLut {
+    Empty,
+    Dense(Vec<Option<u32>>),
+    Sparse(HashMap<u32, u32>),
+}
+
+impl PosContigLut {
+    fn build(contigs: &[AniPosContig]) -> Self {
+        if contigs.is_empty() {
+            return Self::Empty;
+        }
+        let max_id = contigs.iter().map(|c| c.chr_id).max().unwrap_or(0);
+        if (max_id as usize) < POS_INDEX_DENSE_CONTIG_CAP {
+            let mut lut = vec![None; max_id as usize + 1];
+            for (idx, c) in contigs.iter().enumerate() {
+                lut[c.chr_id as usize] = Some(idx as u32);
+            }
+            Self::Dense(lut)
+        } else {
+            let mut lut = HashMap::with_capacity(contigs.len());
+            for (idx, c) in contigs.iter().enumerate() {
+                lut.insert(c.chr_id, idx as u32);
+            }
+            Self::Sparse(lut)
+        }
+    }
+
+    #[inline]
+    fn get(&self, chr_id: u32) -> Option<usize> {
+        match self {
+            Self::Empty => None,
+            Self::Dense(v) => v.get(chr_id as usize).and_then(|o| o.map(|x| x as usize)),
+            Self::Sparse(m) => m.get(&chr_id).map(|&x| x as usize),
+        }
+    }
 }
 
 impl AniIndex {
@@ -321,6 +366,13 @@ impl AniIndex {
             (None, None)
         };
 
+        let contigs = load_contig_dict(&mmap, &header)?.unwrap_or_default();
+
+        let pos_contig_lut = match pos_index.as_ref() {
+            Some(pi) => PosContigLut::build(&pi.contigs),
+            None => PosContigLut::Empty,
+        };
+
         let mut ani = Self {
             header,
             index,
@@ -329,15 +381,66 @@ impl AniIndex {
             strings,
             mmap,
             pos_index,
+            pos_contig_lut,
             info_blob,
-            info_cache: None,
+            info_cache: OnceLock::new(),
+            contigs,
         };
-        ani.build_interval_index();
-        if let Some(blob) = &ani.info_blob {
-            ani.info_cache = Some(build_info_cache(&ani, blob));
+        if ani.header.has_intervals() {
+            ani.build_interval_index();
         }
 
         Ok(ani)
+    }
+
+    /// O(1) header-derived contig name → id. Returns `None` if the dict
+    /// wasn't stored or the name isn't in the dict.
+    #[inline]
+    pub fn contig_id(&self, name: &str) -> Option<u32> {
+        self.contigs.id(name)
+    }
+
+    /// Number of contigs in the dict. `0` means legacy `.ani` without a dict.
+    #[inline]
+    pub fn contig_count(&self) -> usize {
+        self.contigs.len()
+    }
+
+    /// O(1): does the index hold any entry for the given chromosome?
+    #[inline]
+    pub fn chrom_has_entries(&self, chr_id: u32) -> bool {
+        if self.pos_index.is_none() {
+            return true;
+        }
+        self.pos_contig_lut.get(chr_id).is_some()
+    }
+
+    /// Pre-computed per-entry MPH verification keys (`u64[n_entries]`).
+    /// Returns `None` for legacy `.ani` files without the cached section.
+    pub fn cached_entry_keys(&self) -> Option<&[u64]> {
+        if !self.header.has_entry_keys() {
+            return None;
+        }
+        let start = self.header.off_entry_keys as usize;
+        let len_bytes = self.header.entry_keys_len as usize;
+        let end = start.checked_add(len_bytes)?;
+        if end > self.mmap.len() {
+            return None;
+        }
+        if (start % std::mem::align_of::<u64>()) != 0 {
+            return None;
+        }
+        let n_expected = self.entries.len();
+        if len_bytes != n_expected * std::mem::size_of::<u64>() {
+            return None;
+        }
+        Some(bytemuck::cast_slice(&self.mmap[start..end]))
+    }
+
+    /// Reference to the embedded contig dict.
+    #[inline]
+    pub fn contig_dict(&self) -> &ContigDict {
+        &self.contigs
     }
 
     pub fn strings_len(&self) -> usize {
@@ -371,12 +474,10 @@ impl AniIndex {
         }
     }
 
-    pub fn lookup_pos_index(&self, chr_id: u8, pos: u32) -> Option<&[u32]> {
+    pub fn lookup_pos_index(&self, chr_id: u32, pos: u32) -> Option<&[u32]> {
         let pos_index = self.pos_index.as_ref()?;
-        let contig = pos_index
-            .contigs
-            .iter()
-            .find(|c| c.chr_id == chr_id as u16)?;
+        let contig_idx = self.pos_contig_lut.get(chr_id)?;
+        let contig = &pos_index.contigs[contig_idx];
         if pos < contig.min_pos || pos > contig.max_pos {
             return None;
         }
@@ -384,9 +485,8 @@ impl AniIndex {
         let end = start + contig.block_count as usize;
         let blocks = &pos_index.blocks[start..end];
         let base = (pos / 512) * 512;
-        let block_idx = match blocks.binary_search_by_key(&base, |b| b.base_pos) {
-            Ok(v) => v,
-            Err(_) => return None,
+        let Ok(block_idx) = blocks.binary_search_by_key(&base, |b| b.base_pos) else {
+            return None;
         };
         let block = &blocks[block_idx];
         let bit = (pos - base) as usize;
@@ -421,8 +521,11 @@ impl AniIndex {
         self.info_blob.is_some()
     }
 
+    /// Lazy info cache. First access pays the build cost; subsequent threads
+    /// see the cached `&AniInfoCache` via `OnceLock`.
     pub fn info_cache(&self) -> Option<&AniInfoCache> {
-        self.info_cache.as_ref()
+        let blob = self.info_blob.as_ref()?;
+        Some(self.info_cache.get_or_init(|| build_info_cache(self, blob)))
     }
 
     pub fn info_blob(&self) -> Option<&AniInfoBlob> {
@@ -536,14 +639,11 @@ impl AniIndex {
         }
     }
 
-    pub fn find_interval_entry(&self, chr_id: u8, pos: u32) -> Option<usize> {
+    pub fn find_interval_entry(&self, chr_id: u32, pos: u32) -> Option<usize> {
         if self.intervals.is_empty() {
             return None;
         }
-        let list = match self.intervals.get(chr_id as usize) {
-            Some(v) => v,
-            None => return None,
-        };
+        let list = self.intervals.get(chr_id as usize)?;
         if list.is_empty() {
             return None;
         }
@@ -589,30 +689,47 @@ impl AniIndex {
 
         let compressed = &self.mmap[start..end];
         let mut out = vec![0u8; block.raw_len as usize];
-        let mut decompressor = Decompressor::new();
-        decompressor
-            .deflate_decompress(compressed, &mut out)
+        let mut decompressor = Decompress::new(false);
+        let status = decompressor
+            .decompress(compressed, &mut out, FlushDecompress::Finish)
             .map_err(|_| anyhow!("ANI block {} decompression failed", idx))?;
+        if status != Status::StreamEnd
+            || decompressor.total_in() as usize != compressed.len()
+            || decompressor.total_out() as usize != block.raw_len as usize
+        {
+            return Err(anyhow!(
+                "ANI block {} decompression incomplete: status={:?} in={}/{} out={}/{}",
+                idx,
+                status,
+                decompressor.total_in(),
+                compressed.len(),
+                decompressor.total_out(),
+                block.raw_len
+            ));
+        }
         Ok(out)
     }
 
     fn build_interval_index(&mut self) {
-        if !self.has_interval_headers() {
-            return;
-        }
-
-        let mut per_chr: Vec<Vec<IntervalEntry>> = vec![Vec::new(); 256];
+        let n_chr = self.contigs.len().max(256);
+        let mut per_chr: Vec<Vec<IntervalEntry>> = vec![Vec::new(); n_chr];
         for (idx, entry) in self.entries.iter().enumerate() {
+            if entry.chr_id == ANI_SENTINEL_CHR_ID {
+                continue;
+            }
             let rf = self.read_cstring(entry.ref_ofs as usize);
             if rf.as_ref() != "." {
                 continue;
             }
             let alt = self.read_cstring(entry.alt_ofs as usize);
-            let end = match alt.as_ref().parse::<u32>() {
-                Ok(v) => v,
-                Err(_) => continue,
+            let Ok(end) = alt.as_ref().parse::<u32>() else {
+                continue;
             };
-            per_chr[entry.chr_id as usize].push(IntervalEntry {
+            let bucket = entry.chr_id as usize;
+            if bucket >= per_chr.len() {
+                per_chr.resize_with(bucket + 1, Vec::new);
+            }
+            per_chr[bucket].push(IntervalEntry {
                 start: entry.pos,
                 end,
                 entry_idx: idx,
@@ -628,30 +745,21 @@ impl AniIndex {
         self.intervals = per_chr;
     }
 
-    fn has_interval_headers(&self) -> bool {
-        let mut idx = 0usize;
-        while idx < self.strings_len() {
-            let line = self.read_cstring(idx);
-            let s = line.as_ref();
-            if s.is_empty() {
-                idx += 1;
-                continue;
-            }
-            if s == "##KIRA_BT_ANI_INTERVALS" {
-                return true;
-            }
-            if s == "##KIRA_BT_ANI_HEADER_END" {
-                break;
-            }
-            idx += s.len() + 1;
-        }
-        false
-    }
-
     pub fn info_fields_from_blob(
         &self,
         entry_idx: usize,
         field_meta: &HashMap<String, FieldNumber>,
+    ) -> Vec<StructuredInfoField> {
+        self.info_fields_from_blob_filtered(entry_idx, field_meta, None)
+    }
+
+    /// Selective variant of [`Self::info_fields_from_blob`]. When `filter` is
+    /// `Some(keys)`, only fields whose tag string is in `keys` get parsed.
+    pub fn info_fields_from_blob_filtered(
+        &self,
+        entry_idx: usize,
+        field_meta: &HashMap<String, FieldNumber>,
+        filter: Option<&std::collections::HashSet<&str>>,
     ) -> Vec<StructuredInfoField> {
         let Some(blob) = &self.info_blob else {
             return Vec::new();
@@ -664,16 +772,21 @@ impl AniIndex {
         if offset + count > blob.pairs.len() {
             return Vec::new();
         }
-        let mut fields = Vec::with_capacity(count);
+        let cap = filter.map_or(count, |s| s.len().min(count));
+        let mut fields = Vec::with_capacity(cap);
         for pair in &blob.pairs[offset..offset + count] {
-            let key = blob
-                .dict_strings
-                .get(pair.tag_id as usize)
-                .cloned()
-                .unwrap_or_default();
-            if key.is_empty() {
+            let Some(key_ref) = blob.dict_strings.get(pair.tag_id as usize) else {
+                continue;
+            };
+            if key_ref.is_empty() {
                 continue;
             }
+            if let Some(set) = filter
+                && !set.contains(key_ref.as_str())
+            {
+                continue;
+            }
+            let key = key_ref.clone();
             if pair.value_len == 0 {
                 let number = field_meta.get(&key).copied().unwrap_or(FieldNumber::Zero);
                 fields.push(StructuredInfoField {
@@ -709,6 +822,68 @@ impl AniIndex {
         fields
     }
 
+    pub fn entry_info_string(&self, entry_idx: usize) -> Option<String> {
+        if let Some(blob) = &self.info_blob {
+            if entry_idx >= blob.entry_offsets.len() {
+                return None;
+            }
+            let offset = blob.entry_offsets[entry_idx] as usize;
+            let count = blob.entry_counts[entry_idx] as usize;
+            if count == 0 || offset + count > blob.pairs.len() {
+                return None;
+            }
+            let pairs = &blob.pairs[offset..offset + count];
+            let mut len = pairs.len().saturating_sub(1);
+            for pair in pairs {
+                if let Some(key) = blob.dict_strings.get(pair.tag_id as usize) {
+                    len += key.len();
+                }
+                if pair.value_len > 0 {
+                    len += 1 + pair.value_len as usize;
+                }
+            }
+            let mut out = String::with_capacity(len);
+            for pair in pairs {
+                let Some(key) = blob.dict_strings.get(pair.tag_id as usize) else {
+                    continue;
+                };
+                if key.is_empty() {
+                    continue;
+                }
+                if !out.is_empty() {
+                    out.push(';');
+                }
+                out.push_str(key);
+                if pair.value_len > 0 {
+                    let start = pair.value_off as usize;
+                    let end = start + pair.value_len as usize;
+                    if end > blob.values.len() {
+                        continue;
+                    }
+                    let value = std::str::from_utf8(&blob.values[start..end]).unwrap_or("");
+                    out.push('=');
+                    out.push_str(value);
+                }
+            }
+            if out.is_empty() {
+                return None;
+            }
+            return Some(out);
+        }
+
+        let e = self.entries.get(entry_idx)?;
+        if e.info_ofs == ANI_STR_NONE || e.info_len == 0 {
+            return None;
+        }
+        let info = self.read_cstring(e.info_ofs as usize);
+        let info = info.as_ref();
+        if info.is_empty() || info == "." {
+            None
+        } else {
+            Some(info.to_string())
+        }
+    }
+
     pub fn build_bundle_from_entry_idx_opts_with_meta(
         &self,
         entry_idx: usize,
@@ -716,20 +891,45 @@ impl AniIndex {
         need_info: bool,
         need_format: bool,
     ) -> AnnotationBundle {
+        self.build_bundle_from_entry_idx_opts_with_meta_filtered(
+            entry_idx,
+            field_meta,
+            need_info,
+            need_format,
+            None,
+        )
+    }
+
+    /// Selective bundle builder. When `info_filter` is `Some(keys)`, only
+    /// matching INFO tags are populated.
+    pub fn build_bundle_from_entry_idx_opts_with_meta_filtered(
+        &self,
+        entry_idx: usize,
+        field_meta: &HashMap<String, FieldNumber>,
+        need_info: bool,
+        need_format: bool,
+        info_filter: Option<&std::collections::HashSet<&str>>,
+    ) -> AnnotationBundle {
         let e = &self.entries[entry_idx];
+        let ref_str = self.read_cstring(e.ref_ofs as usize);
         let alt_str = self.read_cstring(e.alt_ofs as usize);
         let id_str = self.read_cstring(e.id_ofs as usize);
         let qual_str = self.read_cstring(e.qual_ofs as usize);
         let filter_str = self.read_cstring(e.filter_ofs as usize);
         let info = if need_info {
             if self.info_blob.is_some() {
-                self.info_fields_from_blob(entry_idx, field_meta)
+                self.info_fields_from_blob_filtered(entry_idx, field_meta, info_filter)
             } else {
                 let info_str = self.read_cstring(e.info_ofs as usize);
-                crate::annotate::structs::bundle::infer_structured_info_fields(
+                let all = crate::annotate::structs::bundle::infer_structured_info_fields(
                     info_str.as_ref(),
                     field_meta,
-                )
+                );
+                if let Some(set) = info_filter {
+                    all.into_iter().filter(|f| set.contains(f.key.as_str())).collect()
+                } else {
+                    all
+                }
             }
         } else {
             Vec::new()
@@ -772,6 +972,7 @@ impl AniIndex {
             info,
             format_str: format_opt,
             format_samples: samples,
+            db_ref: ref_str.to_string(),
         }
     }
 }
@@ -786,20 +987,136 @@ fn infer_info_type(key: &str) -> FieldType {
     }
 }
 
+/// Build the typed-value cache from a raw `AniInfoBlob`. Chunked-parallel
+/// via rayon: per-chunk caches built independently, merged with offset rebasing.
 fn build_info_cache(ani: &AniIndex, blob: &AniInfoBlob) -> AniInfoCache {
+    use rayon::prelude::*;
     let tag_types = build_tag_types(ani, blob);
     let entry_offsets = blob.entry_offsets.clone();
     let entry_counts = blob.entry_counts.clone();
     let pair_tag_ids: Vec<u32> = blob.pairs.iter().map(|p| p.tag_id).collect();
-    let mut pair_offsets = Vec::with_capacity(blob.pairs.len());
-    let mut pair_counts = Vec::with_capacity(blob.pairs.len());
+
+    const CHUNK: usize = 32_768;
+    let pairs = blob.pairs.as_slice();
+
+    let chunks: Vec<ChunkCache> = pairs
+        .par_chunks(CHUNK)
+        .map(|chunk| build_chunk(chunk, blob, &tag_types))
+        .collect();
+
+    let mut int_base: u32 = 0;
+    let mut float_base: u32 = 0;
+    let mut str_base: u32 = 0;
+    let mut str_data_base: u32 = 0;
+    let mut total_pairs = 0;
+    let mut total_ints = 0;
+    let mut total_floats = 0;
+    let mut total_strs = 0;
+    let mut total_str_data = 0;
+    for c in &chunks {
+        total_pairs += c.pair_offsets.len();
+        total_ints += c.int_values.len();
+        total_floats += c.float_values.len();
+        total_strs += c.str_offsets.len();
+        total_str_data += c.str_data.len();
+    }
+
+    let mut pair_offsets = Vec::with_capacity(total_pairs);
+    let mut pair_counts = Vec::with_capacity(total_pairs);
+    let mut int_values = Vec::with_capacity(total_ints);
+    let mut float_values = Vec::with_capacity(total_floats);
+    let mut str_offsets = Vec::with_capacity(total_strs);
+    let mut str_lens = Vec::with_capacity(total_strs);
+    let mut str_data = Vec::with_capacity(total_str_data);
+
+    for c in chunks {
+        for (off, count) in c.pair_offsets.iter().zip(c.pair_counts.iter()) {
+            let off = *off;
+            let count = *count;
+            let rebased = if count == 0 { 0u32 } else { off };
+            pair_offsets.push(rebased);
+            pair_counts.push(count);
+        }
+        let pairs_start = pair_offsets.len() - c.pair_offsets.len();
+        for (i, kind) in c.pair_kinds.iter().enumerate() {
+            let p = pairs_start + i;
+            match kind {
+                ChunkPairKind::None => {}
+                ChunkPairKind::Int => {
+                    pair_offsets[p] = pair_offsets[p].wrapping_add(int_base);
+                }
+                ChunkPairKind::Float => {
+                    pair_offsets[p] = pair_offsets[p].wrapping_add(float_base);
+                }
+                ChunkPairKind::Str => {
+                    pair_offsets[p] = pair_offsets[p].wrapping_add(str_base);
+                }
+            }
+        }
+        int_values.extend_from_slice(&c.int_values);
+        float_values.extend_from_slice(&c.float_values);
+        for s_off in c.str_offsets.iter() {
+            str_offsets.push(s_off.wrapping_add(str_data_base));
+        }
+        str_lens.extend_from_slice(&c.str_lens);
+        str_data.extend_from_slice(&c.str_data);
+
+        int_base = int_base.wrapping_add(c.int_values.len() as u32);
+        float_base = float_base.wrapping_add(c.float_values.len() as u32);
+        str_base = str_base.wrapping_add(c.str_offsets.len() as u32);
+        str_data_base = str_data_base.wrapping_add(c.str_data.len() as u32);
+    }
+
+    AniInfoCache {
+        tag_types,
+        entry_offsets,
+        entry_counts,
+        pair_tag_ids,
+        pair_offsets,
+        pair_counts,
+        int_values,
+        float_values,
+        str_offsets,
+        str_lens,
+        str_data,
+    }
+}
+
+/// Per-pair type marker used when rebasing `pair_offsets[i]` during merge.
+#[derive(Clone, Copy)]
+enum ChunkPairKind {
+    None,
+    Int,
+    Float,
+    Str,
+}
+
+struct ChunkCache {
+    pair_offsets: Vec<u32>,
+    pair_counts: Vec<u16>,
+    pair_kinds: Vec<ChunkPairKind>,
+    int_values: Vec<i32>,
+    float_values: Vec<f32>,
+    str_offsets: Vec<u32>,
+    str_lens: Vec<u32>,
+    str_data: Vec<u8>,
+}
+
+fn build_chunk(
+    pairs: &[AniInfoPair],
+    blob: &AniInfoBlob,
+    tag_types: &[FieldType],
+) -> ChunkCache {
+    let mut pair_offsets = Vec::with_capacity(pairs.len());
+    let mut pair_counts = Vec::with_capacity(pairs.len());
+    let mut pair_kinds = Vec::with_capacity(pairs.len());
     let mut int_values = Vec::new();
     let mut float_values = Vec::new();
     let mut str_offsets = Vec::new();
     let mut str_lens = Vec::new();
     let mut str_data = Vec::new();
 
-    for pair in &blob.pairs {
+    for pair in pairs {
         let tag_type = tag_types
             .get(pair.tag_id as usize)
             .copied()
@@ -807,6 +1124,7 @@ fn build_info_cache(ani: &AniIndex, blob: &AniInfoBlob) -> AniInfoCache {
         if pair.value_len == 0 {
             pair_offsets.push(0);
             pair_counts.push(0);
+            pair_kinds.push(ChunkPairKind::None);
             continue;
         }
         let start = pair.value_off as usize;
@@ -814,6 +1132,7 @@ fn build_info_cache(ani: &AniIndex, blob: &AniInfoBlob) -> AniInfoCache {
         if end > blob.values.len() {
             pair_offsets.push(0);
             pair_counts.push(0);
+            pair_kinds.push(ChunkPairKind::None);
             continue;
         }
         let raw = std::str::from_utf8(&blob.values[start..end]).unwrap_or("");
@@ -821,6 +1140,7 @@ fn build_info_cache(ani: &AniIndex, blob: &AniInfoBlob) -> AniInfoCache {
             FieldType::Flag => {
                 pair_offsets.push(0);
                 pair_counts.push(0);
+                pair_kinds.push(ChunkPairKind::None);
             }
             FieldType::Integer => {
                 let off = int_values.len() as u32;
@@ -836,6 +1156,7 @@ fn build_info_cache(ani: &AniIndex, blob: &AniInfoBlob) -> AniInfoCache {
                 }
                 pair_offsets.push(off);
                 pair_counts.push(count);
+                pair_kinds.push(ChunkPairKind::Int);
             }
             FieldType::Float => {
                 let off = float_values.len() as u32;
@@ -851,6 +1172,7 @@ fn build_info_cache(ani: &AniIndex, blob: &AniInfoBlob) -> AniInfoCache {
                 }
                 pair_offsets.push(off);
                 pair_counts.push(count);
+                pair_kinds.push(ChunkPairKind::Float);
             }
             FieldType::String => {
                 let off = str_offsets.len() as u32;
@@ -868,17 +1190,15 @@ fn build_info_cache(ani: &AniIndex, blob: &AniInfoBlob) -> AniInfoCache {
                 }
                 pair_offsets.push(off);
                 pair_counts.push(count);
+                pair_kinds.push(ChunkPairKind::Str);
             }
         }
     }
 
-    AniInfoCache {
-        tag_types,
-        entry_offsets,
-        entry_counts,
-        pair_tag_ids,
+    ChunkCache {
         pair_offsets,
         pair_counts,
+        pair_kinds,
         int_values,
         float_values,
         str_offsets,
@@ -1009,7 +1329,7 @@ fn read_header(mmap: &Mmap) -> Result<AniHeader> {
     match h3.version {
         ANI_VERSION => {
             if mmap.len() < mem::size_of::<AniHeaderV6>() {
-                return Err(anyhow!("ANI file too small for v6 header"));
+                return Err(anyhow!("ANI file too small for v6 header (rebuild)"));
             }
             let h6: AniHeaderV6 = unsafe { *(mmap.as_ptr() as *const AniHeaderV6) };
             Ok(AniHeader {
@@ -1023,10 +1343,15 @@ fn read_header(mmap: &Mmap) -> Result<AniHeader> {
                 off_block_index: h6.off_block_index,
                 n_blocks: h6.n_blocks,
                 block_size: h6.block_size,
+                flags: h6.flags,
                 off_pos_index: h6.off_pos_index,
                 pos_index_len: h6.pos_index_len,
                 off_blob: h6.off_blob,
                 blob_len: h6.blob_len,
+                off_contigs: h6.off_contigs,
+                contigs_len: h6.contigs_len,
+                off_entry_keys: h6.off_entry_keys,
+                entry_keys_len: h6.entry_keys_len,
             })
         }
         2 | 3 | 4 | 5 => Err(anyhow!(
@@ -1035,6 +1360,22 @@ fn read_header(mmap: &Mmap) -> Result<AniHeader> {
         )),
         _ => Err(anyhow!("Unsupported ANI version {}", h3.version)),
     }
+}
+
+fn load_contig_dict(mmap: &Mmap, header: &AniHeader) -> Result<Option<ContigDict>> {
+    if header.contigs_len == 0 {
+        return Ok(None);
+    }
+    let start = header.off_contigs as usize;
+    let end = start
+        .checked_add(header.contigs_len as usize)
+        .ok_or_else(|| anyhow!("ANI contig dict offset overflow"))?;
+    if end > mmap.len() {
+        return Err(anyhow!("ANI contig dict out of range"));
+    }
+    ContigDict::parse_bytes(&mmap[start..end])
+        .map(Some)
+        .map_err(|e| anyhow!("ANI contig dict: {e}"))
 }
 
 fn load_index(mmap: &Mmap, header: &AniHeader) -> Result<Index> {
@@ -1063,7 +1404,7 @@ fn load_entries_v2(mmap: &Mmap, ent_start: usize, n_entries: usize) -> Result<Ve
     for chunk in mmap[ent_start..ent_end].chunks_exact(ent_size) {
         let e: AniEntryV2 = unsafe { *(chunk.as_ptr() as *const AniEntryV2) };
         entries.push(AniEntry {
-            chr_id: e.chr_id,
+            chr_id: e.chr_id as u32,
             pos: e.pos,
             ref_ofs: e.ref_ofs,
             alt_ofs: e.alt_ofs,
@@ -1330,3 +1671,7 @@ fn find_block_index(blocks: &[AniBlockEntry], offset: u64) -> Option<usize> {
         None
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/unit/annotate_structs_ani_index.rs"]
+mod tests;

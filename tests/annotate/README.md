@@ -1,6 +1,6 @@
 # Annotate Test Suite
 
-This suite validates kira-bt annotate behavior and regression stability.
+This suite validates kira-bt annotate against upstream bcftools-compatible output and regression stability.
 
 ## Test Layout
 
@@ -8,7 +8,8 @@ In each testN directory:
 - scenario input files
 - kira.sh command for kira-bt annotate
 - optional bcftools.sh command for upstream reference generation
-- out.kira.ref.vcf expected output used by CI
+- out.bcf.ref.vcf upstream bcftools reference output when available
+- out.kira.ref.vcf pinned kira regression output, regenerated only after checking bcftools parity
 - out.kira.vcf latest produced output
 
 ## Test Case Matrix
@@ -137,11 +138,12 @@ test30
 
 A test passes if:
 1. kira.sh runs without errors.
-2. out.kira.vcf matches out.kira.ref.vcf.
+2. If out.bcf.ref.vcf exists, decompressed/normalized out.kira.vcf matches out.bcf.ref.vcf.
+3. out.kira.vcf matches out.kira.ref.vcf only as a secondary regression guard.
 
 ## Updating References
 
 1. Rebuild kira-bt.
-2. Run kira.sh in the target testN directory.
-3. If behavior changes are expected, update out.kira.ref.vcf.
-4. If bcftools.sh exists, update out.bcf.ref.vcf as upstream control.
+2. Run bcftools.sh and kira.sh in the target testN directory.
+3. Compare kira output to the bcftools output before updating out.kira.ref.vcf.
+4. If bcftools behavior changes with a new upstream version, update out.bcf.ref.vcf first.

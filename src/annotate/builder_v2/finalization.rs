@@ -1,6 +1,6 @@
 use anyhow::Result;
 use bytemuck;
-use kira_kv_engine::{BackendKind, Index, IndexBuilder, IndexConfig};
+use kira_kv_engine::{Index, IndexBuilder, IndexConfig};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::mem;
@@ -8,14 +8,16 @@ use std::path::Path;
 
 use crate::annotate::builder_v2::StringPool;
 use crate::annotate::structs::ani::{
-    ANI_MAGIC, ANI_STR_NONE, ANI_VERSION, AniBlockEntry, AniEntry, AniHeaderV6, AniInfoBlobHeader,
-    AniInfoPair, AniPosBlock, AniPosContig, AniPosIndexHeader,
+    ANI_MAGIC, ANI_SENTINEL_CHR_ID, ANI_STR_NONE, ANI_VERSION, AniBlockEntry, AniEntry,
+    AniHeaderV6, AniInfoBlobHeader, AniInfoPair, AniPosBlock, AniPosContig, AniPosIndexHeader,
+    ContigDict, ani_flags, ani_sentinel_entry,
 };
 use crate::util::url_decode_info_value;
 
 pub fn finalize_ani_index(
     rows: Vec<(u64, AniEntry)>,
     mut pool: StringPool,
+    contigs: &ContigDict,
     output: &Path,
     timing: bool,
 ) -> Result<()> {
@@ -26,9 +28,22 @@ pub fn finalize_ani_index(
     let n = rows.len();
     let mph_start = std::time::Instant::now();
 
+    // kira_kv_engine 0.6.0: BackendKind::PtrHash25 is the sole MPH backend and is the
+    // IndexConfig::default(). For the ANI workload (≤ 8 B uniformly-distributed u64
+    // keys, build-once / lookup-many, ~10^7-10^8 keys) PtrHash25 is the optimal
+    // algorithm: ~2.3 bits/key, deterministic O(1) lookups, AVX2-batched build.
+    //
+    // Lookup-side correctness depends on full membership filter (Bloom + per-slot
+    // u16 fingerprints) because the annotate pipeline issues many *negative*
+    // queries (variants in the VCF that aren't in the ANI). `lean_mph=true` would
+    // turn those into bogus indices — we'd still catch them via the chr/pos/ref/alt
+    // re-verification, but at the cost of always doing a full entry load + cstring
+    // decode. Keep `lean_mph=false` (the default).
     let mut config = IndexConfig::default();
     config.auto_detect_numeric = false;
-    config.backend = BackendKind::CHD;
+    // build_fast_profile=true is already in the default; explicit for clarity.
+    config.build_fast_profile = true;
+    config.enable_parallel_build = true;
 
     if timing {
         print_mph_config(&config, n, &rows);
@@ -51,27 +66,70 @@ pub fn finalize_ani_index(
         );
     }
 
-    let mut reordered_entries: Vec<Option<AniEntry>> = vec![None; n];
-    let mut reordered_keys: Vec<Option<u64>> = vec![None; n];
+    // Reorder source entries into MPH-slot order. We need idx[i] for every i in
+    // 0..n, so we pull all of them in one SIMD-batched pass: lookup_batch_u64_simd
+    // processes 4 keys per AVX2 hash + 16-deep prefetch chain (2-3× faster than
+    // calling lookup_u64 N times, ~5-15s saved on a 10^8-key build).
+    let reorder_start = std::time::Instant::now();
+    let keys_u64: Vec<u64> = keys_bytes.iter().map(|kb| u64::from_le_bytes(*kb)).collect();
+    let idxs: Vec<Option<usize>> = index.lookup_batch_u64_simd(&keys_u64);
+    if timing {
+        eprintln!(
+            "[ani-build] Reorder lookups (SIMD batch): {:.3}s",
+            reorder_start.elapsed().as_secs_f64()
+        );
+    }
+
+    // PtrHash25 is a *near-minimal* MPH: it returns slot ids in [0..1.10·n),
+    // not [0..n) like the old CHD backend (kira_kv_engine 0.3.2). Up to ~10%
+    // of slots are unused by real keys. We must allocate the entries array
+    // sized to the actual slot universe (max returned idx + 1) and fill the
+    // holes with a sentinel entry that has chr_id=0xFF — the existing
+    // lookup-side `if e.chr_id != chr_id` check naturally rejects sentinel
+    // hits, falling through to the interval lookup or returning None, exactly
+    // as for any other MPH false positive.
+    let max_slot = idxs
+        .iter()
+        .filter_map(|x| *x)
+        .max()
+        .ok_or_else(|| anyhow::anyhow!("No valid MPH indices returned"))?;
+    let slot_count = max_slot + 1;
+    if timing {
+        let waste_pct = 100.0 * (slot_count as f64 - n as f64) / n as f64;
+        eprintln!(
+            "[ani-build] PtrHash25 slot universe: {} slots for {} keys ({:+.2}% over n, {} holes)",
+            slot_count,
+            n,
+            waste_pct,
+            slot_count - n
+        );
+    }
+
+    let mut reordered_entries: Vec<AniEntry> = vec![ani_sentinel_entry(); slot_count];
+    let mut reordered_keys: Vec<u64> = vec![0u64; slot_count];
+    let mut slot_filled: Vec<bool> = vec![false; slot_count];
     for (i, (key, entry)) in rows.into_iter().enumerate() {
-        let idx = index.get(&keys_bytes[i])?;
-        if idx >= n {
-            anyhow::bail!("Index returned out-of-range idx {}", idx);
+        let idx = idxs[i].ok_or_else(|| {
+            anyhow::anyhow!("Index lookup failed during reorder for row {}", i)
+        })?;
+        if idx >= slot_count {
+            // Shouldn't happen — max_slot was the maximum we just computed.
+            anyhow::bail!(
+                "Index returned out-of-range idx {} (slot_count={})",
+                idx,
+                slot_count
+            );
         }
-        if reordered_entries[idx].is_some() {
+        if slot_filled[idx] {
             anyhow::bail!("Index collision at idx {}", idx);
         }
-        reordered_entries[idx] = Some(entry);
-        reordered_keys[idx] = Some(key);
+        reordered_entries[idx] = entry;
+        reordered_keys[idx] = key;
+        slot_filled[idx] = true;
     }
-    let entries: Vec<AniEntry> = reordered_entries
-        .into_iter()
-        .map(|v| v.ok_or_else(|| anyhow::anyhow!("Missing entry after reordering")))
-        .collect::<Result<Vec<_>>>()?;
-    let keys_ordered: Vec<u64> = reordered_keys
-        .into_iter()
-        .map(|v| v.ok_or_else(|| anyhow::anyhow!("Missing key after reordering")))
-        .collect::<Result<Vec<_>>>()?;
+    let entries: Vec<AniEntry> = reordered_entries;
+    let keys_ordered: Vec<u64> = reordered_keys;
+    let _ = slot_filled; // sentinel chr_id=0xFF is the runtime "is this slot real?" marker
 
     if timing {
         let stats = index.stats();
@@ -84,7 +142,12 @@ pub fn finalize_ani_index(
             let key = u64::from_le_bytes(*key_bytes);
             let contains = index.contains(key_bytes);
             let lookup = index.get(key_bytes).ok();
-            let lookup_u64 = index.lookup_u64(key).ok();
+            // Prefer the dispatch-free fast path; fall back to lookup_u64 if the
+            // backend can't be specialized (won't happen in 0.6.0, but future-proof).
+            let lookup_u64 = index
+                .lookup_u64_fast(key)
+                .unwrap_or_else(|| index.lookup_u64(key))
+                .ok();
             eprintln!(
                 "  [{}] key={:016x} len={} contains={} lookup={:?} lookup_u64={:?}",
                 i,
@@ -101,13 +164,38 @@ pub fn finalize_ani_index(
     let index_bytes = index.serialize()?;
     let pos_index_bytes = build_pos_index(&entries);
     let info_blob_bytes = build_info_blob(&entries, &mut pool)?;
+    let mut contig_bytes = Vec::with_capacity(contigs.serialized_len());
+    contigs.write_to(&mut contig_bytes)?;
+
+    // Flag: at least one variant is an interval annotation (REF=".", parseable
+    // ALT). The reader uses this to skip the O(N) interval-index scan when
+    // no intervals exist — saves ~0.5-1 s of open() time on 4M-variant indexes.
+    let has_intervals = scan_for_intervals(&entries, &mut pool);
+    // `keys_ordered` IS the per-slot MPH verification key array — we already
+    // computed it above for the slot-reorder pass. Persist it in the new
+    // `entry_keys` section so the GPU loader can mmap-borrow it instead of
+    // running its own ~10-60 s O(N) `build_entry_keys` scan on every cold
+    // start.
+    let flags = {
+        let mut f = 0u32;
+        if has_intervals {
+            f |= ani_flags::HAS_INTERVALS;
+        }
+        // Always set the flag — we always write the section now.
+        f |= ani_flags::HAS_ENTRY_KEYS;
+        f
+    };
+
     write_ani_file(
         output,
         &index_bytes,
         &pos_index_bytes,
         &info_blob_bytes,
+        &contig_bytes,
         &entries,
+        &keys_ordered,
         &mut pool,
+        flags,
         timing,
     )?;
     pool.cleanup();
@@ -115,10 +203,50 @@ pub fn finalize_ani_index(
     Ok(())
 }
 
+/// Quick scan for interval-style entries (REF=`.`, ALT parseable as u32).
+/// Used at write-time so the reader can cache the answer in the header.
+///
+/// Strictly correctness-irrelevant — if we set the flag wrongly the reader
+/// just does (or skips) extra work. But it's a cheap one-pass scan with the
+/// pool already materialised right after `build_info_blob`.
+fn scan_for_intervals(entries: &[AniEntry], pool: &mut StringPool) -> bool {
+    let raw = match pool.materialize() {
+        Ok(r) => r,
+        Err(_) => return true, // Be conservative if we can't introspect.
+    };
+    for e in entries {
+        if e.chr_id == ANI_SENTINEL_CHR_ID {
+            continue;
+        }
+        let ofs = e.ref_ofs as usize;
+        if ofs + 1 < raw.len() && raw[ofs] == b'.' && raw[ofs + 1] == 0 {
+            // Confirm ALT parses as u32 (a numeric end-position).
+            let alt_ofs = e.alt_ofs as usize;
+            if alt_ofs < raw.len() {
+                let end = raw[alt_ofs..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .map(|p| alt_ofs + p)
+                    .unwrap_or(raw.len());
+                if let Ok(s) = std::str::from_utf8(&raw[alt_ofs..end]) {
+                    if s.parse::<u32>().is_ok() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 fn print_mph_config(config: &IndexConfig, n: usize, rows: &[(u64, AniEntry)]) {
     eprintln!(
-        "[ani-build] MPHF config: gamma={:.2}, rehash_limit={}, entries={}",
-        config.mph_config.gamma, config.mph_config.rehash_limit, n
+        "[ani-build] MPHF config: backend={:?}, gamma={:.2}, max_rehash={}, lean={}, entries={}",
+        config.backend,
+        config.mph_config.gamma,
+        config.mph_config.max_rehash,
+        config.lean_mph,
+        n
     );
     eprintln!("[ani-build] First 5 keys for verification:");
     for (i, (k, e)) in rows.iter().enumerate().take(5) {
@@ -161,7 +289,13 @@ fn verify_index_correctness(index: &Index, keys_bytes: &[[u8; 8]], keys_ordered:
     for i in (0..keys_bytes.len()).step_by(step.max(1)).take(check_count) {
         let key_bytes = &keys_bytes[i];
         let key = u64::from_le_bytes(*key_bytes);
-        let idx = match index.get(key_bytes) {
+        // Use lookup_u64_fast: skips enum dispatch on PtrHash25-backed engines
+        // (~5-10 ns/lookup faster than lookup_u64). Falls back to the byte path
+        // for non-PtrHash25 backends, which 0.6.0 doesn't have yet.
+        let lookup_result = index
+            .lookup_u64_fast(key)
+            .unwrap_or_else(|| index.get(key_bytes));
+        let idx = match lookup_result {
             Ok(v) => v,
             Err(err) => {
                 errors += 1;
@@ -202,16 +336,27 @@ fn verify_index_correctness(index: &Index, keys_bytes: &[[u8; 8]], keys_ordered:
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_ani_file(
     output: &Path,
     index_bytes: &[u8],
     pos_index_bytes: &[u8],
     info_blob_bytes: &[u8],
+    contig_bytes: &[u8],
     entries: &[AniEntry],
+    entry_keys: &[u64],
     pool: &mut StringPool,
+    flags: u32,
     timing: bool,
 ) -> Result<()> {
     let n = entries.len();
+    if entry_keys.len() != n {
+        anyhow::bail!(
+            "entry_keys length {} does not match entries {} (writer bug)",
+            entry_keys.len(),
+            n
+        );
+    }
     let hdr_size = mem::size_of::<AniHeaderV6>();
     let index_size = index_bytes.len();
     let ent_size = n * mem::size_of::<AniEntry>();
@@ -227,6 +372,14 @@ fn write_ani_file(
     let block_data_off = block_index_off + block_index_size as u64;
     let pos_index_off = block_data_off + blocks_size as u64;
     let blob_off = pos_index_off + pos_index_bytes.len() as u64;
+    let contigs_off = blob_off + info_blob_bytes.len() as u64;
+    // `entry_keys` is a `u64[n]` so it has natural 8-byte alignment when
+    // placed at a file offset that's already 8-aligned. The contigs
+    // section is byte-typed, so its end may not be 8-aligned — pad up.
+    let entry_keys_raw_off = contigs_off + contig_bytes.len() as u64;
+    let entry_keys_off = (entry_keys_raw_off + 7) & !7u64;
+    let entry_keys_pad = (entry_keys_off - entry_keys_raw_off) as usize;
+    let entry_keys_size = n * mem::size_of::<u64>();
 
     let header = AniHeaderV6 {
         magic: ANI_MAGIC,
@@ -239,11 +392,15 @@ fn write_ani_file(
         off_block_index: block_index_off,
         n_blocks: blocks.len() as u64,
         block_size: block_size as u32,
-        _pad: 0,
+        flags,
         off_pos_index: pos_index_off,
         pos_index_len: pos_index_bytes.len() as u64,
         off_blob: blob_off,
         blob_len: info_blob_bytes.len() as u64,
+        off_contigs: contigs_off,
+        contigs_len: contig_bytes.len() as u64,
+        off_entry_keys: entry_keys_off,
+        entry_keys_len: entry_keys_size as u64,
     };
 
     let write_start = std::time::Instant::now();
@@ -286,6 +443,23 @@ fn write_ani_file(
 
     file.write_all(pos_index_bytes)?;
     file.write_all(info_blob_bytes)?;
+    // ContigDict section — locating it before entry_keys lets older readers
+    // (which would crash on the new header size anyway) at least get past
+    // everything they understand.
+    file.write_all(contig_bytes)?;
+
+    // Per-slot MPH verification keys. 8-byte alignment for `u64` direct
+    // mmap-cast on the GPU loader. Pad to alignment first, then write the
+    // raw little-endian u64 stream. Reader takes `&[u8]` →
+    // `bytemuck::cast_slice` → `&[u64]` zero-copy.
+    if entry_keys_pad > 0 {
+        let zeros = vec![0u8; entry_keys_pad];
+        file.write_all(&zeros)?;
+    }
+    let entry_keys_bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(entry_keys.as_ptr() as *const u8, entry_keys_size)
+    };
+    file.write_all(entry_keys_bytes)?;
 
     file.flush()?;
 
@@ -295,7 +469,7 @@ fn write_ani_file(
             write_start.elapsed().as_secs_f64()
         );
         eprintln!(
-            "[ani-build] Total ANI size: {} bytes",
+            "[ani-build] Total ANI size: {} bytes (entry_keys section: {} bytes)",
             hdr_size
                 + index_size
                 + ent_size
@@ -303,6 +477,10 @@ fn write_ani_file(
                 + blocks_size
                 + pos_index_bytes.len()
                 + info_blob_bytes.len()
+                + contig_bytes.len()
+                + entry_keys_pad
+                + entry_keys_size,
+            entry_keys_size
         );
     }
 
@@ -310,9 +488,17 @@ fn write_ani_file(
 }
 
 fn build_pos_index(entries: &[AniEntry]) -> Vec<u8> {
-    let mut per_chr: Vec<Vec<(u32, u32)>> = vec![Vec::new(); 256];
+    // chr_id is u32 now — use a HashMap to avoid pre-allocating a `Vec` sized
+    // by max chr_id (which could be huge for ultra-multi-contig assemblies).
+    use fxhash::FxHashMap;
+    let mut per_chr: FxHashMap<u32, Vec<(u32, u32)>> = FxHashMap::default();
     for (idx, entry) in entries.iter().enumerate() {
-        per_chr[entry.chr_id as usize].push((entry.pos, idx as u32));
+        // Skip sentinel slots (empty near-MPH holes — chr_id=u32::MAX). They'd
+        // otherwise fabricate a phantom contig in the pos index.
+        if entry.chr_id == ANI_SENTINEL_CHR_ID {
+            continue;
+        }
+        per_chr.entry(entry.chr_id).or_default().push((entry.pos, idx as u32));
     }
 
     let mut contigs: Vec<AniPosContig> = Vec::new();
@@ -321,7 +507,12 @@ fn build_pos_index(entries: &[AniEntry]) -> Vec<u8> {
     let mut pos_counts: Vec<u16> = Vec::new();
     let mut entry_indices: Vec<u32> = Vec::new();
 
-    for (chr_id, list) in per_chr.iter_mut().enumerate() {
+    // Iterate by chr_id (sorted) for deterministic output ordering — keeps
+    // the .ani byte-stable across builds with the same input.
+    let mut chr_ids: Vec<u32> = per_chr.keys().copied().collect();
+    chr_ids.sort_unstable();
+    for chr_id in chr_ids {
+        let list = per_chr.get_mut(&chr_id).expect("chr_id from keys()");
         if list.is_empty() {
             continue;
         }
@@ -359,7 +550,6 @@ fn build_pos_index(entries: &[AniEntry]) -> Vec<u8> {
             }
 
             let mut count = 0u16;
-            let start_idx = i;
             while i < list.len() && list[i].0 == pos {
                 let entry_idx = list[i].1;
                 entry_indices.push(entry_idx);
@@ -373,10 +563,6 @@ fn build_pos_index(entries: &[AniEntry]) -> Vec<u8> {
             current_block.masks[word] |= 1u64 << bit_in_word;
             pos_offsets.push((entry_indices.len() as u32) - (count as u32));
             pos_counts.push(count);
-
-            if i == start_idx {
-                i += 1;
-            }
         }
 
         if current_base.is_some() {
@@ -385,8 +571,7 @@ fn build_pos_index(entries: &[AniEntry]) -> Vec<u8> {
 
         let block_count = blocks.len() as u32 - block_start;
         contigs.push(AniPosContig {
-            chr_id: chr_id as u16,
-            _pad: 0,
+            chr_id,
             min_pos,
             max_pos,
             block_start,

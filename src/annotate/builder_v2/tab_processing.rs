@@ -2,20 +2,22 @@ use anyhow::Result;
 use fxhash::FxHashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::entry_processing::{insert_or_update_entry, make_position_key};
+use super::entry_processing::{EntryEntry, insert_or_update_entry, make_position_key};
 use super::multiallelic::split_info_for_allele;
 use crate::annotate::builder_v2::StringPool;
-use crate::annotate::structs::ani::{ANI_STR_NONE, AniEntry};
+use crate::annotate::structs::ani::{ANI_STR_NONE, AniEntry, ContigDict};
 use crate::annotate::structs::tab::TabSchema;
-use crate::util::{chr_name_to_id, url_encode_info_value};
+use crate::util::url_encode_info_value;
 
 pub fn process_tab_line_multiallelic(
     line: &str,
     schema: &TabSchema,
-    entries_map: &mut FxHashMap<u64, (AniEntry, usize)>,
+    contigs: &mut ContigDict,
+    entries_map: &mut FxHashMap<u64, EntryEntry>,
     pool: &mut StringPool,
     insertion_order: &mut usize,
     duplicates_skipped: &AtomicUsize,
+    collisions_detected: &AtomicUsize,
     multiallelic_count: &AtomicUsize,
     debug: bool,
 ) -> Result<usize> {
@@ -61,10 +63,9 @@ pub fn process_tab_line_multiallelic(
         return Ok(0);
     }
 
-    let chr_id = match chr_name_to_id(chr) {
-        Some(v) => v,
-        None => return Ok(0),
-    };
+    // First-seen contigs join the dict on the fly. .tab files have no
+    // `##contig` header so insertion order from the body becomes canonical.
+    let chr_id = contigs.insert(chr);
 
     let alt_alleles: Vec<&str> = if interval_mode {
         vec![alt]
@@ -188,6 +189,7 @@ pub fn process_tab_line_multiallelic(
             entries_map,
             insertion_order,
             duplicates_skipped,
+            collisions_detected,
             debug,
             chr,
             pos,

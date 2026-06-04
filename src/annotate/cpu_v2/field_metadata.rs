@@ -182,15 +182,36 @@ pub fn is_missing_value(val: &str) -> bool {
     val.is_empty() || val == "."
 }
 
-pub fn infer_field_type(key: &str) -> &'static str {
-    if key.starts_with('I') || key.ends_with("INT") {
-        return "Integer";
-    }
-    if key.starts_with('F') || key.ends_with("FLT") || key.ends_with("FLOAT") {
-        return "Float";
-    }
-    if key.starts_with('S') || key.ends_with("STR") || key.ends_with("STRING") {
-        return "String";
-    }
+/// Default-safe field type. Used only when there's no explicit `Type=` in
+/// the embedded `.ani` header. bcftools requires an explicit type — guessing
+/// from the key name mis-handles real VEP/SnpEff fields (IMPACT, FATHMM, …),
+/// so we default to the only universally-safe type: String.
+pub fn infer_field_type(_key: &str) -> &'static str {
     "String"
+}
+
+/// Parses `##FORMAT=<ID=...,Number=...,Type=...,Description=...>` header lines
+/// from the embedded `.ani` headers, returning a `key → FieldNumber` map for
+/// FORMAT-side annotations. Previously only `##INFO=` lines were parsed,
+/// which forced FORMAT annotations through the (now-removed) letter
+/// heuristic.
+pub fn load_format_metadata(
+    ani: &AniIndex,
+    debug: bool,
+) -> Result<HashMap<String, FieldNumber>> {
+    let mut metadata = HashMap::new();
+    for line in iter_ani_header_lines(ani) {
+        if !line.starts_with("##FORMAT=") {
+            continue;
+        }
+        if let (Some(key), Some(number)) =
+            (extract_info_key(&line), extract_info_number(&line))
+        {
+            if debug {
+                eprintln!("[DEBUG] FORMAT meta: {key} -> {number:?}");
+            }
+            metadata.insert(key, number);
+        }
+    }
+    Ok(metadata)
 }

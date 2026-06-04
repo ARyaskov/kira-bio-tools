@@ -1,131 +1,147 @@
+// PtrHash25 MPH lookup kernel (OpenCL parity of `ani_kernel.cu`).
+//
+// Same algorithm, same constants. Mirrors `gpu_sim::lookup_u64` and
+// `ani_kernel.cu::ptrhash25_lookup` byte-for-byte. See gpu_sim.rs for the
+// canonical reference + correctness test against `Index::lookup_u64`.
+
 #pragma OPENCL EXTENSION cl_khr_byte_addressable_store : enable
 
-// wyhash v1 constants (must match wyhash crate v0.6)
-constant ulong P0 = 0xa0761d6478bd642fUL;
-constant ulong P1 = 0xe7037ed1a0b428dbUL;
-constant ulong P2 = 0x8ebc6af09c88c6e3UL;
-constant ulong P3 = 0x589965cc75374cc3UL;
-constant ulong P4 = 0x1d8e4e27c47d124fUL;
-constant ulong P5 = 0xeb44accab455d165UL;
-constant ulong FX_SEED64 = 0x517cc1b727220a95UL;
+// ---------- PtrHash25 lookup primitives ----------------------------------
 
-inline ulong wymum(ulong a, ulong b) {
-    ulong hi = mul_hi(a, b);
-    ulong lo = a * b;
-    return hi ^ lo;
+inline ulong mix64(ulong x) {
+    x ^= x >> 32;
+    x *= 0xd6e8feb86659fd93UL;
+    x ^= x >> 32;
+    x *= 0xd6e8feb86659fd93UL;
+    x ^= x >> 32;
+    return x;
 }
 
-inline ulong read64_swapped(ulong key) {
-    uint lo = (uint)(key & 0xffffffffUL);
-    uint hi = (uint)(key >> 32);
-    return ((ulong)lo << 32) | (ulong)hi;
+inline ulong canonical_u64(ulong key, ulong prehash_seed) {
+    return mix64(key ^ prehash_seed);
 }
 
-inline ulong wyhash8(ulong key, ulong seed) {
-    ulong s = seed ^ P0;
-    ulong r = read64_swapped(key) ^ P1;
-    s = wymum(s, r);
-    return wymum(s, (ulong)8 ^ P5);
+inline ulong rotl64(ulong v, uint n) {
+    return (v << n) | (v >> (64u - n));
 }
 
-inline ulong splitmix64(ulong x) {
-    x = x + 0x9E3779B97F4A7C15UL;
-    ulong z = x;
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9UL;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBUL;
-    return z ^ (z >> 31);
+// OpenCL has `mul_hi(ulong, ulong)` for the upper 64 bits of a 128-bit
+// multiply — this is what the Rust `fast_reduce` does via `as u128`.
+inline ulong fast_reduce(ulong hash, ulong n) {
+    return mul_hi(hash, n);
 }
 
-inline ulong fxhash_rotl(ulong v) {
-    return (v << 5) | (v >> (64 - 5));
-}
+// 2-zone bucket-for. Constants:
+//   ALPHA_BUCKETS = 0.30
+//   BETA_KEYS = 0.60 → beta_threshold = 0.60 * 65536 = 39321
+inline ulong ptrhash_bucket_for(ulong h1, uint num_buckets) {
+    const uint beta_threshold = 39321u;
+    ulong large_buckets = (ulong)((double)num_buckets * 0.30);
+    if (large_buckets == 0UL) large_buckets = 1UL;
+    ulong small_buckets = (ulong)num_buckets - large_buckets;
+    if (small_buckets == 0UL) small_buckets = 1UL;
 
-inline ulong fxhash_word(ulong hash, ulong word) {
-    ulong v = fxhash_rotl(hash) ^ word;
-    return v * FX_SEED64;
-}
-
-inline ulong fxhash_bytes(__global const uchar *data, uint len) {
-    ulong hash = 0UL;
-    hash = fxhash_word(hash, (ulong)len);
-    for (uint i = 0; i < len; ++i) {
-        hash = fxhash_word(hash, (ulong)data[i]);
+    uint zone_decider = (uint)(h1 >> 48);
+    ulong h_low = h1 & 0x0000FFFFFFFFFFFFUL;
+    ulong shifted = h_low << 16;
+    if (zone_decider < beta_threshold) {
+        return fast_reduce(shifted, large_buckets);
+    } else {
+        return large_buckets + fast_reduce(shifted, small_buckets);
     }
-    return hash;
 }
 
-__kernel void ani_lookup_kernel_v2(
-    __global const ulong *keys,   // N (u64 key bytes)
-    __global const uint *g,        // m
-    uint m,
-    uint n,
-    ulong salt,
-    __global const ulong *entry_keys, // n entries
-    __global uint *out_idx,        // N
-    int nkeys
-){
+inline ulong ptrhash_slot_for(ulong h2, uchar pilot, ulong n) {
+    ulong pilot_mix = (ulong)pilot * 0xA24B1F6FDA392B31UL;
+    ulong mixed = rotl64(h2 ^ pilot_mix, 31u) * 0xD6E8FEB86659FD93UL;
+    return fast_reduce(mixed, n);
+}
+
+inline void ptrhash_hash_key(ulong canonical, ulong mph_salt, uint prerotate,
+                             ulong *h1_out, ulong *h2_out) {
+    ulong rotated = rotl64(canonical, prerotate);
+    ulong base = mix64(rotated ^ mph_salt);
+    *h1_out = base;
+    *h2_out = rotl64(base, 23u) ^ 0xA24B1F6FDA392B31UL;
+}
+
+// ---------- Block-Bloom prefilter ----------------------------------------
+
+inline bool bloom_contains(__global const ulong *bloom_words,
+                           uint bloom_blocks,
+                           ulong canonical) {
+    if (bloom_words == 0 || bloom_blocks == 0u) {
+        return true; // no filter → pass
+    }
+    const uint SALT[8] = {
+        0x47b6137bu, 0x44768924u, 0x18205237u, 0x23848965u,
+        0x8e6e2354u, 0x0f7cc9b6u, 0xe43d5fa5u, 0xa4d52dc1u,
+    };
+    ulong h_hi = canonical >> 32;
+    uint block = (uint)((h_hi * (ulong)bloom_blocks) >> 32);
+    uint seed = (uint)(canonical & 0xFFFFFFFFu);
+    uint base = block * 8u;
+    for (int i = 0; i < 8; ++i) {
+        uint bit = (seed * SALT[i] >> 27) & 0x3Fu;
+        ulong mask = 1UL << bit;
+        if ((bloom_words[base + i] & mask) != mask) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline ushort fingerprint16(ulong canonical) {
+    return (ushort)(canonical & 0xFFFFu);
+}
+
+inline uint ptrhash25_lookup(
+    ulong  key,
+    ulong  prehash_seed,
+    ulong  mph_salt,
+    uint   num_buckets,
+    ulong  num_slots,
+    uint   prerotate,
+    __global const uchar  *pilots,
+    __global const ulong  *bloom_words,
+    uint   bloom_blocks,
+    __global const ushort *fingerprints  // null when lean_mph
+) {
+    ulong canonical = canonical_u64(key, prehash_seed);
+    if (!bloom_contains(bloom_words, bloom_blocks, canonical)) {
+        return 0xFFFFFFFFu;
+    }
+    ulong h1, h2;
+    ptrhash_hash_key(canonical, mph_salt, prerotate, &h1, &h2);
+    ulong bucket = ptrhash_bucket_for(h1, num_buckets);
+    uchar pilot = pilots[(uint)bucket];
+    ulong slot = ptrhash_slot_for(h2, pilot, num_slots);
+    if (fingerprints != 0) {
+        if (fingerprints[(uint)slot] != fingerprint16(canonical)) {
+            return 0xFFFFFFFFu;
+        }
+    }
+    return (uint)slot;
+}
+
+// Batched: one work-item per key.
+__kernel void ani_ptrhash25_lookup_kernel(
+    __global const ulong  *keys,
+    ulong  prehash_seed,
+    ulong  mph_salt,
+    uint   num_buckets,
+    ulong  num_slots,
+    uint   prerotate,
+    __global const uchar  *pilots,
+    __global const ulong  *bloom_words,
+    uint   bloom_blocks,
+    __global const ushort *fingerprints,
+    __global uint         *out_idx,
+    int    nkeys
+) {
     int gid = get_global_id(0);
     if (gid >= nkeys) return;
-
-    ulong key = keys[gid];
-    ulong base = wyhash8(key, salt);
-
-    uint v0 = (uint)(splitmix64(base ^ 0x9E3779B97F4A7C15UL) % (ulong)m);
-    uint v1 = (uint)(splitmix64(base + 0xA24B1F6FUL) % (ulong)m);
-    uint v2 = (uint)(splitmix64(base ^ 0x853C49E60A6C9D39UL) % (ulong)m);
-
-    uint idx = (g[v0] + g[v1] + g[v2]) % n;
-    if (entry_keys[idx] == key) {
-        out_idx[gid] = idx;
-    } else {
-        out_idx[gid] = 0xffffffffU;
-    }
-}
-
-__kernel void ani_lookup_from_strings_kernel(
-    __global const uchar *ref_pool,
-    __global const uint *ref_offsets,
-    __global const uint *ref_lens,
-    __global const uchar *alt_pool,
-    __global const uint *alt_offsets,
-    __global const uint *alt_lens,
-    __global const uint *key_ref_idx,
-    __global const uchar *key_chr,
-    __global const uint *key_pos,
-    __global const uint *g,
-    uint m,
-    uint n,
-    ulong salt,
-    __global const ulong *entry_keys,
-    __global uint *out_idx,
-    int nkeys
-){
-    int gid = get_global_id(0);
-    if (gid >= nkeys) return;
-
-    uint ref_idx = key_ref_idx[gid];
-    uint ref_off = ref_offsets[ref_idx];
-    uint ref_len = ref_lens[ref_idx];
-    uint alt_off = alt_offsets[gid];
-    uint alt_len = alt_lens[gid];
-
-    ulong ref_hash = fxhash_bytes(ref_pool + ref_off, ref_len);
-    ulong alt_hash = fxhash_bytes(alt_pool + alt_off, alt_len);
-
-    ulong key = ((ulong)key_chr[gid] << 32) | (ulong)key_pos[gid];
-    key ^= ref_hash;
-    key ^= alt_hash;
-
-    ulong base = wyhash8(key, salt);
-
-    uint v0 = (uint)(splitmix64(base ^ 0x9E3779B97F4A7C15UL) % (ulong)m);
-    uint v1 = (uint)(splitmix64(base + 0xA24B1F6FUL) % (ulong)m);
-    uint v2 = (uint)(splitmix64(base ^ 0x853C49E60A6C9D39UL) % (ulong)m);
-
-    uint idx = (g[v0] + g[v1] + g[v2]) % n;
-    if (entry_keys[idx] == key) {
-        out_idx[gid] = idx;
-    } else {
-        out_idx[gid] = 0xffffffffU;
-    }
+    out_idx[gid] = ptrhash25_lookup(
+        keys[gid], prehash_seed, mph_salt, num_buckets, num_slots, prerotate,
+        pilots, bloom_words, bloom_blocks, fingerprints);
 }

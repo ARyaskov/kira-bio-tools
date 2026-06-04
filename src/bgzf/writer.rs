@@ -1,22 +1,41 @@
 use crossbeam_channel::{Receiver, Sender, bounded};
-use flate2::Compression;
-use libdeflater::Compressor;
+use flate2::{Compress, Compression, FlushCompress, Status};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
+/// Worst-case raw-deflate output size for `input` bytes. Matches the historic
+/// libdeflate bound (zlib's `deflateBound` formula) — safe for both miniz_oxide
+/// and any C backend if we ever reintroduce one. Used to size scratch buffers.
+#[inline]
+fn deflate_compress_bound(input: usize) -> usize {
+    input + (input >> 12) + (input >> 14) + (input >> 25) + 13
+}
+
 use super::simd::{compute_crc32, fast_copy_bgzf_header, fast_memcpy};
 use super::structs::{BGZF_EOF, CHUNK_SIZE, CompressedBlock, WritePool};
 
-const CHANNEL_DEPTH: usize = 256;
+/// Bounded queue between the writer pre-input stage and the
+/// compressor pool. 512 deep — about 32 MB of in-flight pre-compression
+/// blocks (CHUNK_SIZE × 512). Larger value gives the compressor pool
+/// more parallelism opportunity but burns RAM; 256→512 keeps the
+/// compressor pool fed without saturating RAM.
+const CHANNEL_DEPTH: usize = 512;
+/// Output BufWriter capacity. 128 MB sweet spot — larger values
+/// (we tried 256 MB) cause transient stalls during periodic flushes
+/// that block the writer thread for ~250 ms, which in turn fills the
+/// upstream compressor channel and back-pressures the worker. The
+/// observed regression was 16+ sec of `send` block time on GPU path
+/// when the buffer was 256 MB.
 const WRITER_BUFFER_SIZE: usize = 128 * 1024 * 1024;
 
 pub struct BgzfWriter {
     tx: Sender<(Vec<u8>, usize)>,
     writer_thread: Option<thread::JoinHandle<io::Result<()>>>,
     sequence: AtomicUsize,
+    pending: Vec<u8>,
     _num_workers: usize,
     _write_pool: WritePool,
 }
@@ -27,7 +46,11 @@ impl BgzfWriter {
     }
 
     pub fn with_compression<P: AsRef<Path>>(path: P, compression: Compression) -> io::Result<Self> {
-        let num_workers = num_cpus::get().min(16).max(2);
+        // Compressor pool size: up to 32 threads on big servers (was
+        // capped at 16). For typical 8-16-core hosts this is min'd to
+        // the actual CPU count. Doubles the parallel compression
+        // throughput on machines with >16 logical cores.
+        let num_workers = num_cpus::get().min(32).max(2);
 
         let file = File::create(path)?;
         let writer = BufWriter::with_capacity(WRITER_BUFFER_SIZE, file);
@@ -42,8 +65,9 @@ impl BgzfWriter {
                 let comp = compression;
 
                 thread::spawn(move || {
-                    let lvl = libdeflater::CompressionLvl::new(comp.level() as i32).unwrap();
-                    let mut compressor = libdeflater::Compressor::new(lvl);
+                    // flate2::Compress with zlib_header=false → raw deflate, same
+                    // wire format libdeflater produced. Level mapping is identical.
+                    let mut compressor = Compress::new(comp, false);
                     let mut comp_buf = vec![0u8; 512 * 1024];
 
                     Self::compression_worker(rx, tx, &mut compressor, &mut comp_buf)
@@ -61,6 +85,7 @@ impl BgzfWriter {
             tx: chunk_tx,
             writer_thread: Some(writer_thread),
             sequence: AtomicUsize::new(0),
+            pending: Vec::with_capacity(CHUNK_SIZE),
             _num_workers: num_workers,
             _write_pool: pool,
         })
@@ -69,7 +94,7 @@ impl BgzfWriter {
     fn compression_worker(
         chunk_rx: Receiver<(Vec<u8>, usize)>,
         block_tx: Sender<CompressedBlock>,
-        compressor: &mut Compressor,
+        compressor: &mut Compress,
         scratch_buf: &mut Vec<u8>,
     ) -> io::Result<()> {
         while let Ok((data, seq)) = chunk_rx.recv() {
@@ -133,24 +158,32 @@ impl BgzfWriter {
         let mut offset = 0;
 
         while offset < data.len() {
-            let end = (offset + CHUNK_SIZE).min(data.len());
-            let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
-
-            let chunk = data[offset..end].to_vec();
-
-            self.tx
-                .send((chunk, seq))
-                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Worker died"))?;
-
-            offset = end;
+            let free = CHUNK_SIZE - self.pending.len();
+            let take = free.min(data.len() - offset);
+            self.pending.extend_from_slice(&data[offset..offset + take]);
+            offset += take;
+            if self.pending.len() == CHUNK_SIZE {
+                self.flush_pending()?;
+            }
         }
 
         Ok(())
     }
 
+    fn flush_pending(&mut self) -> io::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+        let chunk = std::mem::replace(&mut self.pending, Vec::with_capacity(CHUNK_SIZE));
+        self.tx
+            .send((chunk, seq))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Worker died"))
+    }
+
     fn compress_block(
         data: &[u8],
-        compressor: &mut Compressor,
+        compressor: &mut Compress,
         scratch_buf: &mut Vec<u8>,
     ) -> io::Result<Vec<u8>> {
         let mut block = Vec::with_capacity(data.len() / 2 + 256);
@@ -159,14 +192,33 @@ impl BgzfWriter {
             fast_copy_bgzf_header(block.as_mut_ptr());
         }
 
-        let bound = compressor.deflate_compress_bound(data.len());
+        let bound = deflate_compress_bound(data.len());
         if scratch_buf.len() < bound {
             scratch_buf.resize(bound, 0);
         }
 
-        let comp_len = compressor
-            .deflate_compress(data, scratch_buf)
+        // Reset the stateful Compress between blocks: each BGZF block is an
+        // independent raw-deflate stream. Without reset() the second block
+        // would inherit the LZ77 dictionary from the first one and the
+        // FlushCompress::Finish from the prior call.
+        compressor.reset();
+        let before_out = compressor.total_out();
+        let before_in = compressor.total_in();
+        let status = compressor
+            .compress(data, scratch_buf, FlushCompress::Finish)
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "Compression failed"))?;
+        // FlushCompress::Finish with a sufficient output buffer (deflate_compress_bound)
+        // and a single-shot call must consume all input and reach StreamEnd. If it
+        // didn't, the scratch buffer is undersized — a bug, not a runtime condition.
+        if status != Status::StreamEnd
+            || (compressor.total_in() - before_in) as usize != data.len()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Compression did not finish in one call (scratch too small?)",
+            ));
+        }
+        let comp_len = (compressor.total_out() - before_out) as usize;
 
         unsafe {
             let old_len = block.len();
@@ -189,6 +241,7 @@ impl BgzfWriter {
     }
 
     pub fn finish(mut self) -> io::Result<()> {
+        self.flush_pending()?;
         drop(self.tx);
 
         if let Some(handle) = self.writer_thread.take() {
@@ -208,6 +261,10 @@ impl Write for BgzfWriter {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+        self.flush_pending()
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/bgzf_writer.rs"]
+mod tests;

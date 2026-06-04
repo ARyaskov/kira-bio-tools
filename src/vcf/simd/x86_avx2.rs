@@ -1,3 +1,5 @@
+#![allow(unsafe_op_in_unsafe_fn)]
+
 use crate::util::chr_name_to_id;
 use crate::vcf::structs::{VcfFields, VcfFieldsFull};
 

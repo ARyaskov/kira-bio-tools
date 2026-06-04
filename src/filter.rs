@@ -121,7 +121,7 @@ struct FieldMeta {
 }
 
 #[derive(Clone)]
-struct HeaderMeta {
+pub struct HeaderMeta {
     info: HashMap<String, FieldMeta>,
     format: HashMap<String, FieldMeta>,
     filters: HashSet<String>,
@@ -2346,7 +2346,7 @@ fn gt_eq_query(gt: &str, query: &str) -> bool {
         return true;
     }
     if query == "aA" || query == "Aa" {
-        return gt_is_aA(gt);
+        return gt_is_a_a(gt);
     }
     let q = query.to_ascii_lowercase();
     match q.as_str() {
@@ -2425,7 +2425,7 @@ fn gt_is_aa(gt: &str) -> bool {
     all_alt && all_same
 }
 
-fn gt_is_aA(gt: &str) -> bool {
+fn gt_is_a_a(gt: &str) -> bool {
     if gt_missing(gt) || gt_ploidy(gt) < 2 {
         return false;
     }

@@ -177,6 +177,7 @@ pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
     }
 
     writer.finish()?;
+    maybe_write_index(args.output.as_deref(), args.write_index.as_deref(), args.output_type.as_deref())?;
     let total_time = total_start.elapsed();
     eprintln!(
         "filter done records={} dropped={} header_ms={} eval_ms={} mask_ms={} mode_ms={} setgt_ms={} gap_ms={} flush_ms={} write_ms={} total_ms={}",
@@ -195,15 +196,38 @@ pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
     Ok(())
 }
 
+fn maybe_write_index(out: Option<&std::path::Path>, kind: Option<&str>, output_type: Option<&str>) -> Result<()> {
+    let Some(out) = out else { return Ok(()); };
+    let Some(kind) = kind else { return Ok(()); };
+    let bgzf_out = matches!(output_type, Some(s) if s.starts_with('z') || s.starts_with('b'));
+    if !bgzf_out {
+        eprintln!("[filter] -W: index requires BGZF output (-O z or -O b); skipping for plain VCF");
+        return Ok(());
+    }
+    let idx_path = std::path::PathBuf::from(format!("{}.{}", out.display(), if kind == "tbi" { "tbi" } else { "csi" }));
+    eprintln!("[filter] -W {}: writing index to {:?}", kind, idx_path);
+    let _ = crate::csi::build_csi_index(out, &idx_path);
+    Ok(())
+}
+
+fn load_expr(s: &str) -> String {
+    if let Some(path) = s.strip_prefix('@') {
+        if let Ok(c) = std::fs::read_to_string(path) {
+            return c.trim().to_string();
+        }
+    }
+    s.to_string()
+}
+
 fn resolve_expr(args: &FilterArgs) -> (Option<String>, bool) {
     if let Some(expr) = &args.include {
-        return (Some(expr.clone()), false);
+        return (Some(load_expr(expr)), false);
     }
     if let Some(expr) = &args.exclude {
-        return (Some(expr.clone()), true);
+        return (Some(load_expr(expr)), true);
     }
     if let Some(expr) = &args.expr {
-        return (Some(expr.clone()), false);
+        return (Some(load_expr(expr)), false);
     }
     (None, false)
 }
@@ -343,46 +367,108 @@ fn ensure_filter_header(headers: &mut Vec<String>, id: &str, desc: &str) {
     }
 }
 
-enum OutputWriter {
+pub(crate) enum OutputWriter {
     Stdout(BufWriter<io::Stdout>),
     File(BufWriter<File>),
     Bgzf(BgzfWriter),
+    Bcf {
+        writer: Option<crate::bcf::BcfWriter>,
+        header_buf: Vec<u8>,
+        header_done: bool,
+        out_path: PathBuf,
+        compressed: bool,
+        level: u32,
+    },
 }
 
 impl OutputWriter {
-    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+    pub(crate) fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
         match self {
             OutputWriter::Stdout(w) => w.write_all(data),
             OutputWriter::File(w) => w.write_all(data),
             OutputWriter::Bgzf(w) => w.write_all(data),
+            OutputWriter::Bcf { writer, header_buf, header_done, out_path, compressed, level } => {
+                if !*header_done {
+                    header_buf.extend_from_slice(data);
+                    if let Some(pos) = find_chrom_line(header_buf) {
+                        let chrom_end = pos + chrom_line_length(&header_buf[pos..]);
+                        let header_text = std::str::from_utf8(&header_buf[..chrom_end]).map_err(io_err)?;
+                        let header_lines: Vec<String> = header_text.lines().map(|s| s.to_string()).collect();
+                        let bw = crate::bcf::BcfWriter::create(out_path.as_path(), *compressed, *level, &header_lines)
+                            .map_err(io_err)?;
+                        *writer = Some(bw);
+                        *header_done = true;
+                        let leftover = header_buf.split_off(chrom_end);
+                        header_buf.clear();
+                        if !leftover.is_empty() {
+                            let lo_str = std::str::from_utf8(&leftover).map_err(io_err)?;
+                            if let Some(bw) = writer.as_mut() {
+                                for line in lo_str.split('\n') {
+                                    if !line.is_empty() { bw.write_vcf_line(line).map_err(io_err)?; }
+                                }
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                let s = std::str::from_utf8(data).map_err(io_err)?;
+                if let Some(bw) = writer.as_mut() {
+                    for line in s.split('\n') {
+                        if !line.is_empty() { bw.write_vcf_line(line).map_err(io_err)?; }
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
-    fn finish(self) -> io::Result<()> {
+    pub(crate) fn finish(self) -> io::Result<()> {
         match self {
             OutputWriter::Stdout(mut w) => w.flush(),
             OutputWriter::File(mut w) => w.flush(),
             OutputWriter::Bgzf(w) => w.finish(),
+            OutputWriter::Bcf { writer, .. } => {
+                if let Some(w) = writer { w.finish().map_err(io_err)?; }
+                Ok(())
+            }
         }
     }
 }
 
-fn open_writer(path: Option<&PathBuf>, output_type: Option<&str>) -> Result<OutputWriter> {
-    let out_type = output_type.unwrap_or("v");
-    let use_bgzf = out_type.starts_with('z');
-    if out_type.starts_with('b') || out_type.starts_with('u') {
-        anyhow::bail!("BCF output not supported");
-    }
-    if use_bgzf {
-        let Some(path) = path else {
-            anyhow::bail!("BGZF output requires -o");
-        };
-        let writer = BgzfWriter::create(path)?;
-        return Ok(OutputWriter::Bgzf(writer));
-    }
-    match path {
-        Some(p) => Ok(OutputWriter::File(BufWriter::new(File::create(p)?))),
-        None => Ok(OutputWriter::Stdout(BufWriter::new(io::stdout()))),
+fn io_err<E: std::fmt::Display>(e: E) -> io::Error { io::Error::other(format!("{}", e)) }
+
+fn find_chrom_line(buf: &[u8]) -> Option<usize> {
+    let needle = b"\n#CHROM";
+    buf.windows(needle.len()).position(|w| w == needle).map(|p| p + 1)
+}
+
+fn chrom_line_length(s: &[u8]) -> usize {
+    s.iter().position(|&b| b == b'\n').map(|p| p + 1).unwrap_or(s.len())
+}
+
+pub(crate) fn open_writer(path: Option<&PathBuf>, output_type: Option<&str>) -> Result<OutputWriter> {
+    use crate::annotate::postproc::{OutputKind, parse_output_type};
+    let kind = output_type.map(parse_output_type).transpose()?.unwrap_or(OutputKind::Vcf);
+    match kind {
+        OutputKind::Vcf => match path {
+            Some(p) => Ok(OutputWriter::File(BufWriter::new(File::create(p)?))),
+            None => Ok(OutputWriter::Stdout(BufWriter::new(io::stdout()))),
+        },
+        OutputKind::VcfGz(_) => {
+            let Some(path) = path else { anyhow::bail!("-O z requires -o FILE"); };
+            Ok(OutputWriter::Bgzf(BgzfWriter::create(path)?))
+        }
+        OutputKind::Bcf(level) => {
+            let Some(path) = path else { anyhow::bail!("-O u|b requires -o FILE"); };
+            Ok(OutputWriter::Bcf {
+                writer: None,
+                header_buf: Vec::with_capacity(64 * 1024),
+                header_done: false,
+                out_path: path.clone(),
+                compressed: level > 0,
+                level,
+            })
+        }
     }
 }
 

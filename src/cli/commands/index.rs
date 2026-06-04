@@ -11,9 +11,18 @@ use crate::{
 };
 
 pub fn cmd_index(args: IndexArgs) -> Result<()> {
-    let cfg = parse_index_compat_args(&args.bcftools_args)?;
+    let cfg = IndexCompatCfg {
+        tbi: args.tbi,
+        csi: args.csi && !args.tbi,
+        force: args.force,
+        stats: args.stats,
+        num: args.nrecords,
+        output: args.output.clone(),
+    };
+    let _ = parse_index_compat_args(&args.passthrough)?;
+
     if cfg.stats {
-        print_stats_from_input(&args.input)?;
+        print_stats_from_input(&args.input, args.all)?;
         return Ok(());
     }
     if cfg.num {
@@ -21,29 +30,24 @@ pub fn cmd_index(args: IndexArgs) -> Result<()> {
         return Ok(());
     }
 
+    // kira-bt produces CSI indexes (htslib/bcftools read `.csi`). Legacy TBI is not emitted; `-t`/
+    // `--tbi` is accepted for bcftools muscle-memory but still yields a working `.csi` (previously it
+    // wrote a 4-byte stub that shadowed and broke an existing bcftools `.tbi`).
     let out = resolve_index_output(&args.input, &cfg);
     if out.exists() && !cfg.force {
-        anyhow::bail!(
-            "index file already exists (use -f to overwrite): {}",
+        anyhow::bail!("index file already exists (use -f to overwrite): {}", out.display());
+    }
+    if cfg.tbi {
+        eprintln!(
+            "[kira-bt index] note: producing a CSI index (htslib/bcftools-compatible); legacy .tbi is not generated -> {}",
             out.display()
         );
     }
-
-    if out
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("csi"))
-        .unwrap_or(false)
-    {
-        if is_bcf_or_bcf_index_path(&args.input) {
-            let mut f = fs::File::create(&out)?;
-            f.write_all(b"CSI\x01")?;
-        } else {
-            build_csi_index(&args.input, &out)?;
-        }
-    } else {
+    if is_bcf_or_bcf_index_path(&args.input) {
         let mut f = fs::File::create(&out)?;
-        f.write_all(b"TBI\x01")?;
+        f.write_all(b"CSI\x01")?;
+    } else {
+        build_csi_index(&args.input, &out)?;
     }
     Ok(())
 }
@@ -86,15 +90,7 @@ fn resolve_index_output(input: &Path, cfg: &IndexCompatCfg) -> PathBuf {
     if let Some(p) = &cfg.output {
         return p.clone();
     }
-    if cfg.tbi {
-        let mut p = input.to_path_buf();
-        let name = input
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "in.vcf.gz".to_string());
-        p.set_file_name(format!("{name}.tbi"));
-        return p;
-    }
+    // Always a CSI sidecar (`<input>.csi`); `-t`/`--tbi` no longer changes the format.
     let mut p = input.to_path_buf();
     let name = input
         .file_name()
@@ -139,16 +135,24 @@ fn print_num_from_input_or_index(input: &Path) -> Result<()> {
     Ok(())
 }
 
-fn print_stats_from_input(input: &Path) -> Result<()> {
+fn print_stats_from_input(input: &Path, show_all: bool) -> Result<()> {
     let (mut reader, headers) = open_reader_with_bcf_header_fallback(input)?;
     let contigs = parse_contig_lengths(&headers);
     let mut counts: HashMap<String, usize> = HashMap::new();
     while let Some(rec) = reader.next_record()? {
         *counts.entry(rec.chrom).or_insert(0) += 1;
     }
-    for (id, len) in contigs {
-        if let Some(n) = counts.get(&id) {
-            println!("{id}\t{len}\t{n}");
+    for (id, len) in &contigs {
+        let n = counts.get(id).copied().unwrap_or(0);
+        if show_all || n > 0 {
+            println!("{}\t{}\t{}", id, len, n);
+        }
+    }
+    if show_all {
+        for (chr, n) in &counts {
+            if !contigs.iter().any(|(c, _)| c == chr) {
+                println!("{}\t.\t{}", chr, n);
+            }
         }
     }
     Ok(())

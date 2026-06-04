@@ -1,7 +1,6 @@
-use crate::util::fast_hash64;
-
 use crate::annotate::structs::ani::header::{ANI_STR_NONE, AniEntry};
 use crate::annotate::structs::ani::index::{AniIndex, CStrRef};
+use crate::annotate::structs::ani::key::make_variant_key;
 use crate::annotate::structs::bundle::FieldNumber;
 use crate::annotate::structs::bundle::{AnnotationBundle, parse_info_field};
 use crate::util::chr_name_to_id;
@@ -30,6 +29,7 @@ impl AniIndex {
         need_info: bool,
         need_format: bool,
     ) -> AnnotationBundle {
+        let ref_str = self.read_cstring(e.ref_ofs as usize);
         let alt_str = self.read_cstring(e.alt_ofs as usize);
         let id_str = self.read_cstring(e.id_ofs as usize);
         let qual_str = self.read_cstring(e.qual_ofs as usize);
@@ -78,6 +78,7 @@ impl AniIndex {
             info,
             format_str: format_opt,
             format_samples: samples,
+            db_ref: ref_str.to_string(),
         }
     }
 
@@ -88,6 +89,7 @@ impl AniIndex {
         need_format: bool,
     ) -> (AnnotationBundle, BundleTiming) {
         let read_start = Instant::now();
+        let ref_str = self.read_cstring(e.ref_ofs as usize);
         let alt_str = self.read_cstring(e.alt_ofs as usize);
         let id_str = self.read_cstring(e.id_ofs as usize);
         let qual_str = self.read_cstring(e.qual_ofs as usize);
@@ -157,6 +159,7 @@ impl AniIndex {
                 info,
                 format_str: format_opt,
                 format_samples: samples,
+                db_ref: ref_str.to_string(),
             },
             BundleTiming {
                 read_s,
@@ -174,25 +177,29 @@ impl AniIndex {
         rf: &str,
         alt: &str,
     ) -> Option<AnnotationBundle> {
-        let chr_id = chr_name_to_id(chr)? as u8;
-        let rf_hash = fast_hash64(rf.as_bytes());
-
-        self.lookup_exact_by_chr_id(chr_id, pos, rf, rf_hash, alt)
+        // Header-derived contig dict first, fall back to the static name table
+        // for legacy `.ani` files without an embedded dict (contig_count==0).
+        let chr_id = self
+            .contig_id(chr)
+            .or_else(|| chr_name_to_id(chr).map(u32::from))?;
+        // `rf_hash` was a micro-opt for the legacy XOR key (compute once,
+        // reuse across multiple ALTs). The new non-commutative `make_variant_key`
+        // hashes REF inline; the parameter is kept for API stability with the
+        // existing GPU/OpenCL call sites and is ignored.
+        self.lookup_exact_by_chr_id(chr_id, pos, rf, 0, alt)
     }
 
     pub fn lookup_exact_by_chr_id(
         &self,
-        chr_id: u8,
+        chr_id: u32,
         pos: u32,
         rf: &str,
-        rf_hash: u64,
+        _rf_hash: u64,
         alt: &str,
     ) -> Option<AnnotationBundle> {
         let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
 
-        let mut h = (chr_id as u64) << 32 | pos as u64;
-        h ^= rf_hash;
-        h ^= fast_hash64(alt.as_bytes());
+        let h = make_variant_key(chr_id, pos, rf.as_bytes(), alt.as_bytes());
 
         if debug {
             eprintln!(
@@ -201,7 +208,15 @@ impl AniIndex {
             );
         }
 
-        let idx = match self.index.lookup_u64(h) {
+        // kira_kv_engine 0.6.0: lookup_u64_fast skips the BackendDispatch enum
+        // match for PtrHash25-backed indexes (~5-10 ns / lookup faster than
+        // lookup_u64). Returns None only for non-PtrHash25 engines, which 0.6.0
+        // doesn't have yet — fall back to lookup_u64 to stay future-proof.
+        let idx = match self
+            .index
+            .lookup_u64_fast(h)
+            .unwrap_or_else(|| self.index.lookup_u64(h))
+        {
             Ok(v) => v,
             Err(_) => {
                 if debug {
@@ -271,19 +286,17 @@ impl AniIndex {
 
     pub fn lookup_exact_by_chr_id_opts(
         &self,
-        chr_id: u8,
+        chr_id: u32,
         pos: u32,
         rf: &str,
-        rf_hash: u64,
+        _rf_hash: u64,
         alt: &str,
         need_info: bool,
         need_format: bool,
     ) -> Option<AnnotationBundle> {
         let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
 
-        let mut h = (chr_id as u64) << 32 | pos as u64;
-        h ^= rf_hash;
-        h ^= fast_hash64(alt.as_bytes());
+        let h = make_variant_key(chr_id, pos, rf.as_bytes(), alt.as_bytes());
 
         if debug {
             eprintln!(
@@ -292,7 +305,15 @@ impl AniIndex {
             );
         }
 
-        let idx = match self.index.lookup_u64(h) {
+        // kira_kv_engine 0.6.0: lookup_u64_fast skips the BackendDispatch enum
+        // match for PtrHash25-backed indexes (~5-10 ns / lookup faster than
+        // lookup_u64). Returns None only for non-PtrHash25 engines, which 0.6.0
+        // doesn't have yet — fall back to lookup_u64 to stay future-proof.
+        let idx = match self
+            .index
+            .lookup_u64_fast(h)
+            .unwrap_or_else(|| self.index.lookup_u64(h))
+        {
             Ok(v) => v,
             Err(_) => {
                 if debug {
@@ -378,7 +399,7 @@ impl AniIndex {
 
     pub fn lookup_exact_by_chr_id_pos_index_opts(
         &self,
-        chr_id: u8,
+        chr_id: u32,
         pos: u32,
         rf: &str,
         rf_hash: u64,
@@ -387,7 +408,33 @@ impl AniIndex {
         need_info: bool,
         need_format: bool,
     ) -> Option<AnnotationBundle> {
+        self.lookup_exact_by_chr_id_pos_index_opts_filtered(
+            chr_id, pos, rf, rf_hash, alt, field_meta, need_info, need_format, None,
+        )
+    }
+
+    /// Selective-info variant. When `info_filter` is `Some`, the bundle's
+    /// `info` field only carries the matching tags — saves ~85% of per-record
+    /// `String` allocations on selective annotation runs
+    /// (`-c INFO/A,INFO/B,INFO/C` vs full INFO).
+    #[allow(clippy::too_many_arguments)]
+    pub fn lookup_exact_by_chr_id_pos_index_opts_filtered(
+        &self,
+        chr_id: u32,
+        pos: u32,
+        rf: &str,
+        rf_hash: u64,
+        alt: &str,
+        field_meta: &HashMap<String, FieldNumber>,
+        need_info: bool,
+        need_format: bool,
+        info_filter: Option<&std::collections::HashSet<&str>>,
+    ) -> Option<AnnotationBundle> {
+        use crate::annotate::cpu_v2::vcmp;
+
         if let Some(list) = self.lookup_pos_index(chr_id, pos) {
+            // Pass 1: exact REF + exact ALT. The fastest and overwhelmingly
+            // common case — same source/target naming conventions.
             for &idx in list {
                 let e = &self.entries[idx as usize];
                 if e.chr_id != chr_id || e.pos != pos {
@@ -401,11 +448,52 @@ impl AniIndex {
                 if alt_str.as_ref() != alt {
                     continue;
                 }
-                return Some(self.build_bundle_from_entry_idx_opts_with_meta(
+                return Some(self.build_bundle_from_entry_idx_opts_with_meta_filtered(
                     idx as usize,
                     field_meta,
                     need_info,
                     need_format,
+                    info_filter,
+                ));
+            }
+            // Pass 2: vcmp REF-padding-aware match. Catches the bcftools
+            // case where source and target encode the same indel with
+            // different REF padding (e.g. user has `REF=A ALT=AT` but the
+            // database has `REF=ATC ALT=ATTC`). Pass 1's exact-match would
+            // have hit any candidate where rf is byte-identical to the
+            // stored REF, so anything reaching here has a REF length
+            // mismatch — exactly the vcmp's territory.
+            for &idx in list {
+                let e = &self.entries[idx as usize];
+                if e.chr_id != chr_id || e.pos != pos {
+                    continue;
+                }
+                let rf_str = self.read_cstring(e.ref_ofs as usize);
+                let Some(diff) = vcmp::diff_refs(rf.as_bytes(), rf_str.as_ref().as_bytes())
+                else {
+                    continue;
+                };
+                let alt_str = self.read_cstring(e.alt_ofs as usize);
+                if !vcmp::matches_allele(
+                    alt.as_bytes(),
+                    alt_str.as_ref().as_bytes(),
+                    &diff,
+                ) {
+                    continue;
+                }
+                if std::env::var("KIRA_BT_DEBUG").is_ok() {
+                    eprintln!(
+                        "[LOOKUP] vcmp hit: {chr_id}:{pos} ({rf}>{alt}) ↔ ({}>{})",
+                        rf_str.as_ref(),
+                        alt_str.as_ref()
+                    );
+                }
+                return Some(self.build_bundle_from_entry_idx_opts_with_meta_filtered(
+                    idx as usize,
+                    field_meta,
+                    need_info,
+                    need_format,
+                    info_filter,
                 ));
             }
         }
@@ -415,7 +503,7 @@ impl AniIndex {
 
     pub fn lookup_exact_by_chr_id_timed(
         &self,
-        chr_id: u8,
+        chr_id: u32,
         pos: u32,
         rf: &str,
         rf_hash: u64,
@@ -426,19 +514,17 @@ impl AniIndex {
 
     pub fn lookup_exact_by_chr_id_timed_opts(
         &self,
-        chr_id: u8,
+        chr_id: u32,
         pos: u32,
         rf: &str,
-        rf_hash: u64,
+        _rf_hash: u64,
         alt: &str,
         need_info: bool,
         need_format: bool,
     ) -> Option<(AnnotationBundle, BundleTiming)> {
         let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
 
-        let mut h = (chr_id as u64) << 32 | pos as u64;
-        h ^= rf_hash;
-        h ^= fast_hash64(alt.as_bytes());
+        let h = make_variant_key(chr_id, pos, rf.as_bytes(), alt.as_bytes());
 
         if debug {
             eprintln!(
@@ -447,7 +533,15 @@ impl AniIndex {
             );
         }
 
-        let idx = match self.index.lookup_u64(h) {
+        // kira_kv_engine 0.6.0: lookup_u64_fast skips the BackendDispatch enum
+        // match for PtrHash25-backed indexes (~5-10 ns / lookup faster than
+        // lookup_u64). Returns None only for non-PtrHash25 engines, which 0.6.0
+        // doesn't have yet — fall back to lookup_u64 to stay future-proof.
+        let idx = match self
+            .index
+            .lookup_u64_fast(h)
+            .unwrap_or_else(|| self.index.lookup_u64(h))
+        {
             Ok(v) => v,
             Err(_) => {
                 if debug {
@@ -538,20 +632,26 @@ impl AniIndex {
 
     pub fn lookup_any_alt(&self, chr: &str, pos: u32, rf: &str) -> Option<AnnotationBundle> {
         let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
-        let chr_id = chr_name_to_id(chr)? as u8;
+        let chr_id = self
+            .contig_id(chr)
+            .or_else(|| chr_name_to_id(chr).map(u32::from))?;
+
+        // Use the pos-index to bound candidates to the exact position window
+        // instead of scanning all 4M entries. Falls back to None (rather than
+        // a linear scan) when no pos-index is present — legacy `.ani` users
+        // can rebuild.
+        let candidates = self.lookup_pos_index(chr_id, pos)?;
 
         let mut found: Option<&AniEntry> = None;
-
-        for e in &self.entries {
+        for &entry_idx in candidates {
+            let e = &self.entries[entry_idx as usize];
             if e.chr_id != chr_id || e.pos != pos {
                 continue;
             }
-
             let rf_str = self.read_cstring(e.ref_ofs as usize);
             if rf_str.as_ref() != rf {
                 continue;
             }
-
             if found.is_some() {
                 if debug {
                     eprintln!(
@@ -561,7 +661,6 @@ impl AniIndex {
                 }
                 return None;
             }
-
             found = Some(e);
         }
 

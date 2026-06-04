@@ -20,6 +20,10 @@ pub mod roh;
 pub mod sort;
 pub mod stats;
 pub mod tabix;
+pub mod samview;
+pub mod solid;
+pub mod tile;
+pub mod view;
 
 pub use annotate::*;
 pub use call::*;
@@ -43,3 +47,7 @@ pub use roh::*;
 pub use sort::*;
 pub use stats::*;
 pub use tabix::*;
+pub use samview::*;
+pub use solid::*;
+pub use tile::*;
+pub use view::*;

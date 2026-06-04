@@ -7,11 +7,34 @@ use crate::VcfReader;
 use crate::cli::args::ConvertArgs;
 
 pub fn cmd_convert(args: ConvertArgs) -> Result<()> {
-    let cfg = parse_args(&args.bcftools_args)?;
+    let mut combined: Vec<String> = Vec::new();
+    if let Some(p) = &args.input { combined.push(p.to_string_lossy().into_owned()); }
+    if let Some(p) = &args.output { combined.push("-o".into()); combined.push(p.to_string_lossy().into_owned()); }
+    if let Some(p) = &args.output_type { combined.push("-O".into()); combined.push(p.clone()); }
+    if args.gvcf2vcf { combined.push("--gvcf2vcf".into()); }
+    if let Some(p) = &args.tsv2vcf { combined.push("--tsv2vcf".into()); combined.push(p.to_string_lossy().into_owned()); }
+    if let Some(s) = &args.gensample { combined.push("-G".into()); combined.push(s.clone()); }
+    if let Some(s) = &args.gen2vcf { combined.push("-g".into()); combined.push(s.clone()); }
+    if let Some(s) = &args.haplegendsample { combined.push("--haplegendsample".into()); combined.push(s.clone()); }
+    if let Some(s) = &args.hapsample { combined.push("-H".into()); combined.push(s.clone()); }
+    if args.haploid { combined.push("--haploid".into()); }
+    if let Some(s) = &args.columns { combined.push("-c".into()); combined.push(s.clone()); }
+    if let Some(p) = &args.fasta_ref { combined.push("-f".into()); combined.push(p.to_string_lossy().into_owned()); }
+    if args.chrom { combined.push("--chrom".into()); }
+    if let Some(s) = &args.samples { combined.push("-s".into()); combined.push(s.clone()); }
+    if let Some(p) = &args.samples_file { combined.push("-S".into()); combined.push(p.to_string_lossy().into_owned()); }
+    if let Some(s) = &args.regions { combined.push("-r".into()); combined.push(s.clone()); }
+    if let Some(p) = &args.regions_file { combined.push("-R".into()); combined.push(p.to_string_lossy().into_owned()); }
+    if let Some(s) = &args.include { combined.push("-i".into()); combined.push(s.clone()); }
+    if let Some(s) = &args.exclude { combined.push("-e".into()); combined.push(s.clone()); }
+    if let Some(s) = &args.tag { combined.push("--tag".into()); combined.push(s.clone()); }
+    combined.extend(args.passthrough.iter().cloned());
+    let cfg = parse_args(&combined)?;
     match cfg.mode {
         ConvertMode::Vcf2Gen | ConvertMode::Vcf2Hap => emit_table_from_vcf(&cfg),
         ConvertMode::Gen2Vcf => emit_vcf_from_gen(&cfg),
         ConvertMode::HapSample2Vcf => emit_vcf_from_hap(&cfg),
+        ConvertMode::HapLegend2Vcf => emit_vcf_from_haplegend(&cfg),
         ConvertMode::Tsv2Vcf => emit_vcf_from_tsv(&cfg),
         ConvertMode::Gvcf2Vcf => emit_vcf_from_gvcf(&cfg),
         ConvertMode::Generic => emit_vcf_passthrough(&cfg),
@@ -24,6 +47,7 @@ enum ConvertMode {
     Vcf2Hap,
     Gen2Vcf,
     HapSample2Vcf,
+    HapLegend2Vcf,
     Tsv2Vcf,
     Gvcf2Vcf,
     Generic,
@@ -51,6 +75,7 @@ struct ConvertCfg {
     inputs: Vec<PathBuf>,
     gen_pair: Option<(PathBuf, PathBuf)>,
     hap_pair: Option<(PathBuf, PathBuf)>,
+    hap_triple: Option<(PathBuf, PathBuf, PathBuf)>,
     tsv: Option<PathBuf>,
     col_spec: Option<String>,
     sample_name: Option<String>,
@@ -70,6 +95,7 @@ fn parse_args(args: &[String]) -> Result<ConvertCfg> {
         inputs: Vec::new(),
         gen_pair: None,
         hap_pair: None,
+        hap_triple: None,
         tsv: None,
         col_spec: None,
         sample_name: None,
@@ -122,6 +148,24 @@ fn parse_args(args: &[String]) -> Result<ConvertCfg> {
                 if let Some(v) = args.get(i) {
                     let (a, b) = parse_pair(v)?;
                     cfg.hap_pair = Some((a, b));
+                }
+            }
+            "--haplegendsample2vcf" => {
+                cfg.mode = ConvertMode::HapLegend2Vcf;
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    let parts: Vec<&str> = v.split(',').map(str::trim).collect();
+                    if parts.len() >= 3 {
+                        cfg.hap_triple = Some((PathBuf::from(parts[0]), PathBuf::from(parts[1]), PathBuf::from(parts[2])));
+                    }
+                }
+            }
+            "--haplegendsample" => {
+                cfg.mode = ConvertMode::Vcf2Hap;
+                cfg.hap_flavor = HapFlavor::Hls;
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    cfg.hapsample_spec = Some(v.clone());
                 }
             }
             "--tsv2vcf" => {
@@ -624,6 +668,70 @@ fn emit_vcf_from_hap(cfg: &ConvertCfg) -> Result<()> {
             "{chrom}\t{pos}\t{id}\t{r}\t{a}\t.\t.\t{info}\tGT\t{}",
             out_samples.join("\t")
         );
+    }
+    Ok(())
+}
+
+fn emit_vcf_from_haplegend(cfg: &ConvertCfg) -> Result<()> {
+    let (hap_path, legend_path, sample_path) = cfg
+        .hap_triple
+        .clone()
+        .ok_or_else(|| anyhow!("--haplegendsample2vcf requires hap,legend,sample"))?;
+    let samples = read_sample_names(&sample_path)?;
+
+    println!("##fileformat=VCFv4.2");
+    println!("##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">");
+    println!(
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t{}",
+        samples.join("\t")
+    );
+
+    let legend_text = fs::read_to_string(&legend_path)?;
+    let hap_text = fs::read_to_string(&hap_path)?;
+    let chrom_default = legend_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("1")
+        .to_string();
+
+    let mut leg_iter = legend_text.lines();
+    let header_line = leg_iter.next().unwrap_or("");
+    let header_cols: Vec<&str> = header_line.split_whitespace().collect();
+    let pos_idx = header_cols.iter().position(|c| c.eq_ignore_ascii_case("position")).unwrap_or(1);
+    let a0_idx = header_cols.iter().position(|c| c.eq_ignore_ascii_case("a0") || c.eq_ignore_ascii_case("allele0")).unwrap_or(2);
+    let a1_idx = header_cols.iter().position(|c| c.eq_ignore_ascii_case("a1") || c.eq_ignore_ascii_case("allele1")).unwrap_or(3);
+
+    for (leg_line, hap_line) in leg_iter.zip(hap_text.lines()) {
+        let lt = leg_line.trim();
+        if lt.is_empty() { continue; }
+        let lc: Vec<&str> = lt.split_whitespace().collect();
+        if lc.len() < 4 { continue; }
+        let id = lc.first().copied().unwrap_or(".");
+        let pos = lc.get(pos_idx).copied().unwrap_or("0");
+        let r = lc.get(a0_idx).copied().unwrap_or(".");
+        let a = lc.get(a1_idx).copied().unwrap_or(".");
+        let chrom = if id.contains(':') {
+            id.split(':').next().unwrap_or(chrom_default.as_str())
+        } else { chrom_default.as_str() };
+
+        let haps: Vec<&str> = hap_line.split_whitespace().collect();
+        let mut gts: Vec<String> = Vec::with_capacity(samples.len());
+        let mut i = 0usize;
+        while i + 1 < haps.len() {
+            let h1 = haps[i];
+            let h2 = haps[i + 1];
+            let gt = if (h1 == "0" || h1 == "1") && (h2 == "0" || h2 == "1") {
+                format!("{}|{}", h1, h2)
+            } else if h1 == "?" || h2 == "?" {
+                ".|.".to_string()
+            } else {
+                format!("{}|{}", h1, h2)
+            };
+            gts.push(gt);
+            i += 2;
+        }
+        while gts.len() < samples.len() { gts.push(".|.".to_string()); }
+        println!("{chrom}\t{pos}\t{id}\t{r}\t{a}\t.\t.\t.\tGT\t{}", gts.join("\t"));
     }
     Ok(())
 }
