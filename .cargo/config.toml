@@ -14,8 +14,6 @@ rustflags = [
     "-C", "target-cpu=native",
     "-C", "opt-level=3",
     "-C", "codegen-units=1",
-    "-L", "C:\\Program Files (x86)\\Common Files\\Intel\\Shared Libraries\\lib",
-    "-l", "OpenCL",
 ]
 
 [target.x86_64-pc-windows-gnu]

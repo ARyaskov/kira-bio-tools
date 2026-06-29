@@ -182,25 +182,6 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
         ran = true;
     }
 
-    #[cfg(feature = "opencl")]
-    if !ran && args.opencl && extra_header_lines.is_empty() {
-        eprintln!("[annotate] Using OpenCL backend...");
-        let ani = annotate::AniIndex::open(&ani_path)?;
-        annotate::opencl::annotate_vcf_opencl_v2(
-            &ani,
-            &input_path,
-            &out_for_annotate,
-            &columns,
-            bgzf_level,
-            mmap_output,
-            mmap_no_flush,
-            ram_output,
-            ram_max_mb,
-            200_000,
-        )?;
-        ran = true;
-    }
-
     if !ran {
         annotate::cpu_v2::annotate_vcf_ani_v2_with_extra_headers(
             &ani_path,
@@ -635,20 +616,11 @@ fn resolve_ktile_or_fallback(
 
 pub fn cmd_annotate_serve(args: AnnotateServeArgs) -> Result<()> {
     let use_gpu = args.gpu;
-    let use_opencl = args.opencl;
-    let use_cpu = !use_gpu && !use_opencl;
+    let use_cpu = !use_gpu;
 
-    #[cfg(not(feature = "opencl"))]
-    if use_opencl {
-        anyhow::bail!("OpenCL feature not enabled");
-    }
     #[cfg(not(feature = "gpu"))]
     if use_gpu {
         anyhow::bail!("GPU feature not enabled");
-    }
-
-    if use_gpu && use_opencl && args.gpu && args.opencl {
-        anyhow::bail!("Select only one backend: --gpu or --opencl");
     }
 
     let annotations = args.annotations.as_ref();
@@ -690,15 +662,8 @@ pub fn cmd_annotate_serve(args: AnnotateServeArgs) -> Result<()> {
         anyhow::bail!("ANI file not found: {:?}", ani_path);
     }
 
-    #[cfg(any(feature = "gpu", feature = "opencl"))]
+    #[cfg(feature = "gpu")]
     let ani = annotate::AniIndex::open(&ani_path)?;
-
-    #[cfg(feature = "opencl")]
-    let mut opencl_gpu: Option<annotate::opencl::OpenCLv2> = if use_opencl {
-        Some(annotate::opencl::OpenCLv2::new(&ani, 200_000)?)
-    } else {
-        None
-    };
 
     #[cfg(feature = "gpu")]
     let mut cuda_state: Option<annotate::cuda::GpuAnnotator> = if use_gpu {
@@ -951,26 +916,6 @@ pub fn cmd_annotate_serve(args: AnnotateServeArgs) -> Result<()> {
             #[cfg(not(feature = "gpu"))]
             {
                 anyhow::bail!("GPU feature not enabled")
-            }
-        } else if use_opencl {
-            #[cfg(feature = "opencl")]
-            {
-                annotate::opencl::annotate_vcf_opencl_v2_with_gpu(
-                    opencl_gpu.as_mut().unwrap(),
-                    &ani,
-                    &input_path,
-                    &out_for_annotate,
-                    &columns,
-                    bgzf_level,
-                    mmap_output,
-                    mmap_no_flush,
-                    ram_output,
-                    ram_max_mb,
-                )
-            }
-            #[cfg(not(feature = "opencl"))]
-            {
-                anyhow::bail!("OpenCL feature not enabled")
             }
         } else if use_cpu {
             annotate::cpu_v2::annotate_vcf_ani_v2(

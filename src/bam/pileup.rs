@@ -9,6 +9,10 @@ pub struct SampleSiteCounts {
     pub base_counts: [u32; 4],
     pub base_quals: [u32; 4],
     pub mq_sum: u64,
+    /// Per-read `(ACGT allele index, MAPQ-capped quality)` for the exact
+    /// per-read genotype-likelihood model. `base_counts`/`base_quals` stay
+    /// raw (for AD/QS); only this carries the `min(BQ, MAPQ)` cap.
+    pub obs: Vec<(u8, u8)>,
     pub ins_alleles: Vec<(String, u32)>,
     pub del_alleles: Vec<(u32, u32)>,
 }
@@ -268,6 +272,7 @@ where F: FnMut(&PileupSite, &[&LiveRead]),
                         s.base_counts[i] += 1;
                         s.base_quals[i] += q as u32;
                         s.mq_sum += lr.mapq as u64;
+                        s.obs.push((i as u8, q.min(lr.mapq)));
                         s.depth += 1;
                     }
                 }
@@ -420,6 +425,7 @@ where F: FnMut(&PileupSite, &[&LiveRead]),
                         s.base_counts[i] += 1;
                         s.base_quals[i] += q as u32;
                         s.mq_sum += lr.mapq as u64;
+                        s.obs.push((i as u8, q.min(lr.mapq)));
                         s.depth += 1;
                     }
                 }

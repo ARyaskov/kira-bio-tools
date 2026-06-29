@@ -1,6 +1,6 @@
 [package]
 name = "kira-bio-tools"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.95"
 description = "High-performance VCF indexer with full tabix compatibility"
@@ -37,7 +37,6 @@ pest_derive = "2.8.4"
 regex = "1.11"
 cust = { version = "0.3.2", optional = true }
 which = "8.0.0"
-ocl = { version = "0.19.7", optional = true }
 flate2 = "1.1"
 crc32fast = "1.4"
 crossbeam-channel = "0.5"
@@ -64,7 +63,6 @@ rand = "0.8"
 default = ["cli"]
 cli = ["clap", "anyhow"]
 gpu = ["cust"]
-opencl = ["ocl"]
 avx2 = []
 neon = []
 

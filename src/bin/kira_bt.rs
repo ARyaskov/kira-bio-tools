@@ -22,7 +22,7 @@ enum Commands {
     #[command(about = "Annotate VCF using ANI index (bcftools annotate -a style)")]
     Annotate(AnnotateArgs),
 
-    #[command(about = "OpenCL annotate server (stdin commands)")]
+    #[command(about = "Annotate server (stdin commands)")]
     AnnotateServe(AnnotateServeArgs),
 
     #[command(about = "Tabix-compatible indexer and query tool")]

@@ -19,11 +19,9 @@ use crate::vcf::{VcfReader, VcfRecord};
 pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
     let total_start = Instant::now();
     eprintln!(
-        "filter start backend={} gpu_requested={} opencl_requested={} gpu_active={} opencl_active={}",
+        "filter start backend={} gpu_requested={} gpu_active={}",
         filter_arch::arch_name(),
         args.gpu,
-        args.opencl,
-        false,
         false
     );
     let (expr, exclude) = resolve_expr(args);

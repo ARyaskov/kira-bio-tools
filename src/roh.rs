@@ -130,6 +130,78 @@ pub fn viterbi(sites: &[RohSite], opts: &RohOpts) -> Vec<State> {
     path
 }
 
+/// Scaled forward-backward posteriors. Returns per-site `[P(AZ), P(HW)]`,
+/// normalised so the two states sum to 1 at each site. Per-site rescaling
+/// keeps the products from underflowing on long chromosomes.
+pub fn forward_backward(sites: &[RohSite], opts: &RohOpts) -> Vec<[f64; 2]> {
+    let n = sites.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let emit = |i: usize, s: State| -> f64 { 10f64.powf(emit_log10(s, sites[i].gt, sites[i].af)) };
+    let trans = |i: usize, from: State, to: State| -> f64 {
+        let dist = sites[i].pos.saturating_sub(sites[i - 1].pos);
+        let gd = sites[i]
+            .genetic_pos
+            .and_then(|g1| sites[i - 1].genetic_pos.map(|g0| g1 - g0));
+        10f64.powf(trans_log10(from, to, opts, dist, gd))
+    };
+
+    let mut fwd = vec![[0.0f64; 2]; n];
+    let mut scale = vec![1.0f64; n];
+    fwd[0][0] = 0.5 * emit(0, State::AZ);
+    fwd[0][1] = 0.5 * emit(0, State::HW);
+    let s0 = (fwd[0][0] + fwd[0][1]).max(1e-300);
+    fwd[0][0] /= s0;
+    fwd[0][1] /= s0;
+    scale[0] = s0;
+    for i in 1..n {
+        for (ci, cur) in [State::AZ, State::HW].into_iter().enumerate() {
+            let mut sum = 0.0;
+            for (pi, prev) in [State::AZ, State::HW].into_iter().enumerate() {
+                sum += fwd[i - 1][pi] * trans(i, prev, cur);
+            }
+            fwd[i][ci] = sum * emit(i, cur);
+        }
+        let s = (fwd[i][0] + fwd[i][1]).max(1e-300);
+        fwd[i][0] /= s;
+        fwd[i][1] /= s;
+        scale[i] = s;
+    }
+
+    let mut bwd = vec![[0.0f64; 2]; n];
+    bwd[n - 1] = [1.0, 1.0];
+    for i in (0..n - 1).rev() {
+        for (ci, cur) in [State::AZ, State::HW].into_iter().enumerate() {
+            let mut sum = 0.0;
+            for (ni, nxt) in [State::AZ, State::HW].into_iter().enumerate() {
+                sum += trans(i + 1, cur, nxt) * emit(i + 1, nxt) * bwd[i + 1][ni];
+            }
+            bwd[i][ci] = sum / scale[i + 1];
+        }
+    }
+
+    let mut post = vec![[0.5f64; 2]; n];
+    for i in 0..n {
+        let a = fwd[i][0] * bwd[i][0];
+        let b = fwd[i][1] * bwd[i][1];
+        let s = a + b;
+        if s > 0.0 {
+            post[i] = [a / s, b / s];
+        }
+    }
+    post
+}
+
+/// bcftools `phred_score`: -10·log10(prob), capped at 99 (and 99 when prob<=0).
+pub fn phred_score(prob: f64) -> f64 {
+    if prob <= 0.0 {
+        99.0
+    } else {
+        (-10.0 * prob.log10()).min(99.0)
+    }
+}
+
 /// Baum-Welch training (-V N): N iterations of forward-backward + parameter re-estimation.
 pub fn baum_welch_train(sites: &[RohSite], opts: &mut RohOpts, n_iters: usize) {
     for _ in 0..n_iters {

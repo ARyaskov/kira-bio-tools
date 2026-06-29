@@ -108,9 +108,6 @@ pub struct AnnotateArgs {
     #[arg(long, help = "Use GPU (CUDA) for annotation")]
     pub gpu: bool,
 
-    #[arg(long, help = "Use OpenCL backend")]
-    pub opencl: bool,
-
     #[arg(long, help = "BGZF compression level (0-9, default 1)", value_parser = clap::value_parser!(u32))]
     pub bgzf_level: Option<u32>,
 
@@ -160,9 +157,6 @@ pub struct AnnotateServeArgs {
 
     #[arg(long, help = "Use GPU (CUDA) for annotation")]
     pub gpu: bool,
-
-    #[arg(long, help = "Use OpenCL backend")]
-    pub opencl: bool,
 
     #[arg(long, help = "BGZF compression level (0-9, default 1)", value_parser = clap::value_parser!(u32))]
     pub bgzf_level: Option<u32>,

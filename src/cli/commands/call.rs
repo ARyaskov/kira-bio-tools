@@ -275,7 +275,249 @@ fn call_record(
     if cfg.mode == CallMode::Multiallelic {
         return call_record_mcall(rec, selected, cfg);
     }
-    call_record_legacy(rec, selected, cfg)
+    call_record_consensus(rec, selected, cfg)
+}
+
+/// `call -c` consensus caller. Estimates the site alt-allele frequency by EM
+/// over the per-sample genotype likelihoods, applies a Hardy-Weinberg prior at
+/// that frequency, calls each genotype by maximum posterior, and reports a real
+/// site QUAL = -10·log10 P(all samples homozygous reference). This is the
+/// Li-2011 consensus model — not a per-sample PL argmax. Falls back to the
+/// AD-based heuristic ([`call_record_legacy`]) when no PL/likelihoods exist.
+fn call_record_consensus(
+    rec: &crate::vcf::structs::VcfRecord,
+    selected: &[usize],
+    cfg: &CallCfg,
+) -> Result<Option<String>> {
+    let raw_alts = rec
+        .alt
+        .split(',')
+        .map(str::trim)
+        .map(|a| a.to_string())
+        .collect::<Vec<_>>();
+
+    // Real alt alleles (drop ., *, symbolic).
+    let kept_all: Vec<usize> = raw_alts
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| {
+            *a != "." && *a != "*" && !(a.starts_with('<') && a.ends_with('>')) && !a.is_empty()
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    let format_keys = rec.format.as_deref().unwrap_or("").split(':').collect::<Vec<_>>();
+    let pl_idx = format_keys.iter().position(|k| *k == "PL");
+    let ad_idx = format_keys.iter().position(|k| *k == "AD");
+
+    // No alleles or no likelihoods → fall back to the AD heuristic.
+    if kept_all.is_empty() || pl_idx.is_none() || selected.is_empty() {
+        return call_record_legacy(rec, selected, cfg);
+    }
+    let pl_idx = pl_idx.unwrap();
+
+    // Consensus is biallelic: pick the single best-supported ALT.
+    let a_raw = if kept_all.len() == 1 {
+        kept_all[0]
+    } else {
+        best_alt_by_support(rec, selected, &kept_all, ad_idx)
+    };
+    // Genotype-index allele number for the kept ALT (0 = ref).
+    let alt_n = a_raw + 1;
+    let i_00 = tri_pl_index(0, 0);
+    let i_0a = tri_pl_index(0, alt_n);
+    let i_aa = tri_pl_index(alt_n, alt_n);
+
+    // Per-sample biallelic likelihoods L(00), L(0A), L(AA); None = missing.
+    let mut gls: Vec<Option<[f64; 3]>> = Vec::with_capacity(selected.len());
+    for &si in selected {
+        let sval = rec.samples.get(si).map(|s| s.as_str()).unwrap_or(".");
+        let parts: Vec<&str> = sval.split(':').collect();
+        let pl = parts.get(pl_idx).copied().and_then(parse_pl_vec);
+        match pl {
+            Some(v) if v.len() > i_aa => {
+                gls.push(Some([
+                    pl_to_lik(v[i_00]),
+                    pl_to_lik(v[i_0a]),
+                    pl_to_lik(v[i_aa]),
+                ]));
+            }
+            _ => gls.push(None),
+        }
+    }
+
+    let f = em_alt_freq(&gls);
+    let prior = [
+        (1.0 - f) * (1.0 - f),
+        2.0 * f * (1.0 - f),
+        f * f,
+    ];
+
+    let mut ac = 0usize;
+    let mut an = 0usize;
+    let mut sample_out: Vec<String> = Vec::with_capacity(selected.len());
+    // P(all-ref) accumulated in log10 across samples.
+    let mut log10_p_allref = 0.0f64;
+
+    for g in &gls {
+        let Some(l) = g else {
+            let mut fields = vec!["./.".to_string()];
+            if cfg.emit_gq {
+                fields.push(".".to_string());
+            }
+            if cfg.emit_gp {
+                fields.push(".,.,.".to_string());
+            }
+            sample_out.push(fields.join(":"));
+            continue;
+        };
+        let mut post = [l[0] * prior[0], l[1] * prior[1], l[2] * prior[2]];
+        let z: f64 = post.iter().sum();
+        if z > 0.0 {
+            for p in post.iter_mut() {
+                *p /= z;
+            }
+        } else {
+            post = [1.0, 0.0, 0.0];
+        }
+        log10_p_allref += post[0].max(1e-30).log10();
+
+        // argmax posterior; GQ from the gap to the runner-up (phred).
+        let mut order = [0usize, 1, 2];
+        order.sort_by(|&x, &y| post[y].partial_cmp(&post[x]).unwrap());
+        let best = order[0];
+        let second = order[1];
+        let gq = phred_gap(post[best], post[second]);
+
+        let (a0, a1) = match best {
+            0 => (0, 0),
+            1 => (0, 1),
+            _ => (1, 1),
+        };
+        an += 2;
+        ac += (a0 == 1) as usize + (a1 == 1) as usize;
+
+        let mut fields = vec![format!("{}/{}", a0, a1)];
+        if cfg.emit_gq {
+            fields.push(gq.to_string());
+        }
+        if cfg.emit_gp {
+            fields.push(format!("{:.6},{:.6},{:.6}", post[0], post[1], post[2]));
+        }
+        sample_out.push(fields.join(":"));
+    }
+
+    if cfg.only_alt && ac == 0 {
+        return Ok(None);
+    }
+
+    let qual = (-10.0 * log10_p_allref).max(0.0);
+    let alt_field = raw_alts.get(a_raw).cloned().unwrap_or_else(|| ".".into());
+
+    let mut info_map = parse_info_map(&rec.info);
+    info_map.insert("AN".to_string(), an.to_string());
+    if ac == 0 {
+        info_map.remove("AC");
+    } else {
+        info_map.insert("AC".to_string(), ac.to_string());
+    }
+    let info = render_info_map(&info_map);
+
+    let mut fmt_keys = vec!["GT".to_string()];
+    if cfg.emit_gq {
+        fmt_keys.push("GQ".to_string());
+    }
+    if cfg.emit_gp {
+        fmt_keys.push("GP".to_string());
+    }
+
+    Ok(Some(format!(
+        "{}\t{}\t{}\t{}\t{}\t{:.2}\t{}\t{}\t{}\t{}",
+        rec.chrom,
+        rec.pos,
+        rec.id,
+        rec.ref_allele,
+        alt_field,
+        qual,
+        rec.filter,
+        info,
+        fmt_keys.join(":"),
+        sample_out.join("\t")
+    )))
+}
+
+/// PL (phred) → relative likelihood. PLs are already normalised so the best
+/// genotype is 0, hence this yields values in (0, 1].
+#[inline]
+fn pl_to_lik(pl: u32) -> f64 {
+    10f64.powf(-(pl as f64) / 10.0)
+}
+
+/// EM estimate of the alt-allele frequency from per-sample biallelic
+/// likelihoods. Missing samples are skipped.
+fn em_alt_freq(gls: &[Option<[f64; 3]>]) -> f64 {
+    let mut f = 0.5f64;
+    for _ in 0..20 {
+        let mut alt = 0.0f64;
+        let mut n = 0.0f64;
+        let prior = [(1.0 - f) * (1.0 - f), 2.0 * f * (1.0 - f), f * f];
+        for l in gls.iter().flatten() {
+            let mut post = [l[0] * prior[0], l[1] * prior[1], l[2] * prior[2]];
+            let z: f64 = post.iter().sum();
+            if z <= 0.0 {
+                continue;
+            }
+            for p in post.iter_mut() {
+                *p /= z;
+            }
+            alt += post[1] + 2.0 * post[2];
+            n += 2.0;
+        }
+        if n > 0.0 {
+            f = (alt / n).clamp(1e-6, 1.0 - 1e-6);
+        }
+    }
+    f
+}
+
+/// GQ = phred gap between the best and second-best genotype posteriors, capped 99.
+fn phred_gap(best: f64, second: f64) -> u32 {
+    if second <= 0.0 {
+        return 99;
+    }
+    let pl_best = -10.0 * best.max(1e-30).log10();
+    let pl_second = -10.0 * second.max(1e-30).log10();
+    (pl_second - pl_best).round().clamp(0.0, 99.0) as u32
+}
+
+/// Pick the ALT (raw index) with the most read support across selected samples,
+/// using AD when present, else the first kept ALT.
+fn best_alt_by_support(
+    rec: &crate::vcf::structs::VcfRecord,
+    selected: &[usize],
+    kept: &[usize],
+    ad_idx: Option<usize>,
+) -> usize {
+    let Some(ad_idx) = ad_idx else {
+        return kept[0];
+    };
+    let mut best = kept[0];
+    let mut best_sup = 0u32;
+    for &k in kept {
+        let mut sup = 0u32;
+        for &si in selected {
+            let sval = rec.samples.get(si).map(|s| s.as_str()).unwrap_or(".");
+            if let Some(adf) = sval.split(':').nth(ad_idx) {
+                let ad = parse_u32_list(adf);
+                sup += ad.get(k + 1).copied().unwrap_or(0);
+            }
+        }
+        if sup > best_sup {
+            best_sup = sup;
+            best = k;
+        }
+    }
+    best
 }
 
 fn call_record_mcall(

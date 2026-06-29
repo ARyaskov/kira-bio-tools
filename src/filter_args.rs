@@ -50,9 +50,6 @@ pub struct FilterArgs {
     #[arg(long = "gpu", default_value_t = false)]
     pub gpu: bool,
 
-    #[arg(long = "opencl", default_value_t = false)]
-    pub opencl: bool,
-
     #[arg(long = "no-version", default_value_t = false)]
     pub no_version: bool,
 

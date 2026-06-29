@@ -11,6 +11,18 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
+/// Format a site/genotype QUAL float the way bcftools prints it: `.` for 0,
+/// an integer when whole, otherwise up to two decimals.
+fn fmt_qual(q: f64) -> String {
+    if q <= 0.0 {
+        ".".to_string()
+    } else if (q - q.round()).abs() < 1e-3 {
+        format!("{:.0}", q)
+    } else {
+        format!("{:.2}", q)
+    }
+}
+
 pub fn cmd_mpileup(args: MpileupArgs) -> Result<()> {
     if args.inputs.is_empty() { bail!("mpileup: need at least one BAM input"); }
 
@@ -44,7 +56,7 @@ pub fn cmd_mpileup(args: MpileupArgs) -> Result<()> {
             BamReader::open(p)?
         };
         if timing { eprintln!("[KIRA_BT] BAM load: {:.1}s, {} records", t0.elapsed().as_secs_f64(), r.records_buf.len()); }
-        if !flag_filters.exclude_flags == 0 || flag_filters.require_flags != 0 {
+        if flag_filters.exclude_flags != 0 || flag_filters.require_flags != 0 {
             r.records_buf.retain(|lr| flag_filters.passes(lr.flags));
         }
         let _ = max_depth;
@@ -172,7 +184,7 @@ pub fn run_mpileup_from_bams(
 
     let mut combined_filter: Option<crate::bam::pos_filter::InterestingMap> = None;
     for r in bams.iter_mut() {
-        if !flag_filters.exclude_flags == 0 || flag_filters.require_flags != 0 {
+        if flag_filters.exclude_flags != 0 || flag_filters.require_flags != 0 {
             r.records_buf.retain(|lr| flag_filters.passes(lr.flags));
         }
         let _ = max_depth;
@@ -512,8 +524,19 @@ fn emit_site(
     let n_alleles = all_alts.len() + 1;
     let mean_mq = if total > 0 { (agg.mq_sum as f64) / (total as f64) } else { 0.0 };
 
+    // Map each ACGT base index to its position in REF-first allele order so a
+    // sample's per-read observations feed the genotype-likelihood model.
+    let mut acgt_to_gl = [usize::MAX; 4];
+    if ref_idx < 4 {
+        acgt_to_gl[ref_idx] = 0;
+    }
+    for (i, (b, _, _)) in snv_alts.iter().enumerate() {
+        let bi = match *b { b'A' => 0, b'C' => 1, b'G' => 2, b'T' => 3, _ => continue };
+        acgt_to_gl[bi] = i + 1;
+    }
+
     let mut per_sample_cols: Vec<String> = Vec::new();
-    let mut site_qual: u8 = 0;
+    let mut site_qual: f64 = 0.0;
     let mut any_variant = false;
     for (si, s) in site.per_sample.iter().enumerate() {
         if ctx.any_filter && !ctx.sample_keep.get(si).copied().unwrap_or(false) { continue; }
@@ -534,7 +557,16 @@ fn emit_site(
             counts[i + 1] = s.base_counts[bi];
             quals[i + 1] = s.base_quals[bi];
         }
-        let gl_raw = ctx.em.likelihoods(n_alleles, &counts, &quals);
+        // Exact per-read GLs from MAPQ-capped base observations (samtools-style),
+        // not a single averaged quality per allele.
+        let mut reads: Vec<(usize, u8)> = Vec::with_capacity(s.obs.len());
+        for &(ai, q) in &s.obs {
+            let g = acgt_to_gl[ai as usize];
+            if g != usize::MAX {
+                reads.push((g, q));
+            }
+        }
+        let gl_raw = ctx.em.likelihoods_per_read(n_alleles, &reads);
         let gl = gl_raw.with_prior(n_alleles, args.prior);
         let (gi, gj) = gl.most_likely_gt(n_alleles);
         if gi != 0 || gj != 0 { any_variant = true; }
@@ -556,7 +588,7 @@ fn emit_site(
         let m = if args.variants_only { args.min_alt_reads.max(ctx.min_ireads) } else { ctx.min_ireads };
         agg.ins_alleles.iter().any(|(_, c)| *c >= m) || agg.del_alleles.iter().any(|(_, c)| *c >= m)
     };
-    if args.variants_only && (!any_variant || site_qual < args.min_qual) && !have_indel {
+    if args.variants_only && (!any_variant || site_qual < args.min_qual as f64) && !have_indel {
         return;
     }
 
@@ -578,8 +610,8 @@ fn emit_site(
     if annotate.fmt_gq { fmt_keys.push("GQ"); }
 
     let snv_emit = !snv_alts.is_empty() || !args.variants_only;
-    if snv_emit && !(args.variants_only && (!any_variant || site_qual < args.min_qual)) {
-        let qual_str = if site_qual == 0 { ".".to_string() } else { site_qual.to_string() };
+    if snv_emit && !(args.variants_only && (!any_variant || site_qual < args.min_qual as f64)) {
+        let qual_str = fmt_qual(site_qual);
         let _ = write!(out, "{}\t{}\t.\t{}\t{}\t{}\t.\t{}\t{}",
             chr, pos1, ref_for_record as char, alt_str, qual_str, info, fmt_keys.join(":"));
         for col in &per_sample_cols { let _ = write!(out, "\t{}", col); }
@@ -847,7 +879,7 @@ fn emit_one_indel(
     // indel = matched_count, qual proxy = 30 per supporting read.
     let n_alleles = 2usize;
     let mut per_sample_cols: Vec<String> = Vec::new();
-    let mut site_qual: u8 = 0;
+    let mut site_qual: f64 = 0.0;
     let mut any_variant = false;
 
     // KIRA_INDEL_HPQUAL: off/0 = qual 30; "F,S" = floor F, slope S; 1/auto = 8,5 (default off).
@@ -939,7 +971,7 @@ fn emit_one_indel(
         }
         per_sample_cols.push(parts.join(":"));
     }
-    if args.variants_only && (!any_variant || site_qual < args.min_qual) {
+    if args.variants_only && (!any_variant || site_qual < args.min_qual as f64) {
         return;
     }
 
@@ -957,7 +989,7 @@ fn emit_one_indel(
     if annotate.fmt_pl { fmt_keys.push("PL"); }
     if annotate.fmt_gq { fmt_keys.push("GQ"); }
 
-    let qual_str = if site_qual == 0 { ".".to_string() } else { site_qual.to_string() };
+    let qual_str = fmt_qual(site_qual);
     let _ = write!(out, "{}\t{}\t.\t{}\t{}\t{}\t.\t{}\t{}",
         chr, pos1, ref_str, alt_str, qual_str, info, fmt_keys.join(":"));
     for col in &per_sample_cols { let _ = write!(out, "\t{}", col); }
@@ -1010,7 +1042,7 @@ fn emit_assembled(
     let gl = ctx.em.likelihoods(2, &[ref_c, alt_c], &[ref_c * 30, alt_c * 30]).with_prior(2, args.prior);
     let (gi, gj) = gl.most_likely_gt(2);
     let qual = gl.qual();
-    if args.variants_only && ((gi == 0 && gj == 0) || qual < args.min_qual) { return; }
+    if args.variants_only && ((gi == 0 && gj == 0) || qual < args.min_qual as f64) { return; }
     let key = (call.pos1, call.ref_str.clone(), call.alt_str.clone());
     let dup = ASM_EMITTED.with(|e| {
         let mut s = e.borrow_mut();
@@ -1043,7 +1075,7 @@ fn emit_assembled(
     if annotate.fmt_pl { pe.push("0".into()); }
     if annotate.fmt_gq { pe.push("0".into()); }
     let cole = pe.join(":");
-    let qual_str = if qual == 0 { ".".to_string() } else { qual.to_string() };
+    let qual_str = fmt_qual(qual);
     let _ = write!(out, "{}\t{}\t.\t{}\t{}\t{}\t.\t{}\t{}",
         chr, call.pos1, call.ref_str, call.alt_str, qual_str, info, fmt_keys.join(":"));
     for si in 0..n_cols.max(1) {

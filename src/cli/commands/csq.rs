@@ -53,7 +53,50 @@ pub fn cmd_csq(args: CsqArgs) -> Result<()> {
         println!("{h}");
     }
 
-    while let Some(mut rec) = reader.next_record()? {
+    // Buffer per chromosome so the haplotype-aware pass can combine phased
+    // variants that share a codon before any record is emitted.
+    let mut buf: Vec<crate::vcf::structs::VcfRecord> = Vec::new();
+    let mut cur_chrom = String::new();
+    while let Some(rec) = reader.next_record()? {
+        if !buf.is_empty() && rec.chrom != cur_chrom {
+            emit_chunk(&buf, &anno, fasta.as_ref());
+            buf.clear();
+        }
+        cur_chrom = rec.chrom.clone();
+        buf.push(rec);
+    }
+    if !buf.is_empty() {
+        emit_chunk(&buf, &anno, fasta.as_ref());
+    }
+
+    Ok(())
+}
+
+/// Haplotype combination for one record: replaces the coding consequence of the
+/// combined transcript with the merged annotation (on the leader) or a back
+/// reference `@<leader pos>` (on the follower).
+struct Combo {
+    leader: bool,
+    leader_pos: u32,
+    effect: String,
+    aa: String,
+    dna: String,
+    gene: String,
+    tx: String,
+    biotype: String,
+    strand: char,
+}
+
+/// Annotate and print one chromosome's worth of records, merging phased
+/// same-codon variants into haplotype-aware consequences (bcftools `csq`).
+fn emit_chunk(
+    buf: &[crate::vcf::structs::VcfRecord],
+    anno: &AnnotationDb,
+    fasta: Option<&FastaDb>,
+) {
+    let combos = build_combinations(buf, anno, fasta);
+    for (ri, rec0) in buf.iter().enumerate() {
+        let mut rec = rec0.clone();
         let alts = rec
             .alt
             .split(',')
@@ -65,7 +108,10 @@ pub fn cmd_csq(args: CsqArgs) -> Result<()> {
         let mut consequences = Vec::<String>::new();
         let mut alt_to_csq_idxs = Vec::<Vec<usize>>::new();
         for alt in &alts {
-            let mut per_alt = annotate_variant(&rec, alt, &anno, fasta.as_ref());
+            let mut per_alt = annotate_variant(&rec, alt, anno, fasta);
+            if let Some(combo) = combos.get(&ri) {
+                apply_combo(&mut per_alt, combo);
+            }
             let mut idxs = Vec::<usize>::with_capacity(per_alt.len());
             for c in per_alt.drain(..) {
                 consequences.push(c);
@@ -98,8 +144,196 @@ pub fn cmd_csq(args: CsqArgs) -> Result<()> {
 
         print_record(&rec);
     }
+}
 
-    Ok(())
+/// Coding effects carry strand|aa|dna fields and are the elements the
+/// haplotype merge replaces.
+fn is_coding_effect(effect: &str) -> bool {
+    matches!(
+        effect,
+        "missense"
+            | "synonymous"
+            | "stop_gained"
+            | "stop_lost"
+            | "start_lost"
+            | "inframe_deletion"
+            | "inframe_insertion"
+            | "frameshift"
+            | "complex_substitution"
+    )
+}
+
+/// True if a consequence string names a coding effect on transcript `tx` —
+/// i.e. the element the haplotype merge should replace.
+fn is_coding_for_tx(s: &str, tx: &str) -> bool {
+    let f: Vec<&str> = s.split('|').collect();
+    f.len() > 2 && f[2] == tx && is_coding_effect(f[0])
+}
+
+fn apply_combo(per_alt: &mut Vec<String>, combo: &Combo) {
+    if combo.leader {
+        let combined = format!(
+            "{}|{}|{}|{}|{}|{}|{}",
+            combo.effect, combo.gene, combo.tx, combo.biotype, combo.strand, combo.aa, combo.dna
+        );
+        match per_alt.iter().position(|s| is_coding_for_tx(s, &combo.tx)) {
+            Some(i) => per_alt[i] = combined,
+            None => per_alt.push(combined),
+        }
+    } else {
+        per_alt.retain(|s| !is_coding_for_tx(s, &combo.tx));
+        per_alt.push(format!("@{}", combo.leader_pos));
+    }
+}
+
+fn csq_is_snv(rec: &crate::vcf::structs::VcfRecord) -> bool {
+    rec.ref_allele.len() == 1 && {
+        let a = rec.alt.trim();
+        a.len() == 1 && a.bytes().all(|b| matches!(b.to_ascii_uppercase(), b'A' | b'C' | b'G' | b'T'))
+    }
+}
+
+fn csq_ref_char(rec: &crate::vcf::structs::VcfRecord) -> char {
+    rec.ref_allele.chars().next().unwrap_or('N').to_ascii_uppercase()
+}
+
+fn csq_alt_char(rec: &crate::vcf::structs::VcfRecord) -> char {
+    rec.alt.trim().chars().next().unwrap_or('N').to_ascii_uppercase()
+}
+
+/// Two records are on the same haplotype if some sample carries the ALT (allele
+/// "1") at the same phased haplotype index in both.
+fn phased_together(a: &crate::vcf::structs::VcfRecord, b: &crate::vcf::structs::VcfRecord) -> bool {
+    let (Some(fa), Some(fb)) = (a.format.as_ref(), b.format.as_ref()) else {
+        return false;
+    };
+    let (Some(gi_a), Some(gi_b)) = (
+        fa.split(':').position(|k| k == "GT"),
+        fb.split(':').position(|k| k == "GT"),
+    ) else {
+        return false;
+    };
+    let n = a.samples.len().min(b.samples.len());
+    for si in 0..n {
+        let ga = a.samples[si].split(':').nth(gi_a).unwrap_or(".");
+        let gb = b.samples[si].split(':').nth(gi_b).unwrap_or(".");
+        if !ga.contains('|') || !gb.contains('|') {
+            continue;
+        }
+        let ha: Vec<&str> = ga.split('|').collect();
+        let hb: Vec<&str> = gb.split('|').collect();
+        for h in 0..ha.len().min(hb.len()) {
+            if ha[h] == "1" && hb[h] == "1" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Find phased SNV pairs that share a codon in the same protein-coding
+/// transcript and build the merged haplotype consequence for each.
+fn build_combinations(
+    buf: &[crate::vcf::structs::VcfRecord],
+    anno: &AnnotationDb,
+    fasta: Option<&FastaDb>,
+) -> HashMap<usize, Combo> {
+    let mut out = HashMap::new();
+    let Some(fasta) = fasta else {
+        return out;
+    };
+    // Group coding-SNV record indices by (transcript id, codon index).
+    let mut groups: HashMap<(String, usize), Vec<usize>> = HashMap::new();
+    for (ri, rec) in buf.iter().enumerate() {
+        if !csq_is_snv(rec) {
+            continue;
+        }
+        let Some(txs) = anno.by_chrom.get(&rec.chrom) else {
+            continue;
+        };
+        for tx in txs {
+            if tx.biotype != "protein_coding" {
+                continue;
+            }
+            if !tx.cds.iter().any(|r| rec.pos >= r.start && rec.pos <= r.end) {
+                continue;
+            }
+            let g2c = build_genome_to_cds_map(tx);
+            if let Some(&cds) = g2c.get(&rec.pos) {
+                groups
+                    .entry((tx.id.clone(), (cds / 3) as usize))
+                    .or_default()
+                    .push(ri);
+            }
+        }
+    }
+
+    for ((tx_id, _codon), mut idxs) in groups {
+        if idxs.len() < 2 {
+            continue;
+        }
+        idxs.sort_by_key(|&i| buf[i].pos);
+        let (lo, hi) = (idxs[0], idxs[1]);
+        if buf[lo].pos == buf[hi].pos || !phased_together(&buf[lo], &buf[hi]) {
+            continue;
+        }
+        let Some(txs) = anno.by_chrom.get(&buf[lo].chrom) else {
+            continue;
+        };
+        let Some(tx) = txs.iter().find(|t| t.id == tx_id) else {
+            continue;
+        };
+        let var_lo = (buf[lo].pos, csq_ref_char(&buf[lo]), csq_alt_char(&buf[lo]));
+        let var_hi = (buf[hi].pos, csq_ref_char(&buf[hi]), csq_alt_char(&buf[hi]));
+        let Some((aapos, aa_ref, aa_alt)) = combine_phased_codon(var_lo, var_hi, tx, fasta) else {
+            continue;
+        };
+        let effect = if aa_ref == aa_alt {
+            "synonymous"
+        } else if aa_alt == '*' {
+            "stop_gained"
+        } else {
+            "missense"
+        };
+        let aa = format!("{}{}>{}{}", aapos, aa_ref, aapos, aa_alt);
+        // DNA change is always genomic-order; the leader is the variant first in
+        // transcription order (higher genomic position on the minus strand).
+        let dna = format!(
+            "{}{}>{}+{}{}>{}",
+            var_lo.0, var_lo.1, var_lo.2, var_hi.0, var_hi.1, var_hi.2
+        );
+        let (leader_i, follower_i) = if tx.strand == '-' { (hi, lo) } else { (lo, hi) };
+        let leader_pos = buf[leader_i].pos;
+        out.insert(
+            leader_i,
+            Combo {
+                leader: true,
+                leader_pos,
+                effect: effect.to_string(),
+                aa,
+                dna,
+                gene: tx.gene_name.clone(),
+                tx: tx.id.clone(),
+                biotype: tx.biotype.clone(),
+                strand: tx.strand,
+            },
+        );
+        out.insert(
+            follower_i,
+            Combo {
+                leader: false,
+                leader_pos,
+                effect: String::new(),
+                aa: String::new(),
+                dna: String::new(),
+                gene: tx.gene_name.clone(),
+                tx: tx.id.clone(),
+                biotype: tx.biotype.clone(),
+                strand: tx.strand,
+            },
+        );
+    }
+    out
 }
 
 #[derive(Default)]
@@ -144,6 +378,9 @@ fn parse_args(args: &[String]) -> Result<CsqCfg> {
 struct Region {
     start: u32,
     end: u32,
+    /// GFF3 CDS phase (column 8): bases to skip to reach the first codon.
+    /// 0 for non-CDS features.
+    phase: u8,
 }
 
 #[derive(Clone)]
@@ -300,7 +537,12 @@ impl AnnotationDb {
                 if end > tx.end {
                     tx.end = end;
                 }
-                let r = Region { start, end };
+                let phase = if feature == "CDS" {
+                    cols[7].parse::<u8>().unwrap_or(0)
+                } else {
+                    0
+                };
+                let r = Region { start, end, phase };
                 match feature {
                     "exon" => tx.exons.push(r),
                     "CDS" => tx.cds.push(r),
@@ -411,26 +653,28 @@ fn annotate_variant(
             continue;
         }
         let effect = infer_effect(rec, alt, tx, fasta);
-        let aa_field = if tx.biotype == "protein_coding" {
-            coding_aa_change(rec, alt, tx, fasta)
+        // bcftools prints strand|aa|dna only for coding consequences; UTR /
+        // intron / splice / non-coding get just effect|gene|tx|biotype.
+        let consequence = if is_coding_effect(&effect) && tx.biotype == "protein_coding" {
+            let aa_field = coding_aa_change(rec, alt, tx, fasta)
                 .map(|(ar, aa)| {
                     let cds_pos = build_genome_to_cds_map(tx).get(&rec.pos).copied().unwrap_or(0);
                     let aa_pos = (cds_pos / 3) + 1;
-                    format!("{}{}>{}", aa_pos, ar, aa)
+                    if ar == aa {
+                        format!("{}{}", aa_pos, ar)
+                    } else {
+                        format!("{}{}>{}{}", aa_pos, ar, aa_pos, aa)
+                    }
                 })
-                .unwrap_or_else(|| ".".to_string())
-        } else { ".".to_string() };
-        let dna_change = format!("{}{}>{}", rec.pos, rec.ref_allele, alt);
-        let consequence = format!(
-            "{}|{}|{}|{}|{}|{}|{}",
-            effect,
-            tx.gene_name,
-            tx.id,
-            tx.biotype,
-            tx.strand,
-            aa_field,
-            dna_change,
-        );
+                .unwrap_or_else(|| ".".to_string());
+            let dna_change = format!("{}{}>{}", rec.pos, rec.ref_allele, alt);
+            format!(
+                "{}|{}|{}|{}|{}|{}|{}",
+                effect, tx.gene_name, tx.id, tx.biotype, tx.strand, aa_field, dna_change
+            )
+        } else {
+            format!("{}|{}|{}|{}", effect, tx.gene_name, tx.id, tx.biotype)
+        };
         out.push(consequence);
     }
 
@@ -607,6 +851,18 @@ fn coding_aa_change(
     Some((aa_ref, aa_alt))
 }
 
+/// Start phase of a transcript: the GFF phase of its first CDS segment in
+/// transcription order (lowest start on `+`, highest end on `-`). This many
+/// bases are dropped from the 5' end before translation begins.
+fn cds_start_phase(tx: &Transcript) -> usize {
+    let first = if tx.strand == '-' {
+        tx.cds.iter().max_by_key(|r| r.end)
+    } else {
+        tx.cds.iter().min_by_key(|r| r.start)
+    };
+    first.map(|r| r.phase as usize).unwrap_or(0)
+}
+
 fn build_cds_sequence(tx: &Transcript, fasta: &FastaDb) -> Option<String> {
     let mut parts = Vec::<String>::new();
     let mut cds = tx.cds.clone();
@@ -618,20 +874,33 @@ fn build_cds_sequence(tx: &Transcript, fasta: &FastaDb) -> Option<String> {
     if tx.strand == '-' {
         seq = revcomp(&seq);
     }
-    Some(seq)
+    // Drop the leading partial codon indicated by the start phase.
+    let p = cds_start_phase(tx);
+    if p >= seq.len() {
+        return Some(String::new());
+    }
+    Some(seq[p..].to_string())
 }
 
 fn build_genome_to_cds_map(tx: &Transcript) -> HashMap<u32, u32> {
     let mut out = HashMap::<u32, u32>::new();
     let mut cds = tx.cds.clone();
     cds.sort_by_key(|r| r.start);
-    let mut idx = 0u32;
+    // Start the index at -phase so the first translated codon base maps to 0;
+    // the dropped leading bases get negative indices and are skipped.
+    let mut idx: i64 = -(cds_start_phase(tx) as i64);
+
+    let push = |out: &mut HashMap<u32, u32>, pos: u32, idx: &mut i64| {
+        if *idx >= 0 {
+            out.insert(pos, *idx as u32);
+        }
+        *idx += 1;
+    };
 
     if tx.strand == '+' {
         for r in cds {
             for p in r.start..=r.end {
-                out.insert(p, idx);
-                idx += 1;
+                push(&mut out, p, &mut idx);
             }
         }
     } else {
@@ -639,8 +908,7 @@ fn build_genome_to_cds_map(tx: &Transcript) -> HashMap<u32, u32> {
         for r in cds {
             let mut p = r.end;
             loop {
-                out.insert(p, idx);
-                idx += 1;
+                push(&mut out, p, &mut idx);
                 if p == r.start {
                     break;
                 }

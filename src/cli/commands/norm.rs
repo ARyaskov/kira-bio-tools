@@ -506,43 +506,39 @@ fn verify_ref(line: &str, fa: &Fasta, mode: CheckRef) -> RefAction {
     }
 }
 
+fn is_symbolic_alt(a: &str) -> bool {
+    a.starts_with('<') || a == "*" || a == "."
+}
+
+/// Largest symbolic SV span left-alignable without materialising the whole
+/// reference allele. Beyond this the record passes through unshifted.
+const MAX_SV_SPAN: u32 = 1_000_000;
+
 fn left_align(line: &str, fa: &Fasta) -> Option<String> {
     let cols: Vec<&str> = line.split('\t').collect();
     if cols.len() < 8 { return None; }
     let chr = cols[0];
     let mut pos: u32 = cols[1].parse().ok()?;
-    let mut r: Vec<u8> = cols[3].as_bytes().to_ascii_uppercase();
-    let mut alts: Vec<Vec<u8>> = cols[4].split(',').map(|a| a.as_bytes().to_ascii_uppercase()).collect();
-    if r.is_empty() || alts.is_empty() || alts.iter().any(|a| a.is_empty()) {
-        return None;
-    }
-    // Symbolic / non-sequence alleles (<*>, <NON_REF>, *, .) are not left-alignable.
-    if alts.iter().any(|a| a[0] == b'<' || a.as_slice() == b"*" || a.as_slice() == b".") {
+    let alt_raw: Vec<&str> = cols[4].split(',').collect();
+    if alt_raw.is_empty() {
         return None;
     }
 
-    // Canonical left-alignment + minimal representation (Tan/Abecasis/Kang 2015; bcftools/vt `norm`).
-    // 1. While ref and all alts share a trailing base: truncate it; but if that would empty an
-    //    allele, instead extend one reference base to the left (shifting pos) so the indel slides
-    //    to its leftmost equivalent position (critical inside homopolymers / tandem repeats).
-    loop {
-        let last = *r.last().unwrap();
-        if !alts.iter().all(|a| *a.last().unwrap() == last) {
-            break;
-        }
-        if r.len() == 1 || alts.iter().any(|a| a.len() == 1) {
-            if pos <= 1 { break; }
-            pos -= 1;
-            let prev = fa.base(chr, pos)?.to_ascii_uppercase();
-            r.insert(0, prev);
-            for a in alts.iter_mut() { a.insert(0, prev); }
-        } else {
-            r.pop();
-            for a in alts.iter_mut() { a.pop(); }
-        }
+    // Symbolic alleles (<DEL>, <DUP>, ...) carry their span in INFO/END and are
+    // realigned alongside any sequence alleles, shifting POS and END together.
+    if alt_raw.iter().any(|a| is_symbolic_alt(a)) {
+        return left_align_symbolic(&cols, chr, pos, &alt_raw, fa);
     }
-    // 2. Left-trim a shared leading base while every allele keeps length >= 2 (drop the redundant
-    //    anchor on complex/MNP-style records).
+
+    let mut r: Vec<u8> = cols[3].as_bytes().to_ascii_uppercase();
+    let mut alts: Vec<Vec<u8>> = alt_raw.iter().map(|a| a.as_bytes().to_ascii_uppercase()).collect();
+    if r.is_empty() || alts.iter().any(|a| a.is_empty()) {
+        return None;
+    }
+
+    left_shift(&mut r, &mut alts, &mut pos, chr, fa)?;
+    // Left-trim a shared leading base while every allele keeps length >= 2 (drop the redundant
+    // anchor on complex/MNP-style records).
     while r.len() >= 2 && alts.iter().all(|a| a.len() >= 2 && a[0] == r[0]) {
         r.remove(0);
         for a in alts.iter_mut() { a.remove(0); }
@@ -560,4 +556,132 @@ fn left_align(line: &str, fa: &Fasta) -> Option<String> {
     out[3] = new_ref;
     out[4] = new_alt;
     Some(out.join("\t"))
+}
+
+/// Canonical left-alignment loop (Tan/Abecasis/Kang 2015; bcftools/vt `norm`):
+/// while ref and all alts share a trailing base, truncate it; if that would
+/// empty an allele, extend one reference base to the left (shifting `pos`) so
+/// the indel slides to its leftmost equivalent position.
+fn left_shift(r: &mut Vec<u8>, alts: &mut [Vec<u8>], pos: &mut u32, chr: &str, fa: &Fasta) -> Option<()> {
+    loop {
+        let last = *r.last().unwrap();
+        if !alts.iter().all(|a| *a.last().unwrap() == last) {
+            break;
+        }
+        if r.len() == 1 || alts.iter().any(|a| a.len() == 1) {
+            if *pos <= 1 { break; }
+            *pos -= 1;
+            let prev = fa.base(chr, *pos)?.to_ascii_uppercase();
+            r.insert(0, prev);
+            for a in alts.iter_mut() { a.insert(0, prev); }
+        } else {
+            r.pop();
+            for a in alts.iter_mut() { a.pop(); }
+        }
+    }
+    Some(())
+}
+
+/// Left-align a record carrying at least one symbolic ALT. The shift is driven
+/// by the sequence representation (either the explicit REF + sequence ALTs, or
+/// — for a pure symbolic deletion — the reference span POS..END), then POS, END
+/// and the REF anchor are moved left by the same amount. Symbolic ALTs are
+/// preserved verbatim.
+fn left_align_symbolic(
+    cols: &[&str],
+    chr: &str,
+    orig_pos: u32,
+    alt_raw: &[&str],
+    fa: &Fasta,
+) -> Option<String> {
+    let end = info_get_u32(cols[7], "END")?;
+    if end < orig_pos || end - orig_pos > MAX_SV_SPAN {
+        return None;
+    }
+    let seq_idx: Vec<usize> = alt_raw
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| !is_symbolic_alt(a))
+        .map(|(i, _)| i)
+        .collect();
+
+    let mut pos = orig_pos;
+    let symbolic_only = seq_idx.is_empty();
+    let (mut r, mut seq_alts): (Vec<u8>, Vec<Vec<u8>>) = if symbolic_only {
+        // Implied sequence form of a symbolic deletion: REF = ref[POS..=END],
+        // ALT = the single anchor base.
+        let mut refseq = Vec::with_capacity((end - orig_pos + 1) as usize);
+        for p in orig_pos..=end {
+            refseq.push(fa.base(chr, p)?.to_ascii_uppercase());
+        }
+        let anchor = vec![refseq[0]];
+        (refseq, vec![anchor])
+    } else {
+        let r = cols[3].as_bytes().to_ascii_uppercase();
+        let alts = seq_idx
+            .iter()
+            .map(|&i| alt_raw[i].as_bytes().to_ascii_uppercase())
+            .collect();
+        (r, alts)
+    };
+    if r.is_empty() || seq_alts.iter().any(|a| a.is_empty()) {
+        return None;
+    }
+
+    left_shift(&mut r, &mut seq_alts, &mut pos, chr, fa)?;
+
+    let delta = orig_pos - pos;
+    if delta == 0 {
+        return None; // nothing moved; leave the record untouched
+    }
+    let new_end = end - delta;
+
+    let new_ref = if symbolic_only {
+        (r[0] as char).to_string()
+    } else {
+        String::from_utf8(r).ok()?
+    };
+    let mut seq_iter = seq_alts.into_iter();
+    let new_alt = alt_raw
+        .iter()
+        .map(|a| {
+            if is_symbolic_alt(a) {
+                a.to_string()
+            } else {
+                seq_iter
+                    .next()
+                    .map(|v| String::from_utf8(v).unwrap_or_default())
+                    .unwrap_or_default()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let mut out: Vec<String> = cols.iter().map(|s| s.to_string()).collect();
+    out[1] = pos.to_string();
+    out[3] = new_ref;
+    out[4] = new_alt;
+    out[7] = info_set_u32(cols[7], "END", new_end);
+    Some(out.join("\t"))
+}
+
+fn info_get_u32(info: &str, key: &str) -> Option<u32> {
+    for f in info.split(';') {
+        if let Some((k, v)) = f.split_once('=') {
+            if k == key {
+                return v.parse().ok();
+            }
+        }
+    }
+    None
+}
+
+fn info_set_u32(info: &str, key: &str, val: u32) -> String {
+    info.split(';')
+        .map(|f| match f.split_once('=') {
+            Some((k, _)) if k == key => format!("{key}={val}"),
+            _ => f.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(";")
 }
