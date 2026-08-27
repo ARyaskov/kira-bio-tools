@@ -1,7 +1,7 @@
 # Kira Bio Tools
 
 [![CI](https://github.com/ARyaskov/kira-bio-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/ARyaskov/kira-bio-tools/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache](https://img.shields.io/badge/License-Apache-violet.svg)](LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/kira-bio-tools.svg)](https://crates.io/crates/kira-bio-tools)
 
 `kira-bt` is a high-performance toolkit for VCF/BCF processing with bcftools-oriented command-line compatibility.

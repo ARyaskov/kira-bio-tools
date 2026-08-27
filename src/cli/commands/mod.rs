@@ -22,6 +22,8 @@ pub mod stats;
 pub mod tabix;
 pub mod samview;
 pub mod solid;
+pub mod solid_records;
+pub mod solid_windows;
 pub mod tile;
 pub mod view;
 

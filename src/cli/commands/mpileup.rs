@@ -158,10 +158,10 @@ pub fn cmd_mpileup(args: MpileupArgs) -> Result<()> {
 /// Run mpileup over already-built [`BamReader`]s (records in memory) and write
 /// VCF to `out`. Same logic as [`cmd_mpileup`] minus the file-opening — for the
 /// fused `solid` pipeline that hands sorted in-memory records straight here.
-pub fn run_mpileup_from_bams(
+pub fn run_mpileup_from_bams<W: Write>(
     mut bams: Vec<BamReader>,
     args: &MpileupArgs,
-    out: &mut BufWriter<File>,
+    out: &mut W,
 ) -> Result<()> {
     if bams.is_empty() {
         bail!("mpileup: no records");
@@ -312,14 +312,14 @@ struct EmitCtx<'a> {
     hp_indel: bool,
 }
 
-fn run_sequential(
+fn run_sequential<W: Write>(
     mut bams: Vec<BamReader>,
     ctx: &EmitCtx,
     min_mq: u8,
     min_bq: u8,
     skip_indels: bool,
     gvcf_blocker: &mut Option<GvcfBlocker>,
-    out: &mut BufWriter<File>,
+    out: &mut W,
 ) -> Result<()> {
     mpileup_engine_multi(&mut bams, min_mq, min_bq, skip_indels, &mut |site, overlapping| {
         let mut buf: Vec<u8> = Vec::with_capacity(256);
@@ -335,7 +335,7 @@ fn run_sequential(
     Ok(())
 }
 
-fn run_parallel(
+fn run_parallel<W: Write>(
     mut bams: Vec<BamReader>,
     n_chunks: usize,
     ctx: &EmitCtx,
@@ -343,7 +343,7 @@ fn run_parallel(
     min_bq: u8,
     skip_indels: bool,
     pos_filter: Option<crate::bam::pos_filter::InterestingMap>,
-    out: &mut BufWriter<File>,
+    out: &mut W,
 ) -> Result<()> {
     use rayon::prelude::*;
 

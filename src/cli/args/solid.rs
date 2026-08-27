@@ -67,6 +67,23 @@ pub struct SolidArgs {
     #[arg(short = 't', long = "threads", default_value_t = 8)]
     pub threads: usize,
 
+    /// Process the genome in reference windows of this many megabases instead of
+    /// holding every alignment in memory at once.
+    ///
+    /// The default (0) keeps the whole run resident — fastest, but peak memory
+    /// scales with the input (~12 GB for a 30x human chr20). With a window size
+    /// set, alignments are spilled to temporary BAMs bucketed by reference window
+    /// and each window is sorted, deduplicated and called on its own, bounding
+    /// peak memory by one window's depth. Smaller windows mean lower peak memory
+    /// and more temporary I/O; 32 is a reasonable starting point.
+    #[arg(long = "window-mb", value_name = "MB", default_value_t = 0)]
+    pub window_mb: u32,
+
+    /// Directory for the windowed mode's temporary BAMs (default: alongside the
+    /// output VCF).
+    #[arg(long = "window-tmpdir", value_name = "DIR")]
+    pub window_tmpdir: Option<PathBuf>,
+
     /// Output VCF path — the only artifact written to disk.
     #[arg(short = 'o', long = "output", value_name = "VCF")]
     pub output: PathBuf,
