@@ -1,0 +1,1 @@
+bcftools query -f '%CHROM %POS %ID %REF %ALT %QUAL %FILTER \t %INFO/CHROM %INFO/POS %INFO/ID %INFO/REF %INFO/ALT %INFO/QUAL %INFO/FILTER' in.vcf > out.bcf.vcf

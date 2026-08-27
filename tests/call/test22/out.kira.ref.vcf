@@ -1,0 +1,14 @@
+##fileformat=VCFv4.2
+##reference=file:///lustre/scratch116/vr/ref/human/GRCh37/hs37d5.fa
+##contig=<ID=2,length=243199373>
+##INFO=<ID=I16,Number=16,Type=Float,Description="Auxiliary tag used for calling, see description of bcf_callret1_t in bam2bcf.h">
+##INFO=<ID=QS,Number=R,Type=Float,Description="Auxiliary tag used for calling">
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description="List of Phred-scaled genotype likelihoods">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths (high-quality bases)">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Phred-scaled Genotype Quality">
+##FORMAT=<ID=GP,Number=G,Type=Float,Description="Genotype posterior probabilities">
+##INFO=<ID=AC,Number=A,Type=Integer,Description="Allele count in genotypes">
+##INFO=<ID=AN,Number=1,Type=Integer,Description="Total number of alleles in called genotypes">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	NA18488_YRI	NA18489_YRI	NA18498_YRI
+2	136608646	.	G	A,T	5.000	.	AC=0,0;AN=6;I16=95,24,45,11,4466,172210,1917,71261,7086,423410,3283,194379,2130,47014,1038,22600;QS=40.8826,20.7918,0.325581,0	GT:PL:AD:GQ:GP	0/0:0,6,77,6,77,77,6,77,77,77:2,0,0,0:6:0.665612,0.167194,0.167194,0.000000,0.000000,0.000000	0/0:0,3,33,3,33,33,3,33,33,33:1,0,0,0:3:0.499032,0.250109,0.250109,0.000250,0.000250,0.000250	0/0:0,6,67,6,67,67,6,67,67,67:2,0,0,0:6:0.665612,0.167194,0.167194,0.000000,0.000000,0.000000

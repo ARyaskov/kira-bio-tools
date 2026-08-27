@@ -1,0 +1,35 @@
+##fileformat=VCFv4.2
+##source=kira-bt mpileup(native)
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total depth">
+##INFO=<ID=DV,Number=1,Type=Integer,Description="Total non-reference depth">
+##INFO=<ID=DPR,Number=2,Type=Integer,Description="Ref/Alt depth">
+##INFO=<ID=DP4,Number=4,Type=Integer,Description="Ref/Alt fwd/rev counts">
+##INFO=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
+##INFO=<ID=ADF,Number=R,Type=Integer,Description="Allelic depths on forward strand">
+##INFO=<ID=ADR,Number=R,Type=Integer,Description="Allelic depths on reverse strand">
+##INFO=<ID=SP,Number=1,Type=Integer,Description="Strand bias metric">
+##INFO=<ID=SCR,Number=1,Type=Float,Description="Soft clipping ratio proxy">
+##INFO=<ID=NMBZ,Number=1,Type=Float,Description="Mismatch bias Z-score proxy">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Sample depth">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
+##FORMAT=<ID=ADF,Number=R,Type=Integer,Description="Allelic depths on forward strand">
+##FORMAT=<ID=ADR,Number=R,Type=Integer,Description="Allelic depths on reverse strand">
+##FORMAT=<ID=DV,Number=1,Type=Integer,Description="Sample non-reference depth">
+##FORMAT=<ID=DPR,Number=2,Type=Integer,Description="Sample ref/alt depth">
+##FORMAT=<ID=SCR,Number=1,Type=Float,Description="Soft clipping ratio proxy">
+##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype quality">
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description="Phred-scaled genotype likelihoods">
+##contig=<ID=11>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	sample
+11	10	.	N	A	.	PASS	DP=28	GT:DP:AD	1/1:28:0,28
+11	11	.	N	T	.	PASS	DP=31	GT:DP:AD	1/1:31:0,31
+11	12	.	N	A	.	PASS	DP=34	GT:DP:AD	1/1:34:0,34
+11	13	.	N	T	.	PASS	DP=36	GT:DP:AD	1/1:36:0,36
+11	14	.	N	G	.	PASS	DP=36	GT:DP:AD	1/1:36:0,36
+11	15	.	N	C	.	PASS	DP=37	GT:DP:AD	1/1:37:0,37
+11	16	.	N	A	.	PASS	DP=37	GT:DP:AD	1/1:37:0,37
+11	17	.	N	T	.	PASS	DP=39	GT:DP:AD	1/1:39:0,39
+11	18	.	N	A	.	PASS	DP=39	GT:DP:AD	1/1:39:0,39
+11	19	.	N	T	.	PASS	DP=41	GT:DP:AD	1/1:41:0,41
+11	20	.	T	.	.	PASS	DP=43	GT:DP:AD	0/0:43:43,0

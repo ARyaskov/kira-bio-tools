@@ -1,0 +1,1 @@
+bcftools concat --no-version -aD concat.2.a.vcf.gz concat.2.b.vcf.gz | bcftools view | grep -v '^##bcftools_' > out.bcf.vcf

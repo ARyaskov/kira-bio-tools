@@ -1,0 +1,5 @@
+##fileformat=VCFv4.2
+##INFO=<ID=src,Number=1,Type=String,Description="">
+##contig=<ID=chr1,length=248956422>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	902	ID1	A	C	.	.	.

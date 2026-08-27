@@ -1,0 +1,10 @@
+##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=20,length=2147483647>
+##INFO=<ID=END,Number=1,Type=Integer,Description="End position">
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+20	15	.	TAC	T	.	.	.
+20	15	.	T	<DEL>	.	.	END=17;SVTYPE=DEL
+20	93	.	CAAA	C	.	.	.
+20	93	.	C	<DEL>	.	.	END=96;SVTYPE=DEL

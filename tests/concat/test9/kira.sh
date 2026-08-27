@@ -1,0 +1,1 @@
+kira-bt concat -- --no-version -l --ligate-warn concat.3.a.bcf concat.3.b.bcf concat.3.0.bcf concat.3.c.bcf concat.3.d.bcf concat.3.e.bcf concat.3.f.bcf | bcftools view | grep -v '^##bcftools_' > out.kira.vcf

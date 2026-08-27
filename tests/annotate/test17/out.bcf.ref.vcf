@@ -1,0 +1,14 @@
+##fileformat=VCFv4.1
+##FILTER=<ID=PASS,Description="All filters passed">
+##INFO=<ID=END,Number=1,Type=Integer,Description="End position of the variant described in this record">
+##contig=<ID=1>
+##bcftools_viewVersion=1.19+htslib-1.19
+##bcftools_viewCommand=view -Oz -o annotate24.dst.vcf.gz annotate24.dst.vcf; Date=Tue Feb 24 04:19:14 2026
+##INFO=<ID=XX,Number=1,Type=String,Description="The tag to transfer">
+##bcftools_annotateVersion=1.19+htslib-1.19
+##bcftools_annotateCommand=annotate -a db.vcf.gz -c XX -o out.bcf.ref.vcf in.vcf.gz; Date=Tue Feb 24 04:21:56 2026
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+1	14367	.	C	<DEL>	.	.	END=129359;XX=end_129359
+1	14367	.	C	<DEL>	.	.	END=121066;XX=end_121066
+1	14367	.	C	<DEL>	.	.	END=137826;XX=end_137826
+1	14367	.	C	<DEL>	.	.	END=112930;XX=end_112930

@@ -1,0 +1,99 @@
+##fileformat=VCFv4.2
+##source=kira-bt mpileup(native)
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total depth">
+##INFO=<ID=DV,Number=1,Type=Integer,Description="Total non-reference depth">
+##INFO=<ID=DPR,Number=2,Type=Integer,Description="Ref/Alt depth">
+##INFO=<ID=DP4,Number=4,Type=Integer,Description="Ref/Alt fwd/rev counts">
+##INFO=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
+##INFO=<ID=ADF,Number=R,Type=Integer,Description="Allelic depths on forward strand">
+##INFO=<ID=ADR,Number=R,Type=Integer,Description="Allelic depths on reverse strand">
+##INFO=<ID=SP,Number=1,Type=Integer,Description="Strand bias metric">
+##INFO=<ID=SCR,Number=1,Type=Float,Description="Soft clipping ratio proxy">
+##INFO=<ID=NMBZ,Number=1,Type=Float,Description="Mismatch bias Z-score proxy">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Sample depth">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
+##FORMAT=<ID=ADF,Number=R,Type=Integer,Description="Allelic depths on forward strand">
+##FORMAT=<ID=ADR,Number=R,Type=Integer,Description="Allelic depths on reverse strand">
+##FORMAT=<ID=DV,Number=1,Type=Integer,Description="Sample non-reference depth">
+##FORMAT=<ID=DPR,Number=2,Type=Integer,Description="Sample ref/alt depth">
+##FORMAT=<ID=SCR,Number=1,Type=Float,Description="Soft clipping ratio proxy">
+##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype quality">
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description="Phred-scaled genotype likelihoods">
+##contig=<ID=chr16>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	sample	sample2
+chr16	75	.	C	.	.	PASS	DP=239;NMBZ=0.000	GT:DP	0/0:100	0/0:139
+chr16	76	.	T	.	.	PASS	DP=198;NMBZ=0.000	GT:DP	0/0:61	0/0:137
+chr16	77	.	T	.	.	PASS	DP=197;NMBZ=0.000	GT:DP	0/0:61	0/0:136
+chr16	78	.	T	.	.	PASS	DP=191;NMBZ=0.000	GT:DP	0/0:59	0/0:132
+chr16	79	.	T	.	.	PASS	DP=186;NMBZ=0.000	GT:DP	0/0:55	0/0:131
+chr16	80	.	T	.	.	PASS	DP=183;NMBZ=0.000	GT:DP	0/0:53	0/0:130
+chr16	81	.	T	.	.	PASS	DP=181;NMBZ=0.000	GT:DP	0/0:53	0/0:128
+chr16	82	.	T	.	.	PASS	DP=175;NMBZ=0.000	GT:DP	0/0:50	0/0:125
+chr16	83	.	T	.	.	PASS	DP=172;NMBZ=0.000	GT:DP	0/0:49	0/0:123
+chr16	84	.	C	T	.	PASS	DP=211;NMBZ=0.000	GT:DP	0/0:87	0/0:124
+chr16	85	.	A	.	.	PASS	DP=204;NMBZ=0.000	GT:DP	0/0:85	0/0:119
+chr16	86	.	G	.	.	PASS	DP=201;NMBZ=0.000	GT:DP	0/0:84	0/0:117
+chr16	87	.	A	.	.	PASS	DP=198;NMBZ=0.000	GT:DP	0/0:84	0/0:114
+chr16	88	.	G	.	.	PASS	DP=191;NMBZ=0.000	GT:DP	0/0:81	0/0:110
+chr16	89	.	A	.	.	PASS	DP=189;NMBZ=0.000	GT:DP	0/0:82	0/0:107
+chr16	90	.	A	.	.	PASS	DP=183;NMBZ=0.000	GT:DP	0/0:79	0/0:104
+chr16	91	.	G	.	.	PASS	DP=181;NMBZ=0.000	GT:DP	0/0:78	0/0:103
+chr16	92	.	T	.	.	PASS	DP=179;NMBZ=0.000	GT:DP	0/0:77	0/0:102
+chr16	93	.	C	T	.	PASS	DP=175;NMBZ=0.000	GT:DP	0/0:75	0/0:100
+chr16	94	.	T	.	.	PASS	DP=174;NMBZ=0.000	GT:DP	0/0:74	0/0:100
+chr16	95	.	T	.	.	PASS	DP=171;NMBZ=0.000	GT:DP	0/0:72	0/0:99
+chr16	96	.	C	.	.	PASS	DP=168;NMBZ=0.000	GT:DP	0/0:71	0/0:97
+chr16	97	.	T	.	.	PASS	DP=162;NMBZ=0.000	GT:DP	0/0:69	0/0:93
+chr16	98	.	G	.	.	PASS	DP=161;NMBZ=0.000	GT:DP	0/0:67	0/0:94
+chr16	99	.	A	.	.	PASS	DP=161;NMBZ=0.000	GT:DP	0/0:67	0/0:94
+chr16	100	.	G	.	.	PASS	DP=157;NMBZ=0.000	GT:DP	0/0:67	0/0:90
+chr16	101	.	A	.	.	PASS	DP=152;NMBZ=0.000	GT:DP	0/0:64	0/0:88
+chr16	102	.	T	.	.	PASS	DP=149;NMBZ=0.000	GT:DP	0/0:63	0/0:86
+chr16	103	.	G	.	.	PASS	DP=148;NMBZ=0.000	GT:DP	0/0:63	0/0:85
+chr16	104	.	A	.	.	PASS	DP=141;NMBZ=0.000	GT:DP	0/0:59	0/0:82
+chr16	105	.	T	.	.	PASS	DP=140;NMBZ=0.000	GT:DP	0/0:60	0/0:80
+chr16	106	.	C	G	.	PASS	DP=139;NMBZ=0.000	GT:DP	0/0:60	0/0:79
+chr16	107	.	C	.	.	PASS	DP=129;NMBZ=0.000	GT:DP	0/0:56	0/0:73
+chr16	108	.	C	.	.	PASS	DP=127;NMBZ=0.000	GT:DP	0/0:56	0/0:71
+chr16	109	.	A	.	.	PASS	DP=124;NMBZ=0.000	GT:DP	0/0:54	0/0:70
+chr16	110	.	G	.	.	PASS	DP=119;NMBZ=0.000	GT:DP	0/0:53	0/0:66
+chr16	111	.	G	.	.	PASS	DP=117;NMBZ=0.000	GT:DP	0/0:51	0/0:66
+chr16	112	.	G	.	.	PASS	DP=114;NMBZ=0.000	GT:DP	0/0:50	0/0:64
+chr16	113	.	A	.	.	PASS	DP=110;NMBZ=0.000	GT:DP	0/0:49	0/0:61
+chr16	114	.	A	.	.	PASS	DP=111;NMBZ=0.000	GT:DP	0/0:49	0/0:62
+chr16	115	.	A	.	.	PASS	DP=107;NMBZ=0.000	GT:DP	0/0:48	0/0:59
+chr16	116	.	G	.	.	PASS	DP=102;NMBZ=0.000	GT:DP	0/0:47	0/0:55
+chr16	117	.	C	.	.	PASS	DP=98;NMBZ=0.000	GT:DP	0/0:47	0/0:51
+chr16	118	.	C	.	.	PASS	DP=96;NMBZ=0.000	GT:DP	0/0:46	0/0:50
+chr16	119	.	T	.	.	PASS	DP=91;NMBZ=0.000	GT:DP	0/0:43	0/0:48
+chr16	120	.	T	G	.	PASS	DP=86;NMBZ=0.000	GT:DP	0/0:40	0/0:46
+chr16	121	.	C	.	.	PASS	DP=85;NMBZ=0.000	GT:DP	0/0:40	0/0:45
+chr16	122	.	T	.	.	PASS	DP=84;NMBZ=0.000	GT:DP	0/0:39	0/0:45
+chr16	123	.	C	A	.	PASS	DP=81;NMBZ=0.000	GT:DP	0/0:37	0/0:44
+chr16	124	.	C	.	.	PASS	DP=80;NMBZ=0.000	GT:DP	0/0:37	0/0:43
+chr16	125	.	T	.	.	PASS	DP=79;NMBZ=0.000	GT:DP	0/0:36	0/0:43
+chr16	126	.	T	.	.	PASS	DP=74;NMBZ=0.000	GT:DP	0/0:36	0/0:38
+chr16	127	.	C	.	.	PASS	DP=72;NMBZ=0.000	GT:DP	0/0:34	0/0:38
+chr16	128	.	T	.	.	PASS	DP=68;NMBZ=0.000	GT:DP	0/0:32	0/0:36
+chr16	129	.	T	.	.	PASS	DP=64;NMBZ=0.000	GT:DP	0/0:30	0/0:34
+chr16	130	.	C	.	.	PASS	DP=64;NMBZ=0.000	GT:DP	0/0:30	0/0:34
+chr16	131	.	T	.	.	PASS	DP=61;NMBZ=0.000	GT:DP	0/0:28	0/0:33
+chr16	132	.	C	.	.	PASS	DP=58;NMBZ=0.000	GT:DP	0/0:27	0/0:31
+chr16	133	.	T	.	.	PASS	DP=55;NMBZ=0.000	GT:DP	0/0:26	0/0:29
+chr16	134	.	T	.	.	PASS	DP=49;NMBZ=0.000	GT:DP	0/0:23	0/0:26
+chr16	135	.	T	.	.	PASS	DP=44;NMBZ=0.000	GT:DP	0/0:22	0/0:22
+chr16	136	.	C	.	.	PASS	DP=43;NMBZ=0.000	GT:DP	0/0:22	0/0:21
+chr16	137	.	C	.	.	PASS	DP=38;NMBZ=0.000	GT:DP	0/0:19	0/0:19
+chr16	138	.	C	.	.	PASS	DP=35;NMBZ=0.000	GT:DP	0/0:17	0/0:18
+chr16	139	.	T	.	.	PASS	DP=32;NMBZ=0.000	GT:DP	0/0:16	0/0:16
+chr16	140	.	T	.	.	PASS	DP=31;NMBZ=0.000	GT:DP	0/0:16	0/0:15
+chr16	141	.	G	.	.	PASS	DP=28;NMBZ=0.000	GT:DP	0/0:15	0/0:13
+chr16	142	.	G	.	.	PASS	DP=23;NMBZ=0.000	GT:DP	0/0:14	0/0:9
+chr16	143	.	T	.	.	PASS	DP=18;NMBZ=0.000	GT:DP	0/0:10	0/0:8
+chr16	144	.	C	.	.	PASS	DP=14;NMBZ=0.000	GT:DP	0/0:8	0/0:6
+chr16	145	.	G	.	.	PASS	DP=12;NMBZ=0.000	GT:DP	0/0:6	0/0:6
+chr16	146	.	A	.	.	PASS	DP=9;NMBZ=0.000	GT:DP	0/0:4	0/0:5
+chr16	147	.	G	.	.	PASS	DP=4;NMBZ=0.000	GT:DP	0/0:2	0/0:2
+chr16	148	.	A	.	.	PASS	DP=3;NMBZ=0.000	GT:DP	0/0:2	0/0:1
+chr16	149	.	G	.	.	PASS	DP=3;NMBZ=0.000	GT:DP	0/0:2	0/0:1

@@ -1,0 +1,5 @@
+##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##reference=file://test/mpileup.ref.fa.gz
+##contig=<ID=chr1,length=81195210>
+##ALT=<ID=X,Description="Represents allele(s) other than observed.">

@@ -1,0 +1,10 @@
+##fileformat=VCFv4.1
+##FILTER=<ID=PASS,Description="All filters passed">
+##FORMAT=<ID=GT,Number=1,Type=String,Description=Genotype>
+##contig=<ID=20,length=63025520>
+##bcftools_viewVersion=1.19+htslib-1.19
+##bcftools_viewCommand=view -Oz -o annotate20.dst.vcf.gz annotate20.dst.vcf; Date=Tue Feb 24 04:14:52 2026
+##bcftools_annotateVersion=1.19+htslib-1.19
+##bcftools_annotateCommand=annotate -a db.vcf.gz -c +FMT/GT -o out.bcf.ref.vcf in.vcf.gz; Date=Tue Feb 24 04:21:56 2026
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SAMPLE1	SAMPLE2
+20	20202020	.	C	G	.	.	.	GT	0/1	0/0

@@ -1,0 +1,1 @@
+bcftools concat --no-version -l --ligate-warn concat.3.a.vcf.gz concat.3.b.vcf.gz concat.3.0.vcf.gz concat.3.c.vcf.gz concat.3.d.vcf.gz concat.3.e.vcf.gz concat.3.f.vcf.gz | bcftools view | grep -v '^##bcftools_' > out.bcf.vcf

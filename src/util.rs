@@ -1,3 +1,5 @@
+use memmap2::MmapMut;
+use std::fs::OpenOptions;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -158,19 +160,7 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 #[inline]
-pub fn parse_vcf_line_fast(line: &[u8]) -> Option<(ChrId, u32)> {
-    let chrom_end = memchr::memchr(b'\t', line)?;
-    let chr_id = parse_chromosome_fast(&line[..chrom_end])?;
-
-    let pos_start = chrom_end + 1;
-    let remaining = &line[pos_start..];
-    let pos_end = memchr::memchr(b'\t', remaining).unwrap_or(remaining.len());
-    let pos = parse_u32_fast(&remaining[..pos_end])?;
-
-    Some((chr_id, pos))
-}
-
-#[inline]
+#[allow(dead_code)]
 fn parse_chromosome_fast(bytes: &[u8]) -> Option<ChrId> {
     let bytes = if bytes.len() > 3 && &bytes[..3] == b"chr" {
         &bytes[3..]
@@ -198,6 +188,7 @@ fn parse_chromosome_fast(bytes: &[u8]) -> Option<ChrId> {
 }
 
 #[inline]
+#[allow(dead_code)]
 fn parse_u32_fast(bytes: &[u8]) -> Option<u32> {
     if bytes.is_empty() || bytes.len() > 10 {
         return None;
@@ -242,5 +233,231 @@ impl Region {
                 end: None,
             })
         }
+    }
+}
+
+pub fn url_encode_info_value(val: &str) -> String {
+    let mut result = String::with_capacity(val.len() + 10);
+    for ch in val.chars() {
+        match ch {
+            ' ' => result.push_str("%20"),
+            ';' => result.push_str("%3B"),
+            '=' => result.push_str("%3D"),
+            '%' => result.push_str("%25"),
+            ',' => result.push_str("%2C"),
+            '\r' => result.push_str("%0D"),
+            '\n' => result.push_str("%0A"),
+            '\t' => result.push_str("%09"),
+            _ => result.push(ch),
+        }
+    }
+    result
+}
+
+pub fn url_decode_info_value(val: &str) -> String {
+    let mut result = String::with_capacity(val.len());
+    let mut chars = val.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex1 = chars.next();
+            let hex2 = chars.next();
+
+            if let (Some(h1), Some(h2)) = (hex1, hex2) {
+                let hex_str = format!("{}{}", h1, h2);
+                if let Ok(byte) = u8::from_str_radix(&hex_str, 16) {
+                    result.push(byte as char);
+                    continue;
+                }
+            }
+
+            result.push(c);
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+pub fn append_cstr(pool: &mut Vec<u8>, s: &str) -> usize {
+    let ofs = pool.len();
+    pool.extend_from_slice(s.as_bytes());
+    pool.push(0);
+    ofs
+}
+
+pub fn clean_info_values(val: &str) -> String {
+    let v: Vec<&str> = val.split(',').filter(|s| *s != ".").collect();
+
+    let v = match v.len() {
+        0 => return String::new(),
+        1 => {
+            if v[0] == "." {
+                return String::new();
+            }
+            v
+        }
+        _ => {
+            let mut v = v;
+            while v.last() == Some(&".") {
+                v.pop();
+            }
+            v
+        }
+    };
+
+    if v.is_empty() || v.iter().all(|s| s == &".") {
+        return String::new();
+    }
+
+    v.join(",")
+}
+
+pub fn read_cstring(pool: &[u8], offset: usize) -> &str {
+    if offset >= pool.len() {
+        return "";
+    }
+    let end = pool[offset..]
+        .iter()
+        .position(|&b| b == 0)
+        .map(|p| offset + p)
+        .unwrap_or(pool.len());
+    std::str::from_utf8(&pool[offset..end]).unwrap_or("")
+}
+
+use crate::annotate::structs::bundle::FieldNumber;
+use fxhash::hash64;
+
+#[inline]
+pub fn fast_hash64(bytes: &[u8]) -> u64 {
+    hash64(bytes)
+}
+
+pub fn extract_info_key(line: &str) -> Option<String> {
+    if let Some(start) = line.find("ID=") {
+        let rest = &line[start + 3..];
+        if let Some(end) = rest.find(',') {
+            return Some(rest[..end].to_string());
+        }
+    }
+    None
+}
+
+pub fn extract_info_number(line: &str) -> Option<FieldNumber> {
+    if let Some(start) = line.find("Number=") {
+        let rest = &line[start + 7..];
+        if let Some(end) = rest.find(',') {
+            let num_str = &rest[..end];
+            return match num_str {
+                "0" => Some(FieldNumber::Zero),
+                "1" => Some(FieldNumber::One),
+                "." => Some(FieldNumber::Many),
+                "A" => Some(FieldNumber::A),
+                "R" => Some(FieldNumber::R),
+                "G" => Some(FieldNumber::G),
+                _ => Some(FieldNumber::Many),
+            };
+        }
+    }
+    None
+}
+
+pub fn choose_best_number(numbers: &[FieldNumber]) -> FieldNumber {
+    use FieldNumber::*;
+
+    let mut has_r = false;
+    let mut has_a = false;
+    let mut has_many = false;
+    let mut has_one = false;
+
+    for n in numbers {
+        match n {
+            R => has_r = true,
+            A => has_a = true,
+            Many => has_many = true,
+            One => has_one = true,
+            _ => {}
+        }
+    }
+
+    if has_r {
+        return R;
+    }
+    if has_a {
+        return A;
+    }
+    if has_many {
+        return Many;
+    }
+    if has_one {
+        return One;
+    }
+
+    One
+}
+
+pub struct MmapWriter {
+    file: std::fs::File,
+    map: MmapMut,
+    map_size: usize,
+    grow_step: usize,
+    offset: usize,
+}
+
+impl MmapWriter {
+    pub fn create(path: &Path, initial_size: usize) -> std::io::Result<Self> {
+        let size = initial_size.max(1);
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        file.set_len(size as u64)?;
+        let map = unsafe { MmapMut::map_mut(&file)? };
+        Ok(Self {
+            file,
+            map,
+            map_size: size,
+            grow_step: size,
+            offset: 0,
+        })
+    }
+
+    pub fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.ensure_capacity(data.len())?;
+        let end = self.offset + data.len();
+        self.map[self.offset..end].copy_from_slice(data);
+        self.offset = end;
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> std::io::Result<()> {
+        self.map.flush()
+    }
+
+    pub fn finish(mut self, flush: bool) -> std::io::Result<()> {
+        if flush {
+            self.flush()?;
+        }
+        self.file.set_len(self.offset as u64)?;
+        Ok(())
+    }
+
+    fn ensure_capacity(&mut self, additional: usize) -> std::io::Result<()> {
+        let needed = self.offset + additional;
+        if needed <= self.map_size {
+            return Ok(());
+        }
+        let mut new_size = self.map_size;
+        while new_size < needed {
+            new_size += self.grow_step;
+        }
+        self.map.flush()?;
+        self.file.set_len(new_size as u64)?;
+        self.map = unsafe { MmapMut::map_mut(&self.file)? };
+        self.map_size = new_size;
+        Ok(())
     }
 }

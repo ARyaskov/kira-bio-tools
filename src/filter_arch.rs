@@ -6,6 +6,8 @@
 //  - FAST info=...; parser (SIMD / fallback)
 //
 
+#![allow(unsafe_op_in_unsafe_fn)]
+
 use std::collections::HashMap;
 
 //
@@ -104,7 +106,6 @@ mod arch_fallback {
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 mod arch_avx2 {
     use super::*;
-    use core::arch::x86_64::*;
 
     pub struct Avx2Impl;
 
@@ -350,7 +351,6 @@ mod arch_neon {
     }
 }
 
-
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 static ARCH: arch_avx2::Avx2Impl = arch_avx2::Avx2Impl;
 
@@ -365,4 +365,22 @@ static ARCH: arch_fallback::FallbackImpl = arch_fallback::FallbackImpl;
 
 pub fn get_arch() -> &'static dyn FilterArch {
     &ARCH
+}
+
+pub fn arch_name() -> &'static str {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        "avx2"
+    }
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        "neon"
+    }
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(target_arch = "aarch64", target_feature = "neon")
+    )))]
+    {
+        "fallback"
+    }
 }

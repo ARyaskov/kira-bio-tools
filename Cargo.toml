@@ -1,29 +1,31 @@
 [package]
 name = "kira-bio-tools"
-version = "0.3.0"
-edition = "2021"
+version = "0.6.0"
+edition = "2024"
+rust-version = "1.95"
 description = "High-performance VCF indexer with full tabix compatibility"
 license = "MIT"
 repository = "https://github.com/ARyaskov/kira-bio-tools"
-keywords = ["vcf", "bioinformatics", "genomics", "tabix", "index"]
+keywords = ["vcf", "bioinformatics", "genomics", "tabix", "bcf"]
 categories = ["science", "command-line-utilities"]
 
 [dependencies]
-kira_kv_engine = { version = "0.1", features = ["parallel"] }
+kira_kv_engine = "0.6.1"
 thiserror = "2.0"
 memmap2 = "0.9"
 bytemuck = { version = "1.21", features = ["derive"] }
 rayon = "1.10"
-memchr = "2.7"
 indexmap = "2.7"
 lazy_static = "1.5"
 
-noodles-bgzf = "0.33"
-noodles-csi = "0.40"
-noodles-core = "0.15"
+noodles-bgzf = "0.47"
+noodles-csi = "0.56"
+noodles-bam = "0.89"
+noodles-sam = "0.85"
+noodles-fasta = "0.61"
+noodles-cram = "0.93"
+noodles-core = "0.20"
 
-flate2 = "1.1"
-crossbeam-channel = "0.5"
 
 clap = { version = "4", features = ["derive"], optional = true }
 anyhow = { version = "1.0", optional = true }
@@ -32,9 +34,25 @@ once_cell = "1.19"
 fxhash = "0.2.1"
 pest = "2.8.4"
 pest_derive = "2.8.4"
+regex = "1.11"
 cust = { version = "0.3.2", optional = true }
 which = "8.0.0"
-ocl = { version = "0.19.7", optional = true }
+flate2 = "1.1"
+crc32fast = "1.4"
+crossbeam-channel = "0.5"
+indicatif = "0.18"
+smallvec = { version = "1.13", features = ["union", "const_generics"] }
+memchr = "2.7"
+itoa = "1.0"
+num_cpus = "1.17"
+percent-encoding = "2.3.2"
+url = "2.5.7"
+form_urlencoded = "1.2.2"
+
+# Fused single-binary pipeline (`kira-bt solid`): link the aligner + BAM
+# toolkit as libraries so align -> sort/markdup -> mpileup run in one process.
+kira-bam = "0.1.2"
+kira-ls-aligner = "0.3.0"
 
 [dev-dependencies]
 tempfile = "3.15"
@@ -45,7 +63,6 @@ rand = "0.8"
 default = ["cli"]
 cli = ["clap", "anyhow"]
 gpu = ["cust"]
-opencl = ["ocl"]
 avx2 = []
 neon = []
 
@@ -63,7 +80,7 @@ name = "query_bench"
 harness = false
 
 [[bench]]
-name = "norm_bench"
+name = "annotate_bench"
 harness = false
 
 [profile.release]

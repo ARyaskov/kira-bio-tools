@@ -1,0 +1,1 @@
+bcftools annotate -a in.tab -c CHROM,FROM,TO,T_STR -o out.bcf.vcf in.vcf

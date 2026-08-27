@@ -1,0 +1,816 @@
+use fxhash::FxHashMap;
+use indexmap::IndexMap;
+use std::collections::HashMap;
+
+use super::field_metadata::{infer_field_type, is_missing_value};
+use super::merge_info_helpers::*;
+use crate::annotate::structs::annotate_mode::AnnotateMode;
+use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber, StructuredInfoField};
+
+/// Threshold (in #fields per bundle) at which we flip from a linear scan over
+/// `bundle.info` to a hashmap.
+const HASHMAP_FIELD_THRESHOLD: usize = 12;
+
+/// Per-bundle field index.
+enum BundleFieldIndex<'a> {
+    Linear,
+    Hash(FxHashMap<&'a str, &'a StructuredInfoField>),
+}
+
+impl<'a> BundleFieldIndex<'a> {
+    fn build(bundle: &'a AnnotationBundle) -> Self {
+        if bundle.info.len() < HASHMAP_FIELD_THRESHOLD {
+            Self::Linear
+        } else {
+            let mut by_key =
+                FxHashMap::with_capacity_and_hasher(bundle.info.len(), Default::default());
+            for field in &bundle.info {
+                by_key.insert(field.key.as_str(), field);
+            }
+            Self::Hash(by_key)
+        }
+    }
+
+    /// O(1) on Hash, O(K) on Linear.
+    fn get(&self, bundle: &'a AnnotationBundle, key: &str) -> Option<&'a StructuredInfoField> {
+        match self {
+            Self::Linear => bundle.info.iter().find(|f| f.key == key),
+            Self::Hash(map) => map.get(key).copied(),
+        }
+    }
+
+    /// Iterate over all fields.
+    fn iter(
+        &'a self,
+        bundle: &'a AnnotationBundle,
+    ) -> Box<dyn Iterator<Item = &'a StructuredInfoField> + 'a> {
+        match self {
+            Self::Linear => Box::new(bundle.info.iter()),
+            Self::Hash(map) => Box::new(map.values().copied()),
+        }
+    }
+}
+
+struct BundleInfoLookup<'a> {
+    vcf_idx: usize,
+    bundle: &'a AnnotationBundle,
+    by_key: BundleFieldIndex<'a>,
+}
+
+fn build_bundle_lookups<'a>(
+    bundles: &'a [(usize, AnnotationBundle)],
+) -> Vec<BundleInfoLookup<'a>> {
+    bundles
+        .iter()
+        .map(|(vcf_idx, bundle)| BundleInfoLookup {
+            vcf_idx: *vcf_idx,
+            bundle,
+            by_key: BundleFieldIndex::build(bundle),
+        })
+        .collect()
+}
+
+fn build_single_lookup(bundle: &AnnotationBundle) -> BundleFieldIndex<'_> {
+    BundleFieldIndex::build(bundle)
+}
+
+fn split_mapped_ref(raw: &str) -> (&str, &str) {
+    if let Some((src, dst)) = raw.split_once("=>") {
+        (src, dst)
+    } else {
+        (raw, raw)
+    }
+}
+
+fn strip_info_prefix(raw: &str) -> &str {
+    raw.strip_prefix("INFO/").unwrap_or(raw)
+}
+
+fn read_record_value_from_bundle<'a>(
+    bundle: &'a AnnotationBundle,
+    by_key: &BundleFieldIndex<'a>,
+    src_raw: &str,
+    src_key: &str,
+) -> Option<String> {
+    let src_upper = src_raw.to_ascii_uppercase();
+    if src_upper == "ID" {
+        return bundle.id.clone().map(|v| v.replace(';', ","));
+    }
+    if src_upper == "QUAL" {
+        return bundle.qual.clone();
+    }
+    if src_upper == "FILTER" {
+        return bundle.filter.clone();
+    }
+    by_key
+        .get(bundle, src_key)
+        .map(|f| join_values_commas(&f.values))
+}
+
+fn should_transfer_info(
+    mode: AnnotateMode,
+    has_annotation_data: bool,
+    vcf_has_field: bool,
+    existing_val: &str,
+    existing_parts: &[&str],
+    per_value: bool,
+) -> bool {
+    if mode.replace_missing
+        && per_value
+        && !mode.replace_non_missing
+        && !mode.replace_all
+        && existing_parts.iter().any(|v| is_missing_value(v))
+    {
+        return has_annotation_data;
+    }
+    mode.should_transfer(
+        !has_annotation_data,
+        vcf_has_field,
+        is_missing_value(existing_val),
+    )
+}
+
+/// Result of merging annotation data into a record's INFO field.
+pub struct MergedInfo {
+    /// Final INFO field map.
+    pub map: IndexMap<String, String>,
+    /// `true` if anything actually changed vs `existing_info`. Callers can
+    /// short-circuit serialization when `false`.
+    pub dirty: bool,
+}
+
+pub fn merge_info_fields(
+    existing_info: &str,
+    bundles: &[(usize, AnnotationBundle)],
+    multiallelic_bundle: &Option<AnnotationBundle>,
+    vcf_ref: &str,
+    vcf_alt_alleles: &[&str],
+    field_meta: &HashMap<String, FieldNumber>,
+    column_specs: &[(String, AnnotateMode)],
+) -> MergedInfo {
+    let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
+
+    if debug {
+        eprintln!("[MERGE] Starting merge_info_fields");
+        eprintln!("[MERGE] Existing info: '{}'", existing_info);
+        eprintln!("[MERGE] VCF alleles: {:?}", vcf_alt_alleles);
+        eprintln!("[MERGE] Column specs: {:?}", column_specs);
+    }
+
+    let mut info_map = parse_existing_info(existing_info);
+    let mut dirty = false;
+    let bundle_lookups = build_bundle_lookups(bundles);
+    let multiallelic_lookup = multiallelic_bundle.as_ref().map(build_single_lookup);
+
+    let mut bundle_ref_values: HashMap<&str, &str> = HashMap::new();
+    for lookup in &bundle_lookups {
+        for field in lookup.by_key.iter(lookup.bundle) {
+            if let Some(field_number) = field_meta.get(&field.key) {
+                if *field_number == FieldNumber::R {
+                    if let Some(ref_val) = field.values.first() {
+                        bundle_ref_values.insert(field.key.as_str(), ref_val.as_str());
+                    }
+                }
+            }
+        }
+    }
+
+    if let (Some(by_key), Some(bundle)) =
+        (multiallelic_lookup.as_ref(), multiallelic_bundle.as_ref())
+    {
+        for field in by_key.iter(bundle) {
+            if let Some(field_number) = field_meta.get(&field.key) {
+                if *field_number == FieldNumber::R
+                    && !bundle_ref_values.contains_key(field.key.as_str())
+                {
+                    if let Some(ref_val) = field.values.first() {
+                        bundle_ref_values.insert(field.key.as_str(), ref_val.as_str());
+                    }
+                }
+            }
+        }
+    }
+
+    if debug {
+        eprintln!("[MERGE] Bundle REF values: {:?}", bundle_ref_values);
+        eprintln!("[MERGE] Parsed existing info: {:?}", info_map);
+    }
+
+    for (spec_key, mode) in column_specs {
+        let (src_raw, dst_raw) = split_mapped_ref(spec_key);
+        let src_key = strip_info_prefix(src_raw);
+        let dst_key = strip_info_prefix(dst_raw);
+        let dst_upper = dst_raw.to_ascii_uppercase();
+        if dst_upper == "ID"
+            || dst_upper == "QUAL"
+            || dst_upper == "FILTER"
+            || dst_upper == "ALT"
+            || dst_upper == "FMT"
+            || dst_upper == "FORMAT"
+            || dst_upper.starts_with("FMT/")
+            || dst_upper.starts_with("FORMAT/")
+        {
+            continue;
+        }
+
+        if debug {
+            eprintln!(
+                "[MERGE] Processing field: {} -> {} (mode: {})",
+                src_key, dst_key, mode
+            );
+        }
+
+        let field_number = field_meta.get(src_key).copied().unwrap_or(FieldNumber::One);
+        let vcf_has_field = info_map.contains_key(dst_key);
+        let existing_val = info_map.get(dst_key).map(|s| s.as_str()).unwrap_or("");
+        let mut existing_parts: Vec<&str> = if !existing_val.is_empty() && existing_val != "." {
+            existing_val.split(',').collect()
+        } else {
+            Vec::new()
+        };
+        let field_type = infer_field_type(src_key);
+        let is_integer = field_type == "Integer";
+        if is_integer {
+            if let Some(idx) = existing_parts.iter().position(|v| is_missing_value(v)) {
+                existing_parts.truncate(idx + 1);
+            }
+        }
+
+        if field_number == FieldNumber::Zero {
+            let has_flag = bundle_lookups
+                .iter()
+                .any(|lookup| lookup.by_key.get(lookup.bundle, src_key).is_some());
+            let has_annotation_data = has_flag;
+
+            if debug {
+                eprintln!(
+                    "[MERGE] Field {} (Flag): vcf_has_field={}, existing_val='{}', has_annotation_data={}",
+                    src_key, vcf_has_field, existing_val, has_annotation_data
+                );
+            }
+
+            let should_transfer = should_transfer_info(
+                *mode,
+                has_annotation_data,
+                vcf_has_field,
+                existing_val,
+                &existing_parts,
+                false,
+            );
+
+            if should_transfer && has_flag {
+                dirty |= insert_if_changed(&mut info_map, dst_key, String::new());
+            }
+
+            continue;
+        }
+
+        let mut effective_number = field_number;
+        if effective_number != FieldNumber::A && effective_number != FieldNumber::R {
+            if existing_parts.len() == vcf_alt_alleles.len() {
+                effective_number = FieldNumber::A;
+            } else if existing_parts.len() == vcf_alt_alleles.len() + 1 {
+                effective_number = FieldNumber::R;
+            }
+        }
+
+        if effective_number != FieldNumber::A && effective_number != FieldNumber::R {
+            let mut annotated_val: Option<String> = None;
+            for lookup in &bundle_lookups {
+                if let Some(joined) =
+                    read_record_value_from_bundle(lookup.bundle, &lookup.by_key, src_raw, src_key)
+                {
+                    if !is_missing_value(&joined) {
+                        annotated_val = Some(joined);
+                        break;
+                    }
+                }
+            }
+
+            let has_annotation_data = annotated_val
+                .as_ref()
+                .map(|v| !is_missing_value(v))
+                .unwrap_or(false);
+
+            if debug {
+                eprintln!(
+                    "[MERGE] Field {} (Record): vcf_has_field={}, existing_val='{}', annotated_val={:?}",
+                    src_key, vcf_has_field, existing_val, annotated_val
+                );
+            }
+
+            let should_transfer = should_transfer_info(
+                *mode,
+                has_annotation_data,
+                vcf_has_field,
+                existing_val,
+                &existing_parts,
+                false,
+            );
+
+            if should_transfer {
+                if let Some(val) = annotated_val {
+                    dirty |= insert_if_changed(&mut info_map, dst_key, val);
+                }
+            }
+
+            continue;
+        }
+
+        let vcf_values = collect_annotations_for_field(
+            src_key,
+            &bundle_lookups,
+            multiallelic_bundle.as_ref(),
+            multiallelic_lookup.as_ref(),
+            vcf_ref,
+            vcf_alt_alleles,
+            field_meta,
+        );
+
+        let has_annotation_data = vcf_values.iter().any(|v| {
+            if let Some(val) = v {
+                !is_missing_value(val)
+            } else {
+                false
+            }
+        });
+
+        if debug {
+            eprintln!(
+                "[MERGE] Field {}: vcf_values={:?}, vcf_has_field={}, existing_val='{}', has_annotation_data={}",
+                src_key, vcf_values, vcf_has_field, existing_val, has_annotation_data
+            );
+        }
+
+        let should_transfer = should_transfer_info(
+            *mode,
+            has_annotation_data,
+            vcf_has_field,
+            existing_val,
+            &existing_parts,
+            true,
+        );
+
+        if debug {
+            eprintln!(
+                "[MERGE] Field {}: should_transfer={} (special +TAG logic: {})",
+                src_key,
+                should_transfer,
+                mode.replace_missing && !mode.replace_non_missing && !mode.replace_all
+            );
+        }
+
+        if !should_transfer {
+            continue;
+        }
+
+        if debug {
+            eprintln!(
+                "[MERGE] Field {}: field_number={:?}, existing_parts={:?}",
+                src_key, effective_number, existing_parts
+            );
+        }
+
+        let final_values: Vec<String> = match effective_number {
+            FieldNumber::A => merge_field_number_a(&vcf_values, &existing_parts, *mode),
+            FieldNumber::R => merge_field_number_r(
+                &vcf_values,
+                &bundle_ref_values,
+                src_key,
+                &existing_parts,
+                *mode,
+            ),
+            _ => vcf_values
+                .iter()
+                .filter_map(|v| v.map(|s| s.to_string()))
+                .collect(),
+        };
+
+        if debug {
+            eprintln!("[MERGE] Field {}: final_values={:?}", src_key, final_values);
+        }
+
+        if !final_values.is_empty() && !final_values.iter().all(|v| is_missing_value(v)) {
+            dirty |=
+                insert_if_changed(&mut info_map, dst_key, join_values_commas(&final_values));
+            if debug {
+                eprintln!("[MERGE] Field {}: inserted into info_map", dst_key);
+            }
+        } else if debug {
+            eprintln!(
+                "[MERGE] Field {}: not inserted (empty or all missing)",
+                src_key
+            );
+        }
+    }
+
+    if debug {
+        eprintln!("[MERGE] Final info_map: {:?}, dirty={}", info_map, dirty);
+    }
+
+    MergedInfo {
+        map: info_map,
+        dirty,
+    }
+}
+
+/// Inserts `value` under `key` in `info_map`, returning `true` if the map
+/// actually changed (new key, or replaced a different existing value).
+/// Returns `false` for a no-op insert (same key, same value).
+fn insert_if_changed(
+    info_map: &mut IndexMap<String, String>,
+    key: &str,
+    value: String,
+) -> bool {
+    match info_map.get(key) {
+        Some(existing) if existing == &value => false,
+        _ => {
+            info_map.insert(key.to_string(), value);
+            true
+        }
+    }
+}
+
+fn collect_annotations_for_field<'a>(
+    key: &str,
+    bundles: &'a [BundleInfoLookup<'a>],
+    multiallelic_bundle: Option<&'a AnnotationBundle>,
+    multiallelic_lookup: Option<&'a BundleFieldIndex<'a>>,
+    vcf_ref: &str,
+    vcf_alt_alleles: &[&str],
+    field_meta: &HashMap<String, FieldNumber>,
+) -> Vec<Option<&'a str>> {
+    use crate::annotate::cpu_v2::vcmp;
+    let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
+    let mut values = vec![None; vcf_alt_alleles.len()];
+    let field_number = field_meta.get(key).copied().unwrap_or(FieldNumber::One);
+
+    if debug {
+        eprintln!(
+            "[COLLECT] Field {} (Number={:?}) for alleles {:?}",
+            key, field_number, vcf_alt_alleles
+        );
+    }
+
+    for lookup in bundles {
+        if let Some(field) = lookup.by_key.get(lookup.bundle, key) {
+            if debug {
+                eprintln!(
+                    "[COLLECT] Found exact match for allele {}: {} -> {:?}",
+                    lookup.vcf_idx, vcf_alt_alleles[lookup.vcf_idx], field.values
+                );
+            }
+
+            match field_number {
+                FieldNumber::A => {
+                    if let Some(val) = field.values.first() {
+                        if lookup.vcf_idx < values.len() {
+                            values[lookup.vcf_idx] = Some(val.as_str());
+                        }
+                    }
+                }
+                FieldNumber::R => {
+                    if let Some(alt_val) = field.values.get(1) {
+                        if lookup.vcf_idx < values.len() {
+                            values[lookup.vcf_idx] = Some(alt_val.as_str());
+
+                            if debug {
+                                eprintln!(
+                                    "[COLLECT] R field exact match: REF={:?}, ALT[{}]={}",
+                                    field.values.first(),
+                                    lookup.vcf_idx,
+                                    alt_val
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(val) = field.values.first() {
+                        if lookup.vcf_idx < values.len() {
+                            values[lookup.vcf_idx] = Some(val.as_str());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(bundle) = multiallelic_bundle
+        && let Some(by_key) = multiallelic_lookup
+        && let Some(field) = by_key.get(bundle, key)
+    {
+        if debug {
+            eprintln!(
+                "[COLLECT] Processing multiallelic for field {key}: db_ref={}, alt={}, values={:?}",
+                bundle.db_ref, bundle.alt, field.values
+            );
+        }
+
+        let db_alts: Vec<&[u8]> = bundle.alt.split(',').map(str::as_bytes).collect();
+
+        // bcftools-compatible REF/ALT match for differently-padded INDELs.
+        let diff = vcmp::diff_refs(vcf_ref.as_bytes(), bundle.db_ref.as_bytes());
+
+        match field_number {
+            FieldNumber::A => {
+                for (vcf_idx, vcf_alt) in vcf_alt_alleles.iter().enumerate() {
+                    if values[vcf_idx].is_some() {
+                        continue;
+                    }
+                    let db_idx = match &diff {
+                        Some(d) => vcmp::find_allele(&db_alts, vcf_alt.as_bytes(), d),
+                        None => None,
+                    };
+                    if let Some(db_idx) = db_idx
+                        && let Some(val) = field.values.get(db_idx)
+                    {
+                        values[vcf_idx] = Some(val.as_str());
+                        if debug {
+                            eprintln!(
+                                "[COLLECT] Multiallelic A match (vcmp): VCF[{vcf_idx}]={vcf_alt} -> DB[{db_idx}]={val}"
+                            );
+                        }
+                    }
+                }
+            }
+            FieldNumber::R => {
+                for (vcf_idx, vcf_alt) in vcf_alt_alleles.iter().enumerate() {
+                    if values[vcf_idx].is_some() {
+                        continue;
+                    }
+                    let db_idx = match &diff {
+                        Some(d) => vcmp::find_allele(&db_alts, vcf_alt.as_bytes(), d),
+                        None => None,
+                    };
+                    if let Some(db_idx) = db_idx
+                        && let Some(val) = field.values.get(db_idx + 1)
+                    {
+                        values[vcf_idx] = Some(val.as_str());
+                        if debug {
+                            let db_idx_r = db_idx + 1;
+                            eprintln!(
+                                "[COLLECT] Multiallelic R match (vcmp): VCF[{vcf_idx}]={vcf_alt} -> DB[{db_idx_r}]={val}"
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {
+                if let Some(val) = field.values.first() {
+                    for slot in values.iter_mut() {
+                        if slot.is_none() {
+                            *slot = Some(val.as_str());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if debug {
+        eprintln!("[COLLECT] Final values for {}: {:?}", key, values);
+    }
+
+    values
+}
+
+fn merge_field_number_a(
+    vcf_values: &[Option<&str>],
+    existing_parts: &[&str],
+    mode: AnnotateMode,
+) -> Vec<String> {
+    let mut result = Vec::with_capacity(vcf_values.len());
+
+    for (i, vcf_val) in vcf_values.iter().enumerate() {
+        let existing = existing_parts.get(i).copied().unwrap_or(".");
+
+        if mode.should_append() {
+            match vcf_val {
+                Some(val) if !is_missing_value(val) => {
+                    result.push(merge_append_values(existing, val));
+                }
+                _ => result.push(existing.to_string()),
+            }
+            continue;
+        }
+
+        let annotated = vcf_val.filter(|v| !is_missing_value(v));
+        let existing_missing = is_missing_value(existing);
+        let annotated_missing = annotated.is_none();
+
+        if mode.replace_all {
+            if !annotated_missing || mode.carry_over_missing {
+                result.push(annotated.unwrap_or(".").to_string());
+            } else {
+                result.push(existing.to_string());
+            }
+            continue;
+        }
+
+        if mode.replace_missing {
+            if existing_missing && (!annotated_missing || mode.carry_over_missing) {
+                result.push(annotated.unwrap_or(".").to_string());
+            } else {
+                result.push(existing.to_string());
+            }
+            continue;
+        }
+
+        if mode.replace_non_missing {
+            if !existing_missing && (!annotated_missing || mode.carry_over_missing) {
+                result.push(annotated.unwrap_or(".").to_string());
+            } else {
+                result.push(existing.to_string());
+            }
+            continue;
+        }
+
+        result.push(existing.to_string());
+    }
+
+    result
+}
+
+fn merge_field_number_r(
+    vcf_values: &[Option<&str>],
+    bundle_ref_values: &HashMap<&str, &str>,
+    key: &str,
+    existing_parts: &[&str],
+    mode: AnnotateMode,
+) -> Vec<String> {
+    let mut result = Vec::with_capacity(vcf_values.len() + 1);
+
+    let ref_value = bundle_ref_values
+        .get(key)
+        .copied()
+        .unwrap_or(".");
+
+    result.push(ref_value.to_string());
+
+    for (i, vcf_val) in vcf_values.iter().enumerate() {
+        let existing = existing_parts.get(i + 1).copied().unwrap_or(".");
+
+        if mode.should_append() {
+            match vcf_val {
+                Some(val) if !is_missing_value(val) => {
+                    result.push(merge_append_values(existing, val));
+                }
+                _ => result.push(existing.to_string()),
+            }
+            continue;
+        }
+
+        let annotated = vcf_val.filter(|v| !is_missing_value(v));
+        let existing_missing = is_missing_value(existing);
+        let annotated_missing = annotated.is_none();
+
+        if mode.replace_all {
+            if !annotated_missing || mode.carry_over_missing {
+                result.push(annotated.unwrap_or(".").to_string());
+            } else {
+                result.push(existing.to_string());
+            }
+            continue;
+        }
+
+        if mode.replace_missing {
+            if existing_missing && (!annotated_missing || mode.carry_over_missing) {
+                result.push(annotated.unwrap_or(".").to_string());
+            } else {
+                result.push(existing.to_string());
+            }
+            continue;
+        }
+
+        if mode.replace_non_missing {
+            if !existing_missing && (!annotated_missing || mode.carry_over_missing) {
+                result.push(annotated.unwrap_or(".").to_string());
+            } else {
+                result.push(existing.to_string());
+            }
+            continue;
+        }
+
+        result.push(existing.to_string());
+    }
+
+    result
+}
+
+/// SIMD-accelerated INFO field parser via `memchr2(';', '=')`.
+fn parse_existing_info(info: &str) -> IndexMap<String, String> {
+    let mut map = IndexMap::new();
+    if info == "." || info.is_empty() {
+        return map;
+    }
+
+    let bytes = info.as_bytes();
+    map.reserve(8);
+
+    let mut iter = memchr::memchr2_iter(b';', b'=', bytes);
+    let mut pair_start: usize = 0;
+    let mut eq_pos: Option<usize> = None;
+
+    while let Some(idx) = iter.next() {
+        match bytes[idx] {
+            b'=' => {
+                if eq_pos.is_none() {
+                    eq_pos = Some(idx);
+                }
+            }
+            b';' => {
+                push_info_pair(&mut map, bytes, pair_start, idx, eq_pos);
+                pair_start = idx + 1;
+                eq_pos = None;
+            }
+            _ => unreachable!(),
+        }
+    }
+    push_info_pair(&mut map, bytes, pair_start, bytes.len(), eq_pos);
+
+    map
+}
+
+#[inline]
+fn push_info_pair(
+    map: &mut IndexMap<String, String>,
+    bytes: &[u8],
+    pair_start: usize,
+    pair_end: usize,
+    eq_pos: Option<usize>,
+) {
+    if pair_start >= pair_end {
+        return;
+    }
+    // SAFETY: input `bytes` came from `&str`, so any sub-slice is valid UTF-8.
+    let (key, value) = match eq_pos {
+        Some(eq) if eq > pair_start && eq < pair_end => {
+            let key = unsafe { std::str::from_utf8_unchecked(&bytes[pair_start..eq]) };
+            let value = unsafe { std::str::from_utf8_unchecked(&bytes[eq + 1..pair_end]) };
+            (key, value)
+        }
+        _ => {
+            let key = unsafe { std::str::from_utf8_unchecked(&bytes[pair_start..pair_end]) };
+            (key, "")
+        }
+    };
+    map.insert(key.to_string(), value.to_string());
+}
+
+pub fn format_info_string(info_map: &IndexMap<String, String>, field_order: &[String]) -> String {
+    if info_map.is_empty() {
+        return ".".to_string();
+    }
+
+    // bcftools serialises INFO in insertion order. `field_order` is treated
+    // as a priority hint for known keys; unknown keys preserve insertion order.
+    let mut keyed: Vec<(usize, &str)> = info_map
+        .keys()
+        .map(|k| {
+            let rank = field_order
+                .iter()
+                .position(|f| f == k)
+                .unwrap_or(usize::MAX);
+            (rank, k.as_str())
+        })
+        .collect();
+    keyed.sort_by_key(|(rank, _)| *rank);
+
+    let mut out = String::with_capacity(info_map.len() * 16);
+    for (i, (_, k)) in keyed.iter().enumerate() {
+        let Some(v) = info_map.get(*k) else {
+            continue;
+        };
+        if i > 0 {
+            out.push(';');
+        }
+        out.push_str(k);
+        if !v.is_empty() {
+            out.push('=');
+            out.push_str(v);
+        }
+    }
+
+    if out.is_empty() { ".".to_string() } else { out }
+}
+
+fn join_values_commas(values: &[String]) -> String {
+    if values.is_empty() {
+        return String::new();
+    }
+    let mut len = values.iter().map(|v| v.len()).sum::<usize>();
+    len += values.len().saturating_sub(1);
+    let mut out = String::with_capacity(len);
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(v);
+    }
+    out
+}
+
+#[cfg(test)]
+#[path = "../../../tests/unit/annotate_cpu_v2_merge_info.rs"]
+mod tests;

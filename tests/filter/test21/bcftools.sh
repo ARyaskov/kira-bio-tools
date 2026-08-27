@@ -1,0 +1,1 @@
+bcftools filter --no-version -i 'F_PASS(GT=="mis")>=0.2' in.vcf -o out.bcf.vcf

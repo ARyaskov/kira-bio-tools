@@ -1,0 +1,104 @@
+name: Concat Tests
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Concat Tests
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust nightly (1.95)
+      uses: dtolnay/rust-toolchain@v1
+      with:
+        toolchain: nightly
+        components: rustfmt
+
+    - name: Install bcftools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bcftools
+
+    - name: Build kira-bt
+      run: cargo build --release
+
+    - name: Add kira-bt to PATH
+      run: echo "${{ github.workspace }}/target/release" >> $GITHUB_PATH
+
+    - name: Run concat tests
+      run: |
+        set -e
+        FAILED_TESTS=()
+
+        for test_dir in tests/concat/test*; do
+          if [ ! -d "$test_dir" ]; then
+            continue
+          fi
+
+          test_name=$(basename "$test_dir")
+          echo "========================================="
+          echo "Running test: $test_name"
+          echo "========================================="
+
+          cd "$test_dir"
+
+          if [ ! -f "kira.sh" ]; then
+            echo "No kira.sh found in $test_name, skipping"
+            cd - > /dev/null
+            continue
+          fi
+
+          chmod +x kira.sh
+
+          if bash kira.sh; then
+            echo "Command executed successfully"
+          else
+            echo "Command failed"
+            FAILED_TESTS+=("$test_name (execution)")
+            cd - > /dev/null
+            continue
+          fi
+
+          ref_file=$(ls *.kira.ref.vcf 2>/dev/null | head -n 1)
+          kira_file=$(ls *.kira.vcf 2>/dev/null | head -n 1)
+
+          if [ -z "$ref_file" ] || [ -z "$kira_file" ]; then
+            echo "Missing reference or output file"
+            FAILED_TESTS+=("$test_name (missing files)")
+            cd - > /dev/null
+            continue
+          fi
+
+          if diff -q "$kira_file" "$ref_file" > /dev/null 2>&1; then
+            echo "Test $test_name PASSED"
+          else
+            echo "Test $test_name FAILED"
+            diff "$kira_file" "$ref_file" || true
+            FAILED_TESTS+=("$test_name (diff)")
+          fi
+
+          cd - > /dev/null
+        done
+
+        echo ""
+        echo "========================================="
+        echo "Test Summary"
+        echo "========================================="
+
+        if [ ${#FAILED_TESTS[@]} -eq 0 ]; then
+          echo "All tests passed"
+          exit 0
+        else
+          echo "Failed tests:"
+          for test in "${FAILED_TESTS[@]}"; do
+            echo "  - $test"
+          done
+          exit 1
+        fi
