@@ -17,8 +17,8 @@ pub struct PloidyRegion {
     pub ploidy: u8,
 }
 
-/// Parse `--ploidy-file FILE` table (`chrom beg end sex ploidy`).
-/// Returns regions plus sex→sample map (loaded separately).
+/// Parse `--ploidy-file FILE` table (`chrom beg end sex ploidy`); `*` is a
+/// wildcard in the first three columns, and lines match in file order.
 pub fn parse_ploidy_file<P: AsRef<Path>>(p: P) -> Result<Vec<PloidyRegion>> {
     let mut out = Vec::new();
     for line in BufReader::new(File::open(p.as_ref())?).lines() {
@@ -29,13 +29,18 @@ pub fn parse_ploidy_file<P: AsRef<Path>>(p: P) -> Result<Vec<PloidyRegion>> {
         if parts.len() < 5 { bail!("--ploidy-file: expected 5 fields, got {}", parts.len()); }
         out.push(PloidyRegion {
             chrom: parts[0].to_string(),
-            beg: parts[1].parse().context("ploidy-file beg")?,
-            end: parts[2].parse().context("ploidy-file end")?,
+            beg: parse_bound(parts[1], 0).context("ploidy-file beg")?,
+            end: parse_bound(parts[2], u32::MAX).context("ploidy-file end")?,
             sex: parts[3].to_string(),
             ploidy: parts[4].parse().context("ploidy-file ploidy")?,
         });
     }
     Ok(out)
+}
+
+fn parse_bound(field: &str, wildcard: u32) -> Result<u32> {
+    if field == "*" { return Ok(wildcard); }
+    Ok(field.parse()?)
 }
 
 /// Compute per-sample ploidy at a given site (chrom:pos) given:
@@ -52,7 +57,10 @@ pub fn ploidy_at_site(
     samples.iter().map(|name| {
         let sex = sex_map.get(name).map(|s| s.as_str()).unwrap_or("");
         for r in regions {
-            if r.chrom == chrom && pos >= r.beg && pos <= r.end && r.sex == sex {
+            // `*` applies to every chromosome / every sex, as in bcftools.
+            let chrom_matches = r.chrom == "*" || r.chrom == chrom;
+            let sex_matches = r.sex == "*" || r.sex == sex;
+            if chrom_matches && pos >= r.beg && pos <= r.end && sex_matches {
                 return r.ploidy;
             }
         }
@@ -102,7 +110,8 @@ pub fn parse_groups<P: AsRef<Path>>(p: P, samples: &[String]) -> Result<Vec<Samp
     Ok(by_name.into_iter().map(|(name, sample_idxs)| SampleGroup { name, sample_idxs }).collect())
 }
 
-/// Parse `--samples-file FILE` per-sample sex map ("sample\tsex").
+/// Parse `--samples-file FILE` sex map from either a `sample sex` table or a PED.
+/// The sex label is kept verbatim, since ploidy files use `M`/`F` or `1`/`2`.
 pub fn parse_sex_file<P: AsRef<Path>>(p: P) -> Result<HashMap<String, String>> {
     let mut m = HashMap::new();
     for line in BufReader::new(File::open(p.as_ref())?).lines() {
@@ -110,7 +119,11 @@ pub fn parse_sex_file<P: AsRef<Path>>(p: P) -> Result<HashMap<String, String>> {
         let t = l.trim();
         if t.is_empty() || t.starts_with('#') { continue; }
         let parts: Vec<&str> = t.split_whitespace().collect();
-        if parts.len() >= 2 { m.insert(parts[0].to_string(), parts[1].to_string()); }
+        match parts.len() {
+            0 | 1 => {}
+            2..=4 => { m.insert(parts[0].to_string(), parts[1].to_string()); }
+            _ => { m.insert(parts[1].to_string(), parts[4].to_string()); }
+        }
     }
     Ok(m)
 }

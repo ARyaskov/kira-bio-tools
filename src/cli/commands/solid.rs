@@ -7,6 +7,8 @@ use noodles_sam::{self as sam, alignment::RecordBuf};
 
 use crate::bam::BamReader;
 use crate::bam::pileup::{LiveRead, build_live_from_cram};
+use crate::call::pedigree::parse_ploidy_file;
+use crate::call::stream::{CallConfig, CallMode, CallSink};
 use crate::cli::args::{MpileupArgs, SolidArgs};
 use crate::cli::commands::mpileup::run_mpileup_from_bams;
 
@@ -14,10 +16,14 @@ use kira_ls_aligner::cli::commands::mem::{FusedAlignerParams, build_short_pe_ali
 use kira_ls_aligner::index::{Index, IndexConfig};
 use kira_ls_aligner::io::read_reference;
 
-/// Fused align → sort/markdup → mpileup pipeline in a single process. Records
-/// flow in memory between stages; only the output VCF touches disk.
+/// Fused align → sort/markdup → mpileup → call pipeline in a single process.
+/// Records flow in memory between stages; only the output VCF touches disk.
 pub fn cmd_solid(args: SolidArgs) -> Result<()> {
-    eprintln!("[KIRA_SOLID] fused pipeline (in-memory): align -> sort/markdup -> mpileup");
+    let call_cfg = build_call_config(&args)?;
+    eprintln!(
+        "[KIRA_SOLID] fused pipeline (in-memory): align -> sort/markdup -> mpileup{}",
+        if call_cfg.is_some() { " -> call" } else { "" }
+    );
 
     // ── 1. Build the aligner + resolve/load the index ───────────────────────
     // Accept literal `\t` in --aligner-rg (shells don't expand it).
@@ -62,7 +68,7 @@ pub fn cmd_solid(args: SolidArgs) -> Result<()> {
         .unwrap_or_else(|| "sample".to_string());
 
     if args.window_mb > 0 {
-        return run_windowed(&args, aligner, index, &reads, &mp_args, &sample);
+        return run_windowed(&args, aligner, index, &reads, &mp_args, &sample, call_cfg.as_ref());
     }
 
     // ── 2. Align → records, batch by batch, no SAM text ─────────────────────
@@ -125,16 +131,76 @@ pub fn cmd_solid(args: SolidArgs) -> Result<()> {
         .collect();
     let bam = BamReader::from_parts(live, header, vec![sample], ref_names);
 
-    // ── 7. mpileup → VCF (the only disk write) ──────────────────────────────
+    // ── 7. mpileup (→ call) → VCF (the only disk write) ─────────────────────
     let mut out = BufWriter::with_capacity(1 << 20, File::create(&args.output).context("create VCF")?);
     let t = std::time::Instant::now();
-    run_mpileup_from_bams(vec![bam], &mp_args, &mut out).context("mpileup")?;
+    run_pileup(vec![bam], &mp_args, call_cfg.as_ref(), &mut out)?;
+    out.flush().context("flush VCF")?;
     eprintln!(
-        "[KIRA_SOLID] mpileup -> {} in {:.1}s",
+        "[KIRA_SOLID] mpileup{} -> {} in {:.1}s",
+        if call_cfg.is_some() { "+call" } else { "" },
         args.output.display(),
         t.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+/// Run the pileup, piping each site through the caller when one is configured.
+fn run_pileup<W: std::io::Write>(
+    bams: Vec<BamReader>,
+    mp_args: &MpileupArgs,
+    call_cfg: Option<&CallConfig>,
+    out: &mut W,
+) -> Result<()> {
+    let Some(cfg) = call_cfg else {
+        return run_mpileup_from_bams(bams, mp_args, out).context("mpileup");
+    };
+    let mut sink = CallSink::new(out, cfg.clone()).context("call stage")?;
+    run_mpileup_from_bams(bams, mp_args, &mut sink).context("mpileup")?;
+    sink.finish().context("call stage")?;
+    Ok(())
+}
+
+/// Assemble the call-stage config, or `None` when `--call` is off.
+fn build_call_config(args: &SolidArgs) -> Result<Option<CallConfig>> {
+    if !args.call {
+        return Ok(None);
+    }
+    let mut emit_gq = false;
+    let mut emit_gp = false;
+    if let Some(spec) = &args.call_annotate {
+        for t in spec.split(',').map(str::trim) {
+            if t.eq_ignore_ascii_case("GQ") {
+                emit_gq = true;
+            }
+            if t.eq_ignore_ascii_case("GP") {
+                emit_gp = true;
+            }
+        }
+    }
+    let ploidy_regions = match &args.call_ploidy_file {
+        Some(p) => parse_ploidy_file(p)
+            .with_context(|| format!("--call-ploidy-file {}", p.display()))?,
+        None => Vec::new(),
+    };
+    let cfg = CallConfig {
+        mode: if args.call_consensus {
+            CallMode::Consensus
+        } else {
+            CallMode::Multiallelic
+        },
+        variants_only: args.mpileup_variants_only,
+        emit_gq,
+        emit_gp,
+        theta: args.call_prior,
+        ploidy: args.call_ploidy,
+        ploidy_regions,
+        sex_map: Default::default(),
+        samples: None,
+        samples_file: None,
+    };
+    cfg.validate()?;
+    Ok(Some(cfg))
 }
 
 /// The fused aligner is configured for primary-only output.
@@ -198,6 +264,7 @@ fn run_windowed(
     reads: &[std::path::PathBuf],
     mp_args: &MpileupArgs,
     sample: &str,
+    call_cfg: Option<&CallConfig>,
 ) -> Result<()> {
     use super::solid_windows::{WindowSpiller, resolve_tmpdir};
 
@@ -275,8 +342,9 @@ fn run_windowed(
             ref_names.clone(),
         );
 
+        // Sites are called independently, so calling per window changes nothing.
         let mut vcf: Vec<u8> = Vec::new();
-        run_mpileup_from_bams(vec![bam], mp_args, &mut vcf).context("mpileup")?;
+        run_pileup(vec![bam], mp_args, call_cfg, &mut vcf)?;
         append_window_vcf(&mut out, &vcf, w, &header, &mut header_written)?;
         w.remove();
     }

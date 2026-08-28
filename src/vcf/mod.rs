@@ -11,4 +11,4 @@ pub use mmap::MmapVcfParser;
 pub use parser::{InfoParser, VcfParser, extract_contig_id, parse_vcf_full_line};
 pub use reader::VcfReader;
 pub use structs::{Result, VcfError, VcfFields, VcfParsedRecord, VcfRecord};
-pub use unified_reader::UnifiedVcfReader;
+pub use unified_reader::{UnifiedVcfReader, parse_vcf_line};

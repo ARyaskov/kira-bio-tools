@@ -435,6 +435,12 @@ impl BgzfIndexingReader {
     }
 }
 
+/// Parse a single VCF data line held in memory. `offset` is meaningless for a
+/// record that never came from a file, so it is reported as 0.
+pub fn parse_vcf_line(line: &str) -> Option<VcfRecord> {
+    parse_vcf_record(line, 0).ok().flatten()
+}
+
 fn parse_vcf_record(line: &str, offset: u64) -> Result<Option<VcfRecord>> {
     let cols: Vec<&str> = line.trim_end().split('\t').collect();
     if cols.len() < 8 {

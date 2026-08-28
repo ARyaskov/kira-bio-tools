@@ -133,7 +133,8 @@ impl Caller {
         }
         merged_alleles.sort();
         if self.opts.variants_only && !any_variant { return CallResult::Skip; }
-        let (ac, an) = compute_ac_an(&per_sample_gts, &merged_alleles);
+        let all_ploidies: Vec<u8> = (0..site.n_samples).map(|si| self.ploidy_for(si)).collect();
+        let (ac, an) = compute_ac_an(&per_sample_gts, &merged_alleles, &all_ploidies);
         CallResult::Called {
             alleles_kept: merged_alleles, qual: total_qual,
             gts: per_sample_gts, gqs: per_sample_gqs,
@@ -256,7 +257,7 @@ impl Caller {
             }
         }
 
-        let (ac, an) = compute_ac_an(&gts, &alleles_kept);
+        let (ac, an) = compute_ac_an(&gts, &alleles_kept, &group_ploidies);
 
         let is_variant = alleles_kept.len() > 1;
         if self.opts.variants_only && !is_variant {
@@ -520,11 +521,13 @@ fn idx_to_pair(idx: usize) -> (usize, usize) {
     (k, j)
 }
 
-fn compute_ac_an(gts: &[(u32, u32)], kept: &[u32]) -> (Vec<u32>, u32) {
+/// AC/AN over the called genotypes; a sample contributes `ploidy` alleles.
+fn compute_ac_an(gts: &[(u32, u32)], kept: &[u32], ploidies: &[u8]) -> (Vec<u32>, u32) {
     let mut ac = vec![0u32; kept.len().saturating_sub(1)];
     let mut an = 0u32;
-    for &(a, b) in gts {
-        for x in [a, b] {
+    for (i, &(a, b)) in gts.iter().enumerate() {
+        let n = ploidies.get(i).copied().unwrap_or(2).min(2) as usize;
+        for &x in [a, b].iter().take(n) {
             an += 1;
             if let Some(pos) = kept.iter().position(|k| *k == x) {
                 if pos > 0 { ac[pos - 1] += 1; }
