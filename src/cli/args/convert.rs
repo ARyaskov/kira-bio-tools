@@ -101,6 +101,6 @@ pub struct ConvertArgs {
     #[arg(short = 'W', long = "write-index", num_args = 0..=1, default_missing_value = "csi")]
     pub write_index: Option<String>,
 
-    #[arg(last = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    #[arg(last = true, allow_hyphen_values = true)]
     pub passthrough: Vec<String>,
 }

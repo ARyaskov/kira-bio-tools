@@ -1,3 +1,7 @@
+//! NEON line parsers. Safety contract shared by every `unsafe fn` here: NEON
+//! is baseline on aarch64, all vector loads stay inside the input slice (the
+//! `pos + 16 <= len` loop guards), and text is validated as UTF-8 before it is
+//! handed out as `&str`.
 use crate::util::chr_name_to_id;
 use crate::vcf::structs::{VcfFields, VcfFieldsFull};
 
@@ -19,7 +23,8 @@ pub unsafe fn parse_vcf_line_simd(line: &[u8]) -> Option<VcfFieldsFull<'_>> {
         return None;
     }
 
-    let line_str = std::str::from_utf8_unchecked(line);
+    // File bytes are untrusted: validate rather than assume UTF-8.
+    let line_str = std::str::from_utf8(line).ok()?;
     let line_len = line.len();
 
     let chrom = &line_str[0..tabs[0]];
@@ -88,7 +93,7 @@ pub unsafe fn parse_vcf_fields_neon(line: &[u8]) -> Option<VcfFields<'_>> {
         return None;
     }
 
-    let line_str = std::str::from_utf8_unchecked(line);
+    let line_str = std::str::from_utf8(line).ok()?;
     let line_len = line.len();
 
     let info_start = tabs[6] + 1;
@@ -121,7 +126,7 @@ pub unsafe fn parse_chr_pos_neon(line: &[u8]) -> Option<(u8, u32)> {
 
     let chrom_end = tabs[0];
     let chrom_bytes = &line[..chrom_end];
-    let chrom_str = std::str::from_utf8_unchecked(chrom_bytes);
+    let chrom_str = std::str::from_utf8(chrom_bytes).ok()?;
     let chr_id = chr_name_to_id(chrom_str)?;
 
     let pos_start = tabs[0] + 1;
@@ -131,7 +136,7 @@ pub unsafe fn parse_chr_pos_neon(line: &[u8]) -> Option<(u8, u32)> {
         return None;
     }
 
-    let pos = parse_u32_fast(line.as_ptr().add(pos_start), pos_end - pos_start);
+    let pos = super::parse_u32_strict(&line[pos_start..pos_end])?;
 
     Some((chr_id, pos))
 }
@@ -167,19 +172,6 @@ unsafe fn find_tabs_neon(buf: &[u8], out: &mut [usize]) -> usize {
     }
 
     found
-}
-
-#[target_feature(enable = "neon")]
-pub unsafe fn parse_u32_fast(ptr: *const u8, len: usize) -> u32 {
-    let mut x: u32 = 0;
-    for i in 0..len.min(10) {
-        let c = *ptr.add(i) as u32;
-        if c < b'0' as u32 || c > b'9' as u32 {
-            break;
-        }
-        x = x * 10 + (c - b'0' as u32);
-    }
-    x
 }
 
 #[target_feature(enable = "neon")]

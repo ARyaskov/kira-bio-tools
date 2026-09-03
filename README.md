@@ -53,32 +53,36 @@ kira-bt <command> --help
 
 ### Argument conventions
 
-Commands come in three shapes. Which one applies matters, because passing
-bcftools-style arguments after `--` to a command that does not accept them is an
-error rather than a no-op.
+Commands come in three shapes.
 
-**1. Native flags.** Most commands parse their own options directly:
+**1. Native flags.** Most commands parse the bcftools options directly. A
+bare `--` in the command line is ignored for these commands, so bcftools
+invocations written as `kira-bt cmd ... -- <options>` keep working:
 
 ```bash
 kira-bt call in.vcf.gz -o out.vcf -m -v
 kira-bt view in.bcf -r chr1:1-10000 -O z -o region.vcf.gz
+kira-bt stats -- -s - in.vcf.gz
 ```
 
 Commands: `annotate-index`, `annotate`, `annotate-serve`, `db-build`, `tabix`,
-`region-index`, `region-query`, `stat`, `list`, `header`, `norm`, `filter`,
-`gtcheck`, `csq`, `consensus`, `concat`, `call`, `stats`, `merge`, `isec`,
-`view`, `samview`, `solid`, `tile`.
+`region-index`, `region-query`, `stat`, `list`, `header`, `head`, `norm`,
+`filter`, `gtcheck`, `csq`, `consensus`, `concat`, `call`, `mpileup`, `stats`,
+`merge`, `isec`, `view`, `samview`, `solid`, `tile`.
 
 **2. Native flags plus a passthrough tail.** These accept extra
 bcftools-compatible arguments after `--`:
 
 ```bash
-kira-bt index in.vcf.gz -- --csi -f
+kira-bt index in.vcf.gz -- --tbi -f
 kira-bt sort in.vcf -o out.vcf -- --temp-dir /scratch
 ```
 
-Commands: `index`, `head`, `convert`, `mpileup`, `sort`, `roh`, `reheader`,
-`polysomy`.
+Commands: `index`, `convert`, `sort`, `roh`, `reheader`, `polysomy`.
+
+Streaming: every reader accepts `-` (or no path where the input is optional)
+for stdin and detects plain, gzip, BGZF, VCF and BCF by content; `-O z`, `-O b`
+and `-O u` write to stdout when no `-o` is given.
 
 **3. Free-form bcftools argv.** These take the whole bcftools command line as
 positional arguments, with no native options of their own:
@@ -169,7 +173,10 @@ Commands: `query`, `cnv`.
 ### 3. Tabix, Regions and Headers
 
 - `tabix`  
-  Tabix-compatible indexing and querying.  
+  Tabix-compatible indexing and querying. Writes `.tbi` by default and `.csi`
+  with `-C`; both are readable by htslib, and htslib-made indexes are used for
+  queries. Regions use tabix semantics (`chr:beg-end`, `-0`, `-R/-T` region
+  files).  
   Args: `<input> [regions...]`.  
   Options: `-p/--preset`, `-C/--csi`, `-m/--min-shift`, `-s/--sequence`,
   `-b/--begin`, `-e/--end`, `-c/--comment`, `-S/--skip-lines`, `-0/--zero-based`,
@@ -178,7 +185,10 @@ Commands: `query`, `cnv`.
   `--cache`, `-@/--threads`.
 
 - `index` (alias `idx`)  
-  VCF/BCF indexing.  
+  VCF/BCF indexing. Writes an htslib-compatible `.csi` by default (`-t` for
+  `.tbi`); `-n`/`-s` read record counts from an existing index. Index entries
+  span `POS..POS+len(REF)-1` (or `INFO/END`), so overlap queries behave like
+  bcftools.  
   Args: `<input> [-- <passthrough>...]`.  
   Options: `-t/--tbi`, `-c/--csi`, `-m/--min-shift`, `-f/--force`,
   `-n/--nrecords`, `-s/--stats`, `--all`, `-o/--output`, `--threads`.
@@ -207,8 +217,7 @@ Commands: `query`, `cnv`.
 
 - `head`  
   View leading header and record lines.  
-  Args: `<input> [-- <passthrough>...]`, `-h/--headers`, `-n/--records`,
-  `-s/--samples`.
+  Args: `<input>`, `-h/--headers`, `-n/--records`, `-s/--samples`.
 
 ### 4. Variant Processing
 
@@ -245,21 +254,33 @@ Commands: `query`, `cnv`.
   `-m/--max-mem`, `-T/--temp-dir`, `--threads`, `-W/--write-index`.
 
 - `concat`  
-  Concatenate files sharing a sample set.  
+  Concatenate files sharing a sample set. `-a` walks overlapping inputs the
+  way the bcftools synced reader does (chromosomes in order of first
+  appearance, identical records grouped per input, `-d`/`-D` collapsing);
+  `-l` ligates phased chunks with bcftools' half-overlap rule, `PQ` at the
+  switch site and `PS` phase sets (`--ligate-warn`, `--ligate-force`);
+  `-n` copies BGZF blocks without decoding.  
   Args: `<inputs...>`, `-f/--file-list`, `-o/--output`, `-O/--output-type`,
   `-a/--allow-overlaps`, `-l/--ligate`, `-D/--remove-duplicates`,
   `-d/--rm-dups`, `-n/--naive`, `-G/--drop-genotypes`, `-c/--compact-PS`,
   `-q/--min-PQ`, region selectors, `--threads`, `-W/--write-index`.
 
 - `merge`  
-  Merge files with non-overlapping sample sets.  
+  Merge files with non-overlapping sample sets. Records at one position are
+  grouped by the `-m` rules (SNVs first, then indels), contigs follow header
+  order, QUAL is the maximum, FILTER follows `-F`, INFO rules default to
+  `DP:sum,DP4:sum` (plus `AN:sum,AC:sum` for sites-only output), Number=A/R/G
+  tags are remapped to the merged alleles and AN/AC are recomputed from the
+  genotypes; `--gvcf` fills absent samples from reference blocks.  
   Args: `<inputs...>`, `-l/--file-list`, `-o/--output`, `-O/--output-type`,
   `-m/--merge`, `-f/--apply-filters`, `-F/--filter-logic`, `--force-samples`,
   `-i/--info-rules`, `--missing-rules`, `-0/--missing-to-ref`, `-g/--gvcf`,
   `-L/--local-alleles`, region selectors, `--threads`, `-W/--write-index`.
 
 - `isec`  
-  Intersections and complements.  
+  Intersections and complements with bcftools' file layout: `-p` writes
+  `0000.vcf`, `0001.vcf`, ..., `sites.txt` and `README.txt`; without `-p` the
+  site list (or the `-w` file) goes to stdout.  
   Args: `<inputs...>`, `-p/--prefix`, `-n/--nfiles`, `-w/--write`,
   `-c/--collapse`, `-C/--complement`, `-f/--apply-filters`, `-l/--file-list`,
   `-o/--output`, `-O/--output-type`, region/target/include/exclude selectors.
@@ -270,11 +291,13 @@ Commands: `query`, `cnv`.
   Example: `kira-bt query -f '%CHROM\t%POS\t%REF\t%ALT\n' in.vcf.gz`.
 
 - `stats`  
-  VCF/BCF statistics.  
+  VCF/BCF statistics in the `bcftools stats` layout (SN, TSTV, SiS, AF, QUAL,
+  IDD, ST, DP, PSC, PSI, HWE, VAF, and the two-file concordance sections), so
+  `plot-vcfstats` and MultiQC read the output.  
   Args: `<inputs...>`, `-s/--samples`, `-S/--samples-file`, `-f/--apply-filters`,
-  `-F/--fasta-ref`, `-d/--depth`, `--af-bins`, `--af-tag`, `-1/--split-by-ID`,
-  `-c/--collapse`, `-E/--exons`, `-u/--user-tstv`, region/target selectors,
-  `--threads`.
+  `-F/--fasta-ref`, `-d/--depth`, `--af-bins`, `--af-tag`, `-1/--1st-allele-only`,
+  `-I/--split-by-ID`, `-c/--collapse`, `-E/--exons`, `-u/--user-tstv`,
+  `-i/--include`, `-e/--exclude`, region/target selectors, `--threads`.
 
 - `convert`  
   Convert to and from GEN/HAP/legend/sample and TSV formats.  
@@ -299,26 +322,61 @@ Commands: `query`, `cnv`.
 
 - `mpileup`  
   Multi-way pileup producing genotype likelihoods. `FORMAT/PL` is always
-  emitted regardless of `-a/--annotate`.  
-  Args: `<inputs...> [-- <passthrough>...]`, `-o/--output`, `-O/--output-type`,
+  emitted regardless of `-a/--annotate`; `-a` also accepts `AD`, `ADF`, `ADR`,
+  `DP`, `QS`, `SP`, `SCR`, `GQ` and their `INFO/` forms. `##contig` lines carry
+  the reference lengths from the BAM header, results do not depend on
+  `--threads`, and CRAM inputs are decoded against `-f/--fasta-ref` (region
+  queries need the `.crai`).  
+  Args: `<inputs...>`, `-o/--output`, `-O/--output-type`,
   `-f/--fasta-ref`, `-b/--bam-list`, `-g/--gvcf`, `-a/--annotate`,
   `-d/--max-depth`, `-D/--max-idepth`, `-q/--min-MQ`, `-Q/--min-BQ`,
-  `-m/--min-ireads`, `-I/--skip-indels`, `-x/--no-BAQ`, `-E/--redo-BAQ`,
-  `-X/--config`, `-F/--gap-frac`, `--indel-size`, `--threads`, `--stream`,
-  flag filters (`--ef`, `--df`, `--if`, `--nf`, `--rf`, `--ff`), and selectors.  
-  Fused calling shortcuts: `--variants-only`, `--prior`, `--min-alt-reads`,
+  `-m/--min-ireads`, `-I/--skip-indels`, `-B/--no-BAQ`, `-E/--redo-BAQ`,
+  `-x/--ignore-overlaps`, `-X/--config`, `-F/--gap-frac`, `--indel-size`,
+  `--threads`, `--stream`, flag filters (`--ef`, `--df`, `--if`, `--nf`,
+  `--rf`, `--ff`), and selectors.
+  Fused calling shortcuts: `-v/--variants-only`, `--prior`, `--min-alt-reads`,
   `--min-af`, `--min-qual`.
+
+  The likelihood model follows htslib/bcftools: base qualities are capped by
+  MAPQ and 60 (MAPQ 255 counts as 20); BAQ is the `probaln_glocal` pair-HMM
+  applied as in `sam_prob_realn` (extended mode; `-E` recomputes it, `-B`
+  skips it); overlapping mates are merged so a fragment counts once (`-x`
+  disables); genotype likelihoods come from the dependent-error model of
+  `errmod.c`, the site prior is a Watterson-scaled θ, and `INFO/QS` is the
+  per-sample-normalised quality sum per allele. Kira extensions, all off by
+  default and deviations from bcftools when enabled:
+  `--nm-weight off|auto|FULL,SLOPE` (down-weight high-mismatch reads),
+  `--hp-indel` (stricter indels in homopolymer/STR tracts),
+  `--indel-realign off|ins|all` (pair-HMM realignment of indel candidates),
+  `--assemble` (local assembly in active regions with haplotype PLs from the
+  same pair-HMM kernel) and `--recal` (empirical base-quality recalibration
+  by reported Q × trinucleotide × strand × cycle, learned at non-variant
+  sites; needs `-f`, not available with `--stream`).
 
 - `call`  
   SNP/indel calling from genotype likelihoods.  
   Args: `<input>`, `-o/--output`, `-O/--output-type`, `-c/--consensus-caller`,
   `-m/--multiallelic-caller` (default), `-v/--variants-only`, `-A/--keep-alts`,
   `-M/--keep-masked-ref`, `--keep-unseen-allele`, `-p/--pval-threshold`,
-  `-P/--prior`, `--prior-freqs`, `-X/--novel-rate`, `-C/--constrain`,
-  `-g/--gvcf`, `-a/--annotate <GQ[,GP]>`, `--ploidy <0|1|2>`, `--ploidy-file`,
+  `-P/--prior`, `-F/--prior-freqs <AN,AC>`, `--prior-af <INFO/TAG>`,
+  `-X/--novel-rate`, `-C/--constrain <trio|alleles>`, `-g/--gvcf`,
+  `-a/--annotate <GQ[,GP]>`, `--ploidy <0|1|2>`, `--ploidy-file`,
   `-G/--group-samples`, `--group-samples-tag`, `-s/--samples`,
   `-S/--samples-file`, `-V/--skip-variants`, selectors, `--threads`,
   `-W/--write-index`.
+
+  The multiallelic caller reproduces `bcftools call -m`: allele frequencies
+  come from `INFO/QS` (per-group `FORMAT/AD` fractions with `-G`, `-G -` for
+  one group per sample), optionally shrunk towards `-F AN,AC` panel counts;
+  `--prior-af INFO/TAG` does the same from an allele-frequency annotation,
+  weighted like one diploid pseudo-sample per called sample. QUAL is the
+  marginal `-4.343·(ref_lk − logsumexp(lk_sum, ref_lk))`, genotypes are the
+  posterior mode under the HWE prior at those frequencies, GQ is
+  phred(1 − P(best)) capped at 127, PL is dropped at reference-only sites,
+  and `I16` is folded into `DP4`/`MQ`. `-C trio` with a PED given through
+  `-S` is a kira extension (bcftools 1.19 has it disabled): the trio
+  genotypes maximise the joint likelihood under a Mendelian transmission
+  prior with the `-X` de-novo rate.
 
   `--ploidy` takes a plain number; region-dependent ploidy goes through
   `--ploidy-file` (`chrom beg end sex ploidy`, `*` allowed in the first three
@@ -371,6 +429,27 @@ Commands: `query`, `cnv`.
   `-q/--min-MQ`, `-r/--region`, `-L/--regions-file`, `-s/--subsample`,
   `--threads`.
 
+
+## Performance notes
+
+- One thread budget per process: `--threads N` (or `-@ N`) caps every pool
+  (BGZF compression and decompression, rayon, BAM decoding). Without it the
+  budget is the machine's core count.
+- BGZF output is compressed with libdeflate and BGZF input is decompressed
+  with libdeflate (through noodles); plain gzip goes through zlib-rs. Only a
+  C compiler is needed for the build, no cmake.
+- `-r`/`-R` on an indexed VCF (`.csi`/`.tbi`) reads only the blocks that
+  overlap the regions (`view`, `query`); every other selector filters through
+  one sorted-interval set with binary search, so a 200k-exon BED costs a
+  lookup per record, not a scan.
+- `-f/--fasta-ref` is read through the `.fai` index one contig at a time
+  (the index is built in memory when missing, and a `.fai` whose line layout
+  does not match the file is ignored). Gzipped FASTA is loaded whole.
+- `mpileup --stream` decodes each BAM on its own thread and pileups from the
+  channel, so no BAM is held in memory; the reference pre-scan skip-list is
+  not available on this path.
+- `gtcheck -g` walks the panel in lock-step with the query; both inputs must
+  be position-sorted with the same chromosome order.
 
 ## Tests
 

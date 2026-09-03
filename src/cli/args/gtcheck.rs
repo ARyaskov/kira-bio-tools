@@ -14,29 +14,31 @@ pub struct GtcheckArgs {
     #[arg(short = 'P', long = "pairs-file")]
     pub pairs_file: Option<PathBuf>,
 
-    #[arg(short = 's', long = "samples")]
-    pub samples: Option<String>,
+    /// `[qry|gt:]LIST`, may be given twice (once per file).
+    #[arg(short = 's', long = "samples", action = clap::ArgAction::Append)]
+    pub samples: Vec<String>,
 
-    #[arg(short = 'S', long = "samples-file")]
-    pub samples_file: Option<PathBuf>,
+    /// `[qry|gt:]FILE`, may be given twice (once per file).
+    #[arg(short = 'S', long = "samples-file", action = clap::ArgAction::Append)]
+    pub samples_file: Vec<String>,
 
-    #[arg(short = 'e', long = "error-probability", default_value_t = 40)]
-    pub error_probability: u32,
+    /// Phred-scaled genotyping error probability; 0 counts mismatches instead [40].
+    #[arg(short = 'E', long = "error-probability")]
+    pub error_probability: Option<u32>,
 
-    #[arg(short = 'n', long = "n-matches", default_value_t = 0)]
-    pub n_matches: usize,
+    /// Print only the top INT matches per sample; negative sorts by HWE probability.
+    #[arg(long = "n-matches", default_value_t = 0, allow_hyphen_values = true)]
+    pub n_matches: i64,
 
     #[arg(short = 'H', long = "homs-only")]
     pub homs_only: bool,
 
-    #[arg(short = 'u', long = "use", default_value = "GT")]
+    /// `TAG1[,TAG2]`: tag used in the query file and in the -g file [PL,GT].
+    #[arg(short = 'u', long = "use", default_value = "PL,GT")]
     pub use_tag: String,
 
     #[arg(long = "no-HWE-prob")]
     pub no_hwe_prob: bool,
-
-    #[arg(long = "keep-refs")]
-    pub keep_refs: bool,
 
     #[arg(long = "distinctive-sites")]
     pub distinctive_sites: Option<String>,
@@ -65,11 +67,16 @@ pub struct GtcheckArgs {
     #[arg(short = 'T', long = "targets-file")]
     pub targets_file: Option<PathBuf>,
 
-    #[arg(short = 'i', long = "include")]
-    pub include: Option<String>,
+    #[arg(long = "targets-overlap", default_value = "0")]
+    pub targets_overlap: u8,
 
-    #[arg(short = 'e', long = "exclude")]
-    pub exclude: Option<String>,
+    /// `[qry|gt:]EXPR`
+    #[arg(short = 'i', long = "include", action = clap::ArgAction::Append)]
+    pub include: Vec<String>,
+
+    /// `[qry|gt:]EXPR`; a bare integer is the old `--error-probability`.
+    #[arg(short = 'e', long = "exclude", action = clap::ArgAction::Append, allow_hyphen_values = true)]
+    pub exclude: Vec<String>,
 
     #[arg(short = 'v', long = "verbosity", default_value_t = 1)]
     pub verbosity: u8,

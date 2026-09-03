@@ -673,16 +673,7 @@ fn header_attr(line: &str, key: &str) -> Option<String> {
 }
 
 pub(crate) fn extract_samples_from_headers(headers: &[String]) -> Vec<String> {
-    for h in headers {
-        if h.starts_with("#CHROM") {
-            let parts: Vec<&str> = h.trim().split('\t').collect();
-            if parts.len() > 9 {
-                return parts[9..].iter().map(|s| s.to_string()).collect();
-            }
-            break;
-        }
-    }
-    Vec::new()
+    crate::vcf::header::extract_samples(headers)
 }
 
 pub(crate) fn build_sample_map(

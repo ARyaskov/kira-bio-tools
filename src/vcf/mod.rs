@@ -1,14 +1,20 @@
+pub mod alleles;
 mod fetch;
+pub mod header;
 mod mmap;
 mod parser;
 mod reader;
 pub mod simd;
+pub mod sink;
 pub mod structs;
 mod unified_reader;
+pub mod variant_type;
 
-pub use fetch::fetch_line;
+pub use fetch::{LineFetcher, fetch_line};
+pub use header::{ContigDict, FieldNumber, FieldType, HeaderInfo};
 pub use mmap::MmapVcfParser;
 pub use parser::{InfoParser, VcfParser, extract_contig_id, parse_vcf_full_line};
 pub use reader::VcfReader;
+pub use sink::VcfSink;
 pub use structs::{Result, VcfError, VcfFields, VcfParsedRecord, VcfRecord};
-pub use unified_reader::{UnifiedVcfReader, parse_vcf_line};
+pub use unified_reader::{UnifiedVcfReader, parse_vcf_line, parse_vcf_record};

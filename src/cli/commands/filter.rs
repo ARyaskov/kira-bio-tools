@@ -1,18 +1,19 @@
 use anyhow::Result;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
-use std::io::{self, BufRead, BufWriter, Write};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use crate::bgzf::BgzfWriter;
 use crate::cli::args::FilterArgs;
+use crate::vcf::VcfSink;
 use crate::filter::FilterEngine;
 use crate::filter_arch;
 use crate::kbi::KbiIndex;
-use crate::util::{Region, chr_name_to_id};
+use crate::util::Region;
+use anyhow::Context as _;
 use crate::vcf::VcfParser;
 use crate::vcf::{VcfReader, VcfRecord};
 
@@ -51,11 +52,8 @@ pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
     let set_gts = parse_set_gts(args.set_gts.as_deref())?;
 
     let header_start = Instant::now();
-    let mut writer = open_writer(args.output.as_ref(), args.output_type.as_deref())?;
-    for h in &headers {
-        writer.write_all(h.as_bytes())?;
-        writer.write_all(b"\n")?;
-    }
+    let mut writer = open_writer(args.output.as_ref(), args.output_type.as_deref(), &headers)?;
+    writer.write_header(&headers)?;
     let header_time = header_start.elapsed();
 
     let use_parallel =
@@ -202,9 +200,10 @@ fn maybe_write_index(out: Option<&std::path::Path>, kind: Option<&str>, output_t
         eprintln!("[filter] -W: index requires BGZF output (-O z or -O b); skipping for plain VCF");
         return Ok(());
     }
-    let idx_path = std::path::PathBuf::from(format!("{}.{}", out.display(), if kind == "tbi" { "tbi" } else { "csi" }));
-    eprintln!("[filter] -W {}: writing index to {:?}", kind, idx_path);
-    let _ = crate::csi::build_csi_index(out, &idx_path);
+    let (ikind, ext) = if kind == "tbi" { (crate::csi::IndexKind::Tbi, "tbi") } else { (crate::csi::IndexKind::Csi, "csi") };
+    let idx_path = std::path::PathBuf::from(format!("{}.{}", out.display(), ext));
+    crate::csi::build_index(out, &idx_path, ikind, None)
+        .with_context(|| format!("-W {kind}: writing index {}", idx_path.display()))?;
     Ok(())
 }
 
@@ -365,112 +364,14 @@ fn ensure_filter_header(headers: &mut Vec<String>, id: &str, desc: &str) {
     }
 }
 
-pub(crate) enum OutputWriter {
-    Stdout(BufWriter<io::Stdout>),
-    File(BufWriter<File>),
-    Bgzf(BgzfWriter),
-    Bcf {
-        writer: Option<crate::bcf::BcfWriter>,
-        header_buf: Vec<u8>,
-        header_done: bool,
-        out_path: PathBuf,
-        compressed: bool,
-        level: u32,
-    },
-}
-
-impl OutputWriter {
-    pub(crate) fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
-        match self {
-            OutputWriter::Stdout(w) => w.write_all(data),
-            OutputWriter::File(w) => w.write_all(data),
-            OutputWriter::Bgzf(w) => w.write_all(data),
-            OutputWriter::Bcf { writer, header_buf, header_done, out_path, compressed, level } => {
-                if !*header_done {
-                    header_buf.extend_from_slice(data);
-                    if let Some(pos) = find_chrom_line(header_buf) {
-                        let chrom_end = pos + chrom_line_length(&header_buf[pos..]);
-                        let header_text = std::str::from_utf8(&header_buf[..chrom_end]).map_err(io_err)?;
-                        let header_lines: Vec<String> = header_text.lines().map(|s| s.to_string()).collect();
-                        let bw = crate::bcf::BcfWriter::create(out_path.as_path(), *compressed, *level, &header_lines)
-                            .map_err(io_err)?;
-                        *writer = Some(bw);
-                        *header_done = true;
-                        let leftover = header_buf.split_off(chrom_end);
-                        header_buf.clear();
-                        if !leftover.is_empty() {
-                            let lo_str = std::str::from_utf8(&leftover).map_err(io_err)?;
-                            if let Some(bw) = writer.as_mut() {
-                                for line in lo_str.split('\n') {
-                                    if !line.is_empty() { bw.write_vcf_line(line).map_err(io_err)?; }
-                                }
-                            }
-                        }
-                    }
-                    return Ok(());
-                }
-                let s = std::str::from_utf8(data).map_err(io_err)?;
-                if let Some(bw) = writer.as_mut() {
-                    for line in s.split('\n') {
-                        if !line.is_empty() { bw.write_vcf_line(line).map_err(io_err)?; }
-                    }
-                }
-                Ok(())
-            }
-        }
-    }
-
-    pub(crate) fn finish(self) -> io::Result<()> {
-        match self {
-            OutputWriter::Stdout(mut w) => w.flush(),
-            OutputWriter::File(mut w) => w.flush(),
-            OutputWriter::Bgzf(w) => w.finish(),
-            OutputWriter::Bcf { writer, .. } => {
-                if let Some(w) = writer { w.finish().map_err(io_err)?; }
-                Ok(())
-            }
-        }
-    }
-}
-
-fn io_err<E: std::fmt::Display>(e: E) -> io::Error { io::Error::other(format!("{}", e)) }
-
-fn find_chrom_line(buf: &[u8]) -> Option<usize> {
-    let needle = b"\n#CHROM";
-    buf.windows(needle.len()).position(|w| w == needle).map(|p| p + 1)
-}
-
-fn chrom_line_length(s: &[u8]) -> usize {
-    s.iter().position(|&b| b == b'\n').map(|p| p + 1).unwrap_or(s.len())
-}
-
-pub(crate) fn open_writer(path: Option<&PathBuf>, output_type: Option<&str>) -> Result<OutputWriter> {
+/// Output sink for the requested `-O` type (plain, BGZF or BCF).
+pub(crate) fn open_writer(path: Option<&PathBuf>, output_type: Option<&str>, headers: &[String]) -> Result<VcfSink> {
     use crate::annotate::postproc::{OutputKind, parse_output_type};
     let kind = output_type.map(parse_output_type).transpose()?.unwrap_or(OutputKind::Vcf);
-    match kind {
-        OutputKind::Vcf => match path {
-            Some(p) => Ok(OutputWriter::File(BufWriter::new(File::create(p)?))),
-            None => Ok(OutputWriter::Stdout(BufWriter::new(io::stdout()))),
-        },
-        OutputKind::VcfGz(_) => {
-            let Some(path) = path else { anyhow::bail!("-O z requires -o FILE"); };
-            Ok(OutputWriter::Bgzf(BgzfWriter::create(path)?))
-        }
-        OutputKind::Bcf(level) => {
-            let Some(path) = path else { anyhow::bail!("-O u|b requires -o FILE"); };
-            Ok(OutputWriter::Bcf {
-                writer: None,
-                header_buf: Vec::with_capacity(64 * 1024),
-                header_done: false,
-                out_path: path.clone(),
-                compressed: level > 0,
-                level,
-            })
-        }
-    }
+    VcfSink::open(path.map(|p| p.as_path()), kind, headers)
 }
 
-fn write_record(writer: &mut OutputWriter, rec: &VcfRecord) -> Result<()> {
+fn write_record(writer: &mut VcfSink, rec: &VcfRecord) -> Result<()> {
     let line = record_line(rec);
     writer.write_all(line.as_bytes())?;
     Ok(())
@@ -559,7 +460,7 @@ impl ParallelStats {
 
 fn run_parallel_filter(
     reader: &mut VcfReader,
-    writer: &mut OutputWriter,
+    writer: &mut VcfSink,
     engine: Arc<FilterEngine>,
     mask: Option<Arc<MaskSource>>,
     mode: FilterMode,
@@ -580,8 +481,6 @@ fn run_parallel_filter(
         let stats = Arc::clone(&stats);
         let mask = mask.clone();
         let filter_name = filter_name.clone();
-        let mode = mode;
-        let set_gts = set_gts;
         let handle = std::thread::spawn(move || {
             loop {
                 let (idx, rec) = match rx.recv() {
@@ -722,7 +621,8 @@ struct MaskConfig {
 
 struct KbiMask {
     index: KbiIndex,
-    path: PathBuf,
+    /// Open handle on the mask data file for fetching hit lines by offset.
+    fetcher: Option<std::sync::Mutex<crate::vcf::LineFetcher>>,
     overlap: u8,
     negate: bool,
     has_data: bool,
@@ -833,18 +733,22 @@ fn mask_pass_regions(mask: &MaskConfig, rec: &VcfRecord) -> bool {
 
 fn mask_pass_kbi(mask: &KbiMask, rec: &VcfRecord) -> bool {
     let (beg, end) = mask_bounds(rec, mask.overlap);
-    let Some(chr_id) = chr_name_to_id(&rec.chrom) else {
-        return true;
+    let Some(chr_id) = mask.index.contigs().id(&rec.chrom) else {
+        return !mask.negate;
     };
     let mut hit = false;
     if !mask.has_data {
         hit = mask.index.has_range(chr_id, beg, end);
     } else {
         let hits = mask.index.range(chr_id, beg, end);
+        let mut fetcher = match mask.fetcher.as_ref() {
+            Some(f) => f.lock().unwrap_or_else(|e| e.into_inner()),
+            None => return !mask.negate,
+        };
         for (_pos, offset) in hits {
-            if let Ok(line) = crate::fetch_line(&mask.path, offset) {
-                if let Some((mchr, mbeg, mend)) = parse_mask_vcf_bounds(&line, mask.overlap) {
-                    if mchr == chr_id && mbeg <= end && mend >= beg {
+            if let Ok(line) = fetcher.fetch(offset) {
+                if let Some((mchr, mbeg, mend)) = parse_mask_vcf_bounds(line, mask.overlap) {
+                    if mchr == rec.chrom && mbeg <= end && mend >= beg {
                         hit = true;
                         break;
                     }
@@ -885,10 +789,10 @@ fn mask_bounds(rec: &VcfRecord, overlap: u8) -> (u32, u32) {
     }
 }
 
-fn parse_mask_vcf_bounds(line: &str, overlap: u8) -> Option<(u8, u32, u32)> {
+fn parse_mask_vcf_bounds(line: &str, overlap: u8) -> Option<(String, u32, u32)> {
     let mut parser = VcfParser::new(line);
     let fields = parser.parse_standard_fields()?;
-    let chr_id = chr_name_to_id(fields.chrom)?;
+    let chr_id = fields.chrom.to_string();
     let pos = fields.pos.parse::<u32>().ok()?;
     let pos0 = pos.saturating_sub(1);
     let (beg, end) = match overlap {
@@ -928,9 +832,14 @@ fn try_load_kbi_mask(
     if mask_path.extension().map(|e| e == "kbi").unwrap_or(false) {
         let index = KbiIndex::load(mask_path)?;
         let (data_path, has_data) = resolve_kbi_data_path(mask_path);
+        let fetcher = if has_data {
+            Some(std::sync::Mutex::new(crate::vcf::LineFetcher::open(&data_path)?))
+        } else {
+            None
+        };
         return Ok(Some(KbiMask {
             index,
-            path: data_path,
+            fetcher,
             overlap: overlap.unwrap_or(1),
             negate,
             has_data,
@@ -941,7 +850,7 @@ fn try_load_kbi_mask(
         let index = KbiIndex::load(&kbi_path)?;
         return Ok(Some(KbiMask {
             index,
-            path: mask_path.clone(),
+            fetcher: Some(std::sync::Mutex::new(crate::vcf::LineFetcher::open(mask_path)?)),
             overlap: overlap.unwrap_or(1),
             negate,
             has_data: true,
@@ -1032,7 +941,7 @@ fn buffered_filters(
     indel_gap: Option<u32>,
     soft_filter: bool,
     finalize: bool,
-    writer: &mut OutputWriter,
+    writer: &mut VcfSink,
 ) -> Result<()> {
     if buffer.is_empty() {
         return Ok(());
@@ -1143,7 +1052,7 @@ fn buffered_filters(
 
 fn flush_buffer(
     buffer: &mut VecDeque<BufferedRecord>,
-    writer: &mut OutputWriter,
+    writer: &mut VcfSink,
     soft_filter: bool,
 ) -> Result<()> {
     let n = buffer.len();
@@ -1154,7 +1063,7 @@ fn flush_n_records(
     buffer: &mut VecDeque<BufferedRecord>,
     n: usize,
     soft_filter: bool,
-    writer: &mut OutputWriter,
+    writer: &mut VcfSink,
 ) -> Result<()> {
     for _ in 0..n {
         if let Some(rec) = buffer.pop_front() {

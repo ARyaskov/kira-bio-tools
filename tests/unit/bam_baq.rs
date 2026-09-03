@@ -1,33 +1,37 @@
     use super::*;
 
+    const REF: &[u8] = b"TTGACCGTAGACGTACGTACGTACGTACGTACGGATCCATTG";
+
     #[test]
-    fn capping_no_panic_empty() {
-        let mut q: Vec<u8> = Vec::new();
-        apply_baq_capping(&[], &mut q, &[(Kind::Match, 0)], 30);
+    fn perfect_match_keeps_most_of_the_quality() {
+        let read = &REF[10..30];
+        let mut qual = vec![40u8; read.len()];
+        let cigar = vec![(Kind::Match, read.len() as u32)];
+        assert!(apply_baq_hmm(read, &mut qual, &cigar, REF, 0, 10));
+        assert!(qual.iter().all(|&q| q > 0), "{qual:?}");
+        let high = qual.iter().filter(|&&q| q >= 20).count();
+        assert!(high * 2 >= qual.len(), "{qual:?}");
     }
 
     #[test]
-    fn caps_near_insertion() {
-        let mut qual = vec![60u8; 20];
-        let cigar = vec![(Kind::Match, 10), (Kind::Insertion, 2), (Kind::Match, 8)];
-        apply_baq_capping(&[], &mut qual, &cigar, 30);
-        for q in &qual[5..15] { assert!(*q <= 30); }
+    fn inserted_bases_get_zero_quality() {
+        let mut read = Vec::new();
+        read.extend_from_slice(&REF[10..18]);
+        read.extend_from_slice(b"TT");
+        read.extend_from_slice(&REF[18..26]);
+        let mut qual = vec![40u8; read.len()];
+        let cigar = vec![(Kind::Match, 8), (Kind::Insertion, 2), (Kind::Match, 8)];
+        assert!(apply_baq_hmm(&read, &mut qual, &cigar, REF, 0, 10));
+        assert_eq!(qual[8], 0);
+        assert_eq!(qual[9], 0);
+        assert!(qual[..8].iter().any(|&q| q > 0));
     }
 
     #[test]
-    fn hmm_perfect_match_high_posterior() {
-        let seq = b"ACGTACGTAC";
-        let mut qual = vec![40u8; seq.len()];
-        let cigar = vec![(Kind::Match, seq.len() as u32)];
-        let refseq = b"ACGTACGTAC";
-        apply_baq_hmm(seq, &mut qual, &cigar, refseq, 5);
-        for q in &qual { assert!(*q >= 25, "expected high quality for perfect match, got {q}"); }
-    }
-
-    #[test]
-    fn hmm_fallback_no_ref() {
-        let seq = b"ACGT";
-        let mut qual = vec![40u8; seq.len()];
-        let cigar = vec![(Kind::Match, 4)];
-        apply_baq_hmm(seq, &mut qual, &cigar, &[], 5);
+    fn reference_skip_and_missing_window_are_no_ops() {
+        let read = &REF[10..20];
+        let mut qual = vec![40u8; read.len()];
+        assert!(!apply_baq_hmm(read, &mut qual, &[(Kind::Match, 5), (Kind::Skip, 3), (Kind::Match, 5)], REF, 0, 10));
+        assert!(!apply_baq_hmm(read, &mut qual, &[(Kind::Match, 10)], &[], 0, 10));
+        assert!(qual.iter().all(|&q| q == 40));
     }

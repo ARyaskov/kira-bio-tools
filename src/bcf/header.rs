@@ -1,5 +1,10 @@
 use fxhash::FxHashMap;
 
+use crate::vcf::header::{parse_struct_line, samples_from_chrom_line};
+
+/// BCF header dictionaries. INFO, FORMAT and FILTER share one id space keyed
+/// by tag name (htslib `BCF_DT_ID`, with PASS fixed at 0); contigs have their
+/// own (`BCF_DT_CTG`).
 #[derive(Default, Clone)]
 pub struct BcfHeaderDict {
     pub raw_lines: Vec<String>,
@@ -12,6 +17,10 @@ pub struct BcfHeaderDict {
     pub info_idx: FxHashMap<String, u32>,
     pub format_idx: FxHashMap<String, u32>,
     pub filter_idx: FxHashMap<String, u32>,
+    info_by_idx: Vec<u32>,
+    format_by_idx: Vec<u32>,
+    filter_by_idx: Vec<u32>,
+    contig_by_idx: Vec<u32>,
 }
 
 #[derive(Clone)]
@@ -23,143 +32,262 @@ pub struct HdrField {
     pub idx: u32,
 }
 
+const NONE: u32 = u32::MAX;
+
+fn set_by_idx(table: &mut Vec<u32>, idx: u32, pos: usize) {
+    let i = idx as usize;
+    if table.len() <= i {
+        table.resize(i + 1, NONE);
+    }
+    if table[i] == NONE {
+        table[i] = pos as u32;
+    }
+}
+
+impl BcfHeaderDict {
+    pub fn info_field(&self, idx: u32) -> Option<&HdrField> {
+        self.info_by_idx.get(idx as usize).and_then(|&p| if p == NONE { None } else { self.info.get(p as usize) })
+    }
+
+    pub fn format_field(&self, idx: u32) -> Option<&HdrField> {
+        self.format_by_idx.get(idx as usize).and_then(|&p| if p == NONE { None } else { self.format.get(p as usize) })
+    }
+
+    pub fn filter_field(&self, idx: u32) -> Option<&HdrField> {
+        self.filter_by_idx.get(idx as usize).and_then(|&p| if p == NONE { None } else { self.filter.get(p as usize) })
+    }
+
+    pub fn contig_name(&self, rid: u32) -> Option<&str> {
+        self.contig_by_idx
+            .get(rid as usize)
+            .and_then(|&p| if p == NONE { None } else { self.contigs.get(p as usize).map(String::as_str) })
+    }
+
+    fn rebuild_tables(&mut self) {
+        self.info_by_idx.clear();
+        self.format_by_idx.clear();
+        self.filter_by_idx.clear();
+        self.contig_by_idx.clear();
+        for (p, f) in self.info.iter().enumerate() {
+            set_by_idx(&mut self.info_by_idx, f.idx, p);
+        }
+        for (p, f) in self.format.iter().enumerate() {
+            set_by_idx(&mut self.format_by_idx, f.idx, p);
+        }
+        for (p, f) in self.filter.iter().enumerate() {
+            set_by_idx(&mut self.filter_by_idx, f.idx, p);
+        }
+        for (p, name) in self.contigs.iter().enumerate() {
+            if let Some(&idx) = self.contig_idx.get(name) {
+                set_by_idx(&mut self.contig_by_idx, idx, p);
+            }
+        }
+    }
+}
+
+struct IdSpace {
+    by_name: FxHashMap<String, u32>,
+    used: std::collections::HashSet<u32>,
+    next: u32,
+}
+
+impl IdSpace {
+    fn new(start: u32) -> Self {
+        Self {
+            by_name: FxHashMap::default(),
+            used: std::collections::HashSet::new(),
+            next: start,
+        }
+    }
+
+    fn assign(&mut self, name: &str, explicit: Option<u32>) -> u32 {
+        if let Some(&idx) = self.by_name.get(name) {
+            return idx;
+        }
+        let idx = match explicit {
+            Some(i) => i,
+            None => {
+                while self.used.contains(&self.next) {
+                    self.next += 1;
+                }
+                self.next
+            }
+        };
+        self.used.insert(idx);
+        self.by_name.insert(name.to_string(), idx);
+        idx
+    }
+}
+
 pub fn parse_header_to_dict(headers: &[String]) -> BcfHeaderDict {
     let mut d = BcfHeaderDict::default();
-    let mut contig_next: u32 = 0;
-    let mut info_format_filter_next: u32 = 1;
-    let mut have_pass = false;
-
-    let extract_idx = |s: &str| -> Option<u32> {
-        s.split(',').find_map(|kv| kv.strip_prefix("IDX="))
-            .and_then(|v| v.trim_end_matches('>').parse().ok())
-    };
+    let mut ids = IdSpace::new(0);
+    let mut contig_ids = IdSpace::new(0);
+    // PASS is always the first entry of the shared dictionary.
+    let pass_idx = ids.assign("PASS", Some(0));
+    let mut have_pass_line = false;
 
     for h in headers {
         d.raw_lines.push(h.clone());
-        if let Some(rest) = h.strip_prefix("##contig=") {
-            if let Some(id) = extract_struct_id(rest) {
-                let idx = extract_idx(rest).unwrap_or(contig_next);
-                contig_next = contig_next.max(idx + 1);
-                d.contig_idx.insert(id.clone(), idx);
-                d.contigs.push(id);
-            }
-        } else if let Some(rest) = h.strip_prefix("##INFO=<") {
-            if let Some(mut f) = parse_struct_field(rest) {
-                let idx = extract_idx(rest).unwrap_or(info_format_filter_next);
-                info_format_filter_next = info_format_filter_next.max(idx + 1);
-                f.idx = idx;
-                d.info_idx.insert(f.id.clone(), idx);
-                d.info.push(f);
-            }
-        } else if let Some(rest) = h.strip_prefix("##FORMAT=<") {
-            if let Some(mut f) = parse_struct_field(rest) {
-                let idx = extract_idx(rest).unwrap_or(info_format_filter_next);
-                info_format_filter_next = info_format_filter_next.max(idx + 1);
-                f.idx = idx;
-                d.format_idx.insert(f.id.clone(), idx);
-                d.format.push(f);
-            }
-        } else if let Some(rest) = h.strip_prefix("##FILTER=<") {
-            if let Some(mut f) = parse_struct_field(rest) {
-                let idx = extract_idx(rest).unwrap_or(if f.id == "PASS" { 0 } else { info_format_filter_next });
-                if f.id != "PASS" {
-                    info_format_filter_next = info_format_filter_next.max(idx + 1);
+        if let Some((kind, kvs)) = parse_struct_line(h) {
+            let id = kvs.iter().find(|(k, _)| *k == "ID").map(|(_, v)| v.to_string());
+            let explicit = kvs.iter().find(|(k, _)| *k == "IDX").and_then(|(_, v)| v.parse::<u32>().ok());
+            let Some(id) = id else { continue };
+            match kind {
+                "contig" => {
+                    let idx = contig_ids.assign(&id, explicit);
+                    if !d.contig_idx.contains_key(&id) {
+                        d.contig_idx.insert(id.clone(), idx);
+                        d.contigs.push(id);
+                    }
                 }
-                f.idx = idx;
-                if f.id == "PASS" { have_pass = true; }
-                d.filter_idx.insert(f.id.clone(), idx);
-                d.filter.push(f);
+                "INFO" | "FORMAT" | "FILTER" => {
+                    let mut f = field_from_kvs(&id, &kvs);
+                    f.idx = ids.assign(&id, explicit);
+                    match kind {
+                        "INFO" => {
+                            if !d.info_idx.contains_key(&id) {
+                                d.info_idx.insert(id, f.idx);
+                                d.info.push(f);
+                            }
+                        }
+                        "FORMAT" => {
+                            if !d.format_idx.contains_key(&id) {
+                                d.format_idx.insert(id, f.idx);
+                                d.format.push(f);
+                            }
+                        }
+                        _ => {
+                            if id == "PASS" {
+                                have_pass_line = true;
+                            }
+                            if !d.filter_idx.contains_key(&id) {
+                                d.filter_idx.insert(id, f.idx);
+                                d.filter.push(f);
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         } else if h.starts_with("#CHROM") {
-            let cols: Vec<&str> = h.split('\t').collect();
-            if cols.len() > 9 {
-                d.samples = cols[9..].iter().map(|s| s.to_string()).collect();
-            }
+            d.samples = samples_from_chrom_line(h);
         }
     }
-    if !have_pass {
-        d.filter_idx.insert("PASS".into(), 0);
-        d.filter.insert(0, HdrField {
-            id: "PASS".into(), number: ".".into(), typ: ".".into(),
-            description: "All filters passed".into(), idx: 0,
-        });
+    if !have_pass_line {
+        d.filter_idx.insert("PASS".into(), pass_idx);
+        d.filter.insert(
+            0,
+            HdrField {
+                id: "PASS".into(),
+                number: ".".into(),
+                typ: ".".into(),
+                description: "All filters passed".into(),
+                idx: pass_idx,
+            },
+        );
     }
+    d.rebuild_tables();
     d
 }
 
-fn extract_struct_id(rest: &str) -> Option<String> {
-    let body = rest.strip_prefix('<')?.strip_suffix('>')?;
-    for kv in body.split(',') {
-        if let Some(v) = kv.strip_prefix("ID=") { return Some(v.to_string()); }
+fn field_from_kvs(id: &str, kvs: &[(&str, &str)]) -> HdrField {
+    let mut f = HdrField {
+        id: id.to_string(),
+        number: ".".into(),
+        typ: "String".into(),
+        description: String::new(),
+        idx: 0,
+    };
+    for (k, v) in kvs {
+        match *k {
+            "Number" => f.number = v.to_string(),
+            "Type" => f.typ = v.to_string(),
+            "Description" => f.description = v.to_string(),
+            _ => {}
+        }
     }
-    None
+    f
 }
 
-fn parse_struct_field(rest: &str) -> Option<HdrField> {
-    let body = rest.strip_suffix('>')?;
-    let mut id = String::new();
-    let mut number = ".".to_string();
-    let mut typ = "String".to_string();
-    let mut desc = String::new();
-    for kv in body.split(',') {
-        if let Some(v) = kv.strip_prefix("ID=") { id = v.to_string(); }
-        else if let Some(v) = kv.strip_prefix("Number=") { number = v.to_string(); }
-        else if let Some(v) = kv.strip_prefix("Type=") { typ = v.to_string(); }
-        else if let Some(v) = kv.strip_prefix("Description=") { desc = v.trim_matches('"').to_string(); }
-    }
-    if id.is_empty() { return None; }
-    Some(HdrField { id, number, typ, description: desc, idx: 0 })
-}
-
-/// Serialize header dict back to a VCF header text block (with IDX= tags inserted).
+/// Serialize the header back to text with `IDX=` tags on every dictionary
+/// line, a PASS filter line if the source lacked one, and the `#CHROM` line.
 pub fn serialize_header(d: &BcfHeaderDict) -> String {
     let mut out = String::new();
     let mut had_fileformat = false;
+    let has_pass_line = d.raw_lines.iter().any(|l| {
+        parse_struct_line(l).is_some_and(|(k, kvs)| k == "FILTER" && kvs.iter().any(|(a, b)| *a == "ID" && *b == "PASS"))
+    });
+    let pass_line = format!(
+        "##FILTER=<ID=PASS,Description=\"All filters passed\",IDX={}>",
+        d.filter_idx.get("PASS").copied().unwrap_or(0)
+    );
     for line in &d.raw_lines {
-        if line.starts_with("##fileformat=") { had_fileformat = true; }
-        if line.starts_with("#CHROM") { continue; }
-        if line.starts_with("##contig=") {
-            if let Some(id) = line.strip_prefix("##contig=").and_then(extract_struct_id) {
-                if let Some(idx) = d.contig_idx.get(&id) {
-                    out.push_str(&inject_idx(line, *idx));
-                    out.push('\n');
-                    continue;
-                }
+        if line.starts_with("##fileformat=") {
+            had_fileformat = true;
+            out.push_str(line);
+            out.push('\n');
+            if !has_pass_line {
+                out.push_str(&pass_line);
+                out.push('\n');
             }
+            continue;
         }
-        if line.starts_with("##INFO=<") || line.starts_with("##FORMAT=<") || line.starts_with("##FILTER=<") {
-            if let Some(id) = extract_struct_id(line.split_once('<').map(|p| p.1).unwrap_or("")) {
-                let idx_opt = if line.starts_with("##INFO=") { d.info_idx.get(&id) }
-                    else if line.starts_with("##FORMAT=") { d.format_idx.get(&id) }
-                    else { d.filter_idx.get(&id) };
-                if let Some(idx) = idx_opt {
-                    out.push_str(&inject_idx(line, *idx));
-                    out.push('\n');
-                    continue;
-                }
+        if line.starts_with("#CHROM") {
+            continue;
+        }
+        if let Some((kind, kvs)) = parse_struct_line(line) {
+            let id = kvs.iter().find(|(k, _)| *k == "ID").map(|(_, v)| *v);
+            let idx = match (kind, id) {
+                ("contig", Some(id)) => d.contig_idx.get(id),
+                ("INFO", Some(id)) => d.info_idx.get(id),
+                ("FORMAT", Some(id)) => d.format_idx.get(id),
+                ("FILTER", Some(id)) => d.filter_idx.get(id),
+                _ => None,
+            };
+            if let Some(idx) = idx {
+                out.push_str(&inject_idx(line, *idx));
+                out.push('\n');
+                continue;
             }
         }
         out.push_str(line);
         out.push('\n');
     }
-    if !had_fileformat { out = format!("##fileformat=VCFv4.2\n{}", out); }
+    if !had_fileformat {
+        let mut pre = String::from("##fileformat=VCFv4.2\n");
+        if !has_pass_line {
+            pre.push_str(&pass_line);
+            pre.push('\n');
+        }
+        out = format!("{pre}{out}");
+    }
     out.push_str("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO");
     if !d.samples.is_empty() {
         out.push_str("\tFORMAT");
-        for s in &d.samples { out.push('\t'); out.push_str(s); }
+        for s in &d.samples {
+            out.push('\t');
+            out.push_str(s);
+        }
     }
     out.push('\n');
     out
 }
 
 fn inject_idx(line: &str, idx: u32) -> String {
-    if line.contains("IDX=") { return line.to_string(); }
+    if let Some((_, kvs)) = parse_struct_line(line) {
+        if kvs.iter().any(|(k, _)| *k == "IDX") {
+            return line.to_string();
+        }
+    }
     if let Some(p) = line.rfind('>') {
         let mut s = String::with_capacity(line.len() + 12);
         s.push_str(&line[..p]);
         s.push_str(&format!(",IDX={}>", idx));
         s
-    } else { line.to_string() }
+    } else {
+        line.to_string()
+    }
 }
 
 #[cfg(test)]

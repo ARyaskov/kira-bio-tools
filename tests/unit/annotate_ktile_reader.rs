@@ -1,5 +1,4 @@
     use super::*;
-    use crate::annotate::ktile::writer::write_ktile_from_vcf;
     use std::io::Write;
 
     fn write_tmp_vcf(name: &str, body: &str) -> std::path::PathBuf {

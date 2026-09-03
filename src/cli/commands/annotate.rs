@@ -401,15 +401,7 @@ fn write_processed_line<W: Write>(
 }
 
 fn extract_samples_from_chrom_line(headers: &[String]) -> Vec<String> {
-    for h in headers {
-        if h.starts_with("#CHROM") {
-            let cols: Vec<&str> = h.split('\t').collect();
-            if cols.len() > 9 {
-                return cols[9..].iter().map(|s| s.to_string()).collect();
-            }
-        }
-    }
-    Vec::new()
+    crate::vcf::header::extract_samples(headers)
 }
 
 fn write_output_index(out: &Path, fmt: &str) -> Result<()> {

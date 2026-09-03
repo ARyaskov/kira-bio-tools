@@ -1,108 +1,80 @@
-//! Local indel recovery: realign each read to the reference window (affine), read
-//! off the indel it implies plus the residual mismatch count, and accept indels
-//! supported by enough reads that fit *cleanly* (few residual mismatches) over a
-//! wide window. A spurious indel betrays itself with downstream mismatches the
-//! true indel does not have; the wide window + mismatch cap is what gives this
-//! ~2% false-call rate where a bare edit-distance scan floods. Recovers indels
-//! the aligner modelled as mismatches and so never placed in a CIGAR.
+//! Local indel recovery in active regions. Each read is realigned to the
+//! reference window with the glocal pair-HMM; the MAP state path yields the
+//! indel it implies plus the residual mismatch count, and indels supported by
+//! enough clean-fitting reads are called. Genotype likelihoods come from
+//! read-vs-haplotype likelihoods on the same kernel.
 
+use crate::align::{GlocalParams, encode_nt, glocal};
 use crate::bam::pileup::LiveRead;
-
-const NEG: f64 = f64::NEG_INFINITY;
-// affine alignment scoring for discovery
-const MA: f64 = 1.0; // match
-const MI: f64 = -4.0; // mismatch
-const GO: f64 = -6.0; // gap open
-const GE: f64 = -1.0; // gap extend
+use crate::call::pairhmm::read_vs_hap_loglik;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Indel {
     pub is_ins: bool,
-    pub ref_off: usize,   // ref-window offset just past the anchor base (indel sits here)
-    pub len: usize,       // indel length in bases
-    pub bases: Vec<u8>,   // inserted bases (empty for deletions)
+    /// Reference-window offset just past the anchor base (the indel sits here).
+    pub ref_off: usize,
+    /// Indel length in bases.
+    pub len: usize,
+    /// Inserted bases (empty for deletions).
+    pub bases: Vec<u8>,
 }
 
-/// Affine align `read` to `refw`; return the single largest indel plus the number
-/// of residual mismatches in the alignment (the clean-fit signal).
+/// Align `read` to `refw` and return the single largest indel on the MAP
+/// path plus the number of residual mismatches (the clean-fit signal).
 pub fn discover_indel(read: &[u8], refw: &[u8]) -> Option<(Indel, u32)> {
     let n = read.len();
     let m = refw.len();
-    if n < 8 || m < 8 { return None; }
-    let mut mm = vec![vec![NEG; m + 1]; n + 1];
-    let mut ix = vec![vec![NEG; m + 1]; n + 1]; // gap in ref (insertion in read)
-    let mut iy = vec![vec![NEG; m + 1]; n + 1]; // gap in read (deletion)
-    let mut bm = vec![vec![0u8; m + 1]; n + 1];
-    let mut bx = vec![vec![0u8; m + 1]; n + 1];
-    let mut by = vec![vec![0u8; m + 1]; n + 1];
-    mm[0][0] = 0.0;
-    for i in 1..=n { ix[i][0] = GO + (i as f64 - 1.0) * GE; }
-    for j in 1..=m { iy[0][j] = GO + (j as f64 - 1.0) * GE; }
-    for i in 1..=n {
-        for j in 1..=m {
-            let sc = if read[i - 1].eq_ignore_ascii_case(&refw[j - 1]) { MA } else { MI };
-            let mut best = mm[i - 1][j - 1]; let mut s = 0u8;
-            if ix[i - 1][j - 1] > best { best = ix[i - 1][j - 1]; s = 1; }
-            if iy[i - 1][j - 1] > best { best = iy[i - 1][j - 1]; s = 2; }
-            mm[i][j] = best + sc; bm[i][j] = s;
-            let (o, e) = (mm[i - 1][j] + GO, ix[i - 1][j] + GE);
-            if o >= e { ix[i][j] = o; bx[i][j] = 0; } else { ix[i][j] = e; bx[i][j] = 1; }
-            let (o, e) = (mm[i][j - 1] + GO, iy[i][j - 1] + GE);
-            if o >= e { iy[i][j] = o; by[i][j] = 0; } else { iy[i][j] = e; by[i][j] = 2; }
-        }
+    if n < 8 || m < 8 {
+        return None;
     }
-    let (mut i, mut j) = (n, m);
-    let mut cur = {
-        let mut c = 0u8; let mut v = mm[n][m];
-        if ix[n][m] > v { v = ix[n][m]; c = 1; }
-        if iy[n][m] > v { c = 2; }
-        c
-    };
-    let mut ops: Vec<(u8, usize)> = Vec::new(); // (0=M,1=I,2=D)
-    let push = |op: u8, ops: &mut Vec<(u8, usize)>| {
-        if let Some(last) = ops.last_mut() {
-            if last.0 == op { last.1 += 1; return; }
-        }
-        ops.push((op, 1));
-    };
-    while i > 0 || j > 0 {
-        if i == 0 { push(2, &mut ops); j -= 1; continue; }
-        if j == 0 { push(1, &mut ops); i -= 1; continue; }
-        match cur {
-            0 => { push(0, &mut ops); let s = bm[i][j]; i -= 1; j -= 1; cur = s; }
-            1 => { push(1, &mut ops); let s = bx[i][j]; i -= 1; cur = s; }
-            _ => { push(2, &mut ops); let s = by[i][j]; j -= 1; cur = s; }
-        }
-    }
-    ops.reverse();
-    // walk forward: biggest indel + its offset/bases, and count residual mismatches
-    let (mut ref_pos, mut read_pos) = (0usize, 0usize);
+    let r: Vec<u8> = refw.iter().map(|&b| encode_nt(b)).collect();
+    let q: Vec<u8> = read.iter().map(|&b| encode_nt(b)).collect();
+    let par = GlocalParams { d: 0.001, e: 0.1, bw: n.abs_diff(m) + 10 };
+    let res = glocal(&r, &q, None, &par, true)?;
     let mut best: Option<Indel> = None;
     let mut mmc = 0u32;
-    for &(op, len) in &ops {
-        match op {
-            0 => {
-                for t in 0..len {
-                    if !read[read_pos + t].eq_ignore_ascii_case(&refw[ref_pos + t]) { mmc += 1; }
-                }
-                ref_pos += len; read_pos += len;
+    let mut prev_col: Option<usize> = None;
+    let mut i = 0usize;
+    let consider = |cand: Indel, best: &mut Option<Indel>| {
+        if best.as_ref().is_none_or(|b| cand.len > b.len) {
+            *best = Some(cand);
+        }
+    };
+    while i < n {
+        let st = res.state[i];
+        if st < 0 {
+            return None;
+        }
+        if st & 3 == 1 {
+            let start = i;
+            while i < n && res.state[i] & 3 == 1 {
+                i += 1;
             }
-            1 => {
-                if best.as_ref().map_or(true, |b| len > b.len) {
-                    best = Some(Indel { is_ins: true, ref_off: ref_pos, len,
-                                        bases: read[read_pos..read_pos + len].to_vec() });
-                }
-                read_pos += len;
+            if let Some(pc) = prev_col {
+                consider(Indel { is_ins: true, ref_off: pc + 1, len: i - start, bases: read[start..i].to_vec() }, &mut best);
             }
-            _ => {
-                if best.as_ref().map_or(true, |b| len > b.len) {
-                    best = Some(Indel { is_ins: false, ref_off: ref_pos, len, bases: Vec::new() });
-                }
-                ref_pos += len;
+            continue;
+        }
+        let col = (st >> 2) as usize;
+        if col >= m {
+            return None;
+        }
+        if let Some(pc) = prev_col {
+            if col <= pc {
+                // The posterior path is not monotone: no clean alignment.
+                return None;
+            }
+            if col > pc + 1 {
+                consider(Indel { is_ins: false, ref_off: pc + 1, len: col - pc - 1, bases: Vec::new() }, &mut best);
             }
         }
+        if !read[i].eq_ignore_ascii_case(&refw[col]) {
+            mmc += 1;
+        }
+        prev_col = Some(col);
+        i += 1;
     }
-    // ignore indels flush against the window ends (likely artifacts)
+    // Indels flush against the window ends are likely artifacts.
     match best {
         Some(b) if b.ref_off > 0 && b.ref_off < m => Some((b, mmc)),
         _ => None,
@@ -110,7 +82,7 @@ pub fn discover_indel(read: &[u8], refw: &[u8]) -> Option<(Indel, u32)> {
 }
 
 /// Apply `ind` to the reference window, returning the alt haplotype.
-fn apply_indel(refw: &[u8], ind: &Indel) -> Vec<u8> {
+pub fn apply_indel(refw: &[u8], ind: &Indel) -> Vec<u8> {
     let mut h = Vec::with_capacity(refw.len() + ind.len);
     h.extend_from_slice(&refw[..ind.ref_off]);
     if ind.is_ins {
@@ -129,26 +101,26 @@ pub struct AssembledCall {
     pub alt_str: String,
     pub support: u32,
     pub total: u32,
+    /// Window and the two haplotypes the reads are scored against.
+    pub win_lo: u32,
+    pub win_hi: u32,
+    pub hap_ref: Vec<u8>,
+    pub hap_alt: Vec<u8>,
 }
 
 /// Recover the best clean indel near a window. Each read votes for the indel its
 /// realignment implies, but only if it fits cleanly (`<= max_mm` residual
 /// mismatches over the window). The indel with the most clean votes wins if it
 /// clears `min_support`. `win_lo` is the 0-based genomic start of `refw`.
-/// Validated operating point: ~50bp window, max_mm=3, min_support=3.
-pub fn assemble_indel(
-    reads: &[&LiveRead],
-    win_lo: u32,
-    refw: &[u8],
-    min_support: u32,
-    max_mm: u32,
-) -> Option<AssembledCall> {
+pub fn assemble_indel(reads: &[LiveRead], win_lo: u32, refw: &[u8], min_support: u32, max_mm: u32) -> Option<AssembledCall> {
     let hi = win_lo + refw.len() as u32;
     let mut votes: std::collections::HashMap<Indel, u32> = std::collections::HashMap::new();
     let mut total = 0u32;
     for lr in reads {
         let Some(sub) = lr.query_window(win_lo, hi) else { continue };
-        if sub.len() < 12 { continue; }
+        if sub.len() < 12 {
+            continue;
+        }
         total += 1;
         if let Some((ind, mm)) = discover_indel(&sub, refw) {
             if mm <= max_mm {
@@ -156,27 +128,79 @@ pub fn assemble_indel(
             }
         }
     }
-    if total == 0 || votes.is_empty() { return None; }
+    if total == 0 || votes.is_empty() {
+        return None;
+    }
     let (ind, support) = votes.into_iter().max_by_key(|(_, c)| *c)?;
-    if support < min_support { return None; }
-    // build the VCF record (anchor = base just before the indel)
-    if ind.ref_off == 0 { return None; }
+    if support < min_support || ind.ref_off == 0 {
+        return None;
+    }
     let anchor_idx = ind.ref_off - 1;
     let anchor_base = refw[anchor_idx] as char;
     let pos1 = (win_lo as u64) + anchor_idx as u64 + 1;
     let (ref_str, alt_str) = if ind.is_ins {
         let mut a = String::with_capacity(1 + ind.len);
         a.push(anchor_base);
-        for &b in &ind.bases { a.push(b as char); }
+        for &b in &ind.bases {
+            a.push(b as char);
+        }
         (anchor_base.to_string(), a)
     } else {
         let end = (ind.ref_off + ind.len).min(refw.len());
         let mut r = String::with_capacity(1 + ind.len);
         r.push(anchor_base);
-        for &b in &refw[ind.ref_off..end] { r.push(b as char); }
+        for &b in &refw[ind.ref_off..end] {
+            r.push(b as char);
+        }
         (r, anchor_base.to_string())
     };
-    Some(AssembledCall { pos1, ref_str, alt_str, support, total })
+    let hap_alt = apply_indel(refw, &ind);
+    Some(AssembledCall { pos1, ref_str, alt_str, support, total, win_lo, win_hi: hi, hap_ref: refw.to_vec(), hap_alt })
+}
+
+/// Per-sample evidence for a two-haplotype site.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct HapSample {
+    /// PL for 0/0, 0/1, 1/1 (capped at 255).
+    pub pl: [u32; 3],
+    pub n_ref: u32,
+    pub n_alt: u32,
+}
+
+/// Genotype likelihoods from read-vs-haplotype likelihoods: P(read | 0/1)
+/// is the mean of the two haplotype likelihoods.
+pub fn haplotype_pls(reads: &[LiveRead], n_samples: usize, call: &AssembledCall) -> Vec<HapSample> {
+    let mut ll = vec![[0.0f64; 3]; n_samples];
+    let mut out = vec![HapSample::default(); n_samples];
+    let ln2 = std::f64::consts::LN_2;
+    for lr in reads {
+        let Some((bases, quals)) = lr.query_window_qual(call.win_lo, call.win_hi) else { continue };
+        if bases.len() < 12 || lr.sample_idx >= n_samples {
+            continue;
+        }
+        let lr_ref = read_vs_hap_loglik(&bases, &quals, &call.hap_ref);
+        let lr_alt = read_vs_hap_loglik(&bases, &quals, &call.hap_alt);
+        if !lr_ref.is_finite() || !lr_alt.is_finite() {
+            continue;
+        }
+        let s = &mut ll[lr.sample_idx];
+        s[0] += lr_ref;
+        s[2] += lr_alt;
+        let m = lr_ref.max(lr_alt);
+        s[1] += m + ((lr_ref - m).exp() + (lr_alt - m).exp()).ln() - ln2;
+        if lr_alt > lr_ref {
+            out[lr.sample_idx].n_alt += 1;
+        } else {
+            out[lr.sample_idx].n_ref += 1;
+        }
+    }
+    for (o, l) in out.iter_mut().zip(ll.iter()) {
+        let max = l.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        for k in 0..3 {
+            o.pl[k] = ((-4.343 * (l[k] - max)) + 0.499).clamp(0.0, 255.0) as u32;
+        }
+    }
+    out
 }
 
 #[cfg(test)]

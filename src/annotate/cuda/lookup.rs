@@ -340,6 +340,7 @@ impl GpuAni {
         }
         let n = keys.len();
         let d_keys = DeviceBuffer::from_slice(keys)?;
+        // SAFETY: every slot is written by the kernel before the buffer is copied back.
         let mut d_out: DeviceBuffer<u32> = unsafe { DeviceBuffer::uninitialized(n)? };
         let func = self.module.get_function("ani_ptrhash25_lookup_kernel")?;
         let threads_per_block: u32 = 256;
@@ -357,6 +358,8 @@ impl GpuAni {
             .as_ref()
             .map(|fp| fp.as_device_ptr().as_raw())
             .unwrap_or(0);
+        // SAFETY: the argument list matches the kernel's PTX signature and every
+        // device buffer outlives the launch (the stream is synchronized below).
         unsafe {
             cust::launch!(func<<<blocks, threads_per_block, 0, stream>>>(
                 d_keys.as_device_ptr(),
@@ -564,6 +567,8 @@ impl GpuAni {
         let func = self.module.get_function("ani_pos_lookup_kernel")?;
 
         let stream = &self.stream;
+        // SAFETY: the argument list matches the kernel's PTX signature and every
+        // device buffer outlives the launch (the stream is synchronized below).
         unsafe {
             launch!(
                 func<<<blocks, threads, 0, stream>>>(
@@ -605,6 +610,8 @@ impl GpuLookupBuffers {
         Ok(Self {
             out: vec![0u32; capacity],
             capacity,
+            // SAFETY: inputs are uploaded and outputs are written by the kernel
+            // before any of these buffers is read.
             d_chr: unsafe { DeviceBuffer::uninitialized(capacity)? },
             d_pos: unsafe { DeviceBuffer::uninitialized(capacity)? },
             d_out_offsets: unsafe { DeviceBuffer::uninitialized(capacity)? },
@@ -621,6 +628,7 @@ impl GpuLookupBuffers {
             return Ok(());
         }
         self.out = vec![0u32; capacity];
+        // SAFETY: as in `new`, the buffers are fully written before being read.
         self.d_chr = unsafe { DeviceBuffer::uninitialized(capacity)? };
         self.d_pos = unsafe { DeviceBuffer::uninitialized(capacity)? };
         self.d_out_offsets = unsafe { DeviceBuffer::uninitialized(capacity)? };
@@ -1231,11 +1239,14 @@ fn gpu_merge_info_batch(
     let d_alt_entry_idx = DeviceBuffer::from_slice(alt_entry_idx)?;
     let d_alt_offsets = DeviceBuffer::from_slice(alt_offsets)?;
     let d_alt_counts = DeviceBuffer::from_slice(alt_counts)?;
+    // SAFETY: every slot is written by the kernel before the buffer is copied back.
     let d_out = unsafe { DeviceBuffer::uninitialized(total)? };
     let func = gpu.module.get_function("ani_info_merge_kernel")?;
     let threads = 256;
     let blocks = ((total as u32) + threads - 1) / threads;
     let stream = &gpu.stream;
+    // SAFETY: the argument list matches the kernel's PTX signature and every
+    // device buffer outlives the launch (the stream is synchronized below).
     unsafe {
         launch!(
             func<<<blocks, threads, 0, stream>>>(
@@ -2803,11 +2814,14 @@ struct PinnedHostRegion {
     ptr: *mut std::ffi::c_void,
 }
 
+// SAFETY: the guard only carries the raw pointer needed to unregister; CUDA host
+// registration is process-wide, not bound to the registering thread.
 unsafe impl Send for PinnedHostRegion {}
 unsafe impl Sync for PinnedHostRegion {}
 
 impl Drop for PinnedHostRegion {
     fn drop(&mut self) {
+        // SAFETY: `ptr` was registered by `pin_for_dma` and is unregistered once.
         unsafe {
             let _ = cust::sys::cuMemHostUnregister(self.ptr);
         }
@@ -2822,6 +2836,8 @@ fn pin_for_dma(slice: &[u8]) -> Option<PinnedHostRegion> {
         return None;
     }
     let ptr = slice.as_ptr() as *mut std::ffi::c_void;
+    // SAFETY: `ptr`/`len` describe a live slice that the caller keeps alive for
+    // as long as the returned guard exists; registration does not write to it.
     let rc = unsafe { cust::sys::cuMemHostRegister_v2(ptr, slice.len(), 0) };
     if rc != cust::sys::cudaError_enum::CUDA_SUCCESS {
         return None;

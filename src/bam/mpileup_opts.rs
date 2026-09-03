@@ -17,9 +17,16 @@ pub struct AnnotateSpec {
     pub info_scr: bool,
     pub fmt_pl: bool,
     pub fmt_gq: bool,
+    /// FORMAT/DV: non-reference depth (deprecated bcftools tag).
+    pub fmt_dv: bool,
+    /// FORMAT/DP4: ref-fwd, ref-rev, alt-fwd, alt-rev.
+    pub fmt_dp4: bool,
+    pub info_dp4: bool,
 }
 
 impl AnnotateSpec {
+    /// bcftools syntax: comma list of tags, `FORMAT/`/`FMT/`/`INFO/` prefixes,
+    /// a leading `-` removes a tag; unknown tags are reported and ignored.
     pub fn parse(spec: Option<&str>) -> Result<Self> {
         let mut s = Self { fmt_ad: true, fmt_dp: true, fmt_pl: true, ..Default::default() };
         let Some(spec) = spec else { return Ok(s); };
@@ -27,24 +34,39 @@ impl AnnotateSpec {
         s.fmt_pl = true;
         for tok in spec.split(',') {
             let t = tok.trim();
-            let upper = t.to_uppercase();
-            match upper.as_str() {
-                "FORMAT/AD" | "FMT/AD" | "AD" => s.fmt_ad = true,
-                "FORMAT/DP" | "FMT/DP" | "DP" => s.fmt_dp = true,
-                "FORMAT/QS" | "FMT/QS" | "QS" => s.fmt_qs = true,
-                "FORMAT/SP" | "FMT/SP" | "SP" => s.fmt_sp = true,
-                "FORMAT/ADF" | "FMT/ADF" | "ADF" => s.fmt_adf = true,
-                "FORMAT/ADR" | "FMT/ADR" | "ADR" => s.fmt_adr = true,
-                "FORMAT/SCR" | "FMT/SCR" | "SCR" => s.fmt_scr = true,
-                "FORMAT/PL" | "FMT/PL" | "PL" => s.fmt_pl = true,
-                "FORMAT/GQ" | "FMT/GQ" | "GQ" => s.fmt_gq = true,
-                "INFO/AD" => s.info_ad = true,
-                "INFO/ADF" => s.info_adf = true,
-                "INFO/ADR" => s.info_adr = true,
-                "INFO/SCR" => s.info_scr = true,
-                "" => {}
-                other => bail!("--annotate: unknown tag {other:?}"),
-            }
+            let (on, name) = match t.strip_prefix('-') {
+                Some(n) => (false, n),
+                None => (true, t),
+            };
+            let upper = name.to_uppercase();
+            let flag: Option<&mut bool> = match upper.as_str() {
+                "FORMAT/AD" | "FMT/AD" | "AD" | "FORMAT/DPR" | "FMT/DPR" | "DPR" => Some(&mut s.fmt_ad),
+                "FORMAT/DP" | "FMT/DP" | "DP" => Some(&mut s.fmt_dp),
+                "FORMAT/QS" | "FMT/QS" | "QS" => Some(&mut s.fmt_qs),
+                "FORMAT/SP" | "FMT/SP" | "SP" => Some(&mut s.fmt_sp),
+                "FORMAT/ADF" | "FMT/ADF" | "ADF" => Some(&mut s.fmt_adf),
+                "FORMAT/ADR" | "FMT/ADR" | "ADR" => Some(&mut s.fmt_adr),
+                "FORMAT/SCR" | "FMT/SCR" | "SCR" => Some(&mut s.fmt_scr),
+                "FORMAT/PL" | "FMT/PL" | "PL" => Some(&mut s.fmt_pl),
+                "FORMAT/GQ" | "FMT/GQ" | "GQ" => Some(&mut s.fmt_gq),
+                "FORMAT/DV" | "FMT/DV" | "DV" => Some(&mut s.fmt_dv),
+                "FORMAT/DP4" | "FMT/DP4" | "DP4" => Some(&mut s.fmt_dp4),
+                "INFO/AD" | "INFO/DPR" => Some(&mut s.info_ad),
+                "INFO/ADF" => Some(&mut s.info_adf),
+                "INFO/ADR" => Some(&mut s.info_adr),
+                "INFO/SCR" => Some(&mut s.info_scr),
+                "INFO/DP4" => Some(&mut s.info_dp4),
+                "" => None,
+                other => {
+                    if other.starts_with("INFO/") || other.starts_with("FORMAT/") || other.starts_with("FMT/") {
+                        eprintln!("[mpileup] warning: annotation {t:?} is not supported and is ignored");
+                        None
+                    } else {
+                        bail!("--annotate: unknown tag {t:?}");
+                    }
+                }
+            };
+            if let Some(f) = flag { *f = on; }
         }
         Ok(s)
     }
@@ -90,6 +112,10 @@ impl PresetConfig {
 pub struct FlagFilters {
     pub require_flags: u16,
     pub exclude_flags: u16,
+    /// `--skip-all-set`: drop reads with every listed bit set.
+    pub skip_all_set: u16,
+    /// `--skip-all-unset`: drop reads with every listed bit unset.
+    pub skip_all_unset: u16,
     pub include_proper_pair_only: bool,
     pub exclude_proper_pair: bool,
 }
@@ -99,6 +125,8 @@ impl FlagFilters {
         Self {
             exclude_flags: ef.unwrap_or(0) as u16 | df.unwrap_or(0) as u16,
             require_flags: if_.unwrap_or(0) as u16 | nf.unwrap_or(0) as u16,
+            skip_all_set: 0,
+            skip_all_unset: 0,
             include_proper_pair_only: false,
             exclude_proper_pair: false,
         }
@@ -112,9 +140,21 @@ impl FlagFilters {
         Ok(s)
     }
 
+    pub fn with_skip_all(mut self, all_set: Option<&str>, all_unset: Option<&str>) -> Result<Self> {
+        if let Some(t) = all_set { self.skip_all_set |= parse_sam_flags(t)?; }
+        if let Some(t) = all_unset { self.skip_all_unset |= parse_sam_flags(t)?; }
+        Ok(self)
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.require_flags != 0 || self.exclude_flags != 0 || self.skip_all_set != 0 || self.skip_all_unset != 0
+    }
+
     pub fn passes(&self, flags: u16) -> bool {
         if self.require_flags != 0 && (flags & self.require_flags) != self.require_flags { return false; }
         if self.exclude_flags != 0 && (flags & self.exclude_flags) != 0 { return false; }
+        if self.skip_all_set != 0 && (flags & self.skip_all_set) == self.skip_all_set { return false; }
+        if self.skip_all_unset != 0 && (flags & self.skip_all_unset) == 0 { return false; }
         true
     }
 }

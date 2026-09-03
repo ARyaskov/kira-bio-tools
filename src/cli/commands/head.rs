@@ -6,7 +6,7 @@ use std::io::{Cursor, Read};
 use crate::cli::args::HeadArgs;
 
 pub fn cmd_head(args: HeadArgs) -> Result<()> {
-    let mut argv: Vec<String> = vec![args.input.to_string_lossy().into_owned()];
+    let mut argv: Vec<String> = args.input.iter().map(|p| p.to_string_lossy().into_owned()).collect();
     if args.headers >= 0 { argv.push("-h".into()); argv.push(args.headers.to_string()); }
     if args.records >= 0 { argv.push("-n".into()); argv.push(args.records.to_string()); }
     if args.samples >= 0 { argv.push("-s".into()); argv.push(args.samples.to_string()); }

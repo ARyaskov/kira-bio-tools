@@ -3,7 +3,9 @@ use std::fs::OpenOptions;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-pub type ChrId = u8;
+/// Contig id: index into the source's contig dictionary (header order, then
+/// order of first appearance). Never derived from the contig name.
+pub type ChrId = u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GenomicKey(u64);
@@ -35,6 +37,9 @@ impl GenomicKey {
     }
 }
 
+/// Canonical human chromosome number (1-22, X=23, Y=24, MT=25). Only used by
+/// the annotation engine as a fallback key space; everything else resolves
+/// contigs through the header dictionary.
 pub fn chr_name_to_id(name: &str) -> Option<u8> {
     let n = name.trim().trim_start_matches("chr");
 
@@ -65,19 +70,6 @@ pub fn chr_name_to_id(name: &str) -> Option<u8> {
         "Y" => Some(24),
         "MT" | "M" => Some(25),
         _ => None,
-    }
-}
-
-pub fn chr_id_to_name(id: ChrId) -> Option<&'static str> {
-    static NAMES: [&str; 25] = [
-        "chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11",
-        "chr12", "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19", "chr20", "chr21",
-        "chr22", "chrX", "chrY", "chrM",
-    ];
-    if id >= 1 && id <= 25 {
-        Some(NAMES[(id - 1) as usize])
-    } else {
-        None
     }
 }
 
@@ -143,6 +135,28 @@ impl Drop for Timer {
     }
 }
 
+/// C `%g` with six significant digits, as htslib prints floats.
+pub fn fmt_g(v: f64) -> String {
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    if !v.is_finite() {
+        return if v.is_nan() { "nan".into() } else if v > 0.0 { "inf".into() } else { "-inf".into() };
+    }
+    let trim = |s: &str| -> String {
+        if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s.to_string() }
+    };
+    let exp = v.abs().log10().floor() as i32;
+    if exp < -4 || exp >= 6 {
+        let s = format!("{:.5e}", v);
+        let (mant, e) = s.split_once('e').unwrap_or((s.as_str(), "0"));
+        let e: i32 = e.parse().unwrap_or(0);
+        format!("{}e{}{:02}", trim(mant), if e < 0 { '-' } else { '+' }, e.abs())
+    } else {
+        trim(&format!("{:.*}", (5 - exp).max(0) as usize, v))
+    }
+}
+
 pub fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -159,80 +173,78 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
-#[inline]
-#[allow(dead_code)]
-fn parse_chromosome_fast(bytes: &[u8]) -> Option<ChrId> {
-    let bytes = if bytes.len() > 3 && &bytes[..3] == b"chr" {
-        &bytes[3..]
-    } else {
-        bytes
-    };
-
-    match bytes {
-        b"X" | b"x" => Some(23),
-        b"Y" | b"y" => Some(24),
-        b"M" | b"MT" | b"m" | b"mt" => Some(25),
-        _ if bytes.len() <= 2 && bytes.iter().all(|b| b.is_ascii_digit()) => {
-            let mut num = 0u8;
-            for &byte in bytes {
-                num = num.wrapping_mul(10).wrapping_add(byte - b'0');
-            }
-            if (1..=22).contains(&num) {
-                Some(num)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-#[inline]
-#[allow(dead_code)]
-fn parse_u32_fast(bytes: &[u8]) -> Option<u32> {
-    if bytes.is_empty() || bytes.len() > 10 {
-        return None;
-    }
-    let mut result = 0u32;
-    for &byte in bytes {
-        if !byte.is_ascii_digit() {
-            return None;
-        }
-        result = result.wrapping_mul(10).wrapping_add((byte - b'0') as u32);
-    }
-    Some(result)
-}
-
+/// A genomic region, 1-based inclusive. `start`/`end` are `None` when the
+/// region names a whole contig.
+#[derive(Debug, Clone)]
 pub struct Region {
     pub chr: String,
     pub start: Option<u32>,
     pub end: Option<u32>,
 }
 
+/// Parse a decimal that may contain thousands separators (`1,000,000`) or an
+/// SI suffix (`1k`, `2M`, `3G`), as htslib does.
+pub fn parse_coordinate(s: &str) -> Option<u32> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num, mult): (&str, u64) = match s.as_bytes()[s.len() - 1].to_ascii_lowercase() {
+        b'k' => (&s[..s.len() - 1], 1_000),
+        b'm' => (&s[..s.len() - 1], 1_000_000),
+        b'g' => (&s[..s.len() - 1], 1_000_000_000),
+        _ => (s, 1),
+    };
+    let cleaned: String = num.chars().filter(|c| *c != ',').collect();
+    if cleaned.is_empty() || !cleaned.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let v: u64 = cleaned.parse().ok()?;
+    u32::try_from(v.checked_mul(mult)?).ok()
+}
+
 impl Region {
-    pub fn parse(s: &str) -> Option<Self> {
-        if let Some((chr, range)) = s.split_once(':') {
-            if let Some((start, end)) = range.split_once('-') {
-                Some(Region {
-                    chr: chr.to_string(),
-                    start: start.parse().ok(),
-                    end: end.parse().ok(),
-                })
-            } else {
-                let pos: u32 = range.parse().ok()?;
-                Some(Region {
-                    chr: chr.to_string(),
-                    start: Some(pos),
-                    end: Some(pos),
-                })
-            }
-        } else {
-            Some(Region {
-                chr: s.to_string(),
-                start: None,
-                end: None,
-            })
+    /// Parse `chr`, `chr:beg-end`, `chr:beg-` or `chr:pos`. With
+    /// `one_coord`, `chr:pos` is a single position (bcftools); otherwise it
+    /// runs to the end of the contig (tabix/samtools).
+    pub fn parse_with(s: &str, one_coord: bool) -> Option<Self> {
+        let s = s.trim();
+        if s.is_empty() {
+            return None;
         }
+        // The last ':' separates the range so contig names may contain ':'.
+        let Some(colon) = s.rfind(':') else {
+            return Some(Region { chr: s.to_string(), start: None, end: None });
+        };
+        let (chr, range) = (&s[..colon], &s[colon + 1..]);
+        if chr.is_empty() {
+            return None;
+        }
+        if range.is_empty() {
+            return Some(Region { chr: chr.to_string(), start: None, end: None });
+        }
+        match range.split_once('-') {
+            Some((b, e)) => {
+                let start = if b.is_empty() { 1 } else { parse_coordinate(b)? };
+                let end = if e.is_empty() { u32::MAX } else { parse_coordinate(e)? };
+                Some(Region { chr: chr.to_string(), start: Some(start.max(1)), end: Some(end) })
+            }
+            None => {
+                let pos = parse_coordinate(range)?;
+                let end = if one_coord { pos } else { u32::MAX };
+                Some(Region { chr: chr.to_string(), start: Some(pos.max(1)), end: Some(end) })
+            }
+        }
+    }
+
+    /// bcftools semantics (`chr:pos` is one position).
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::parse_with(s, true)
+    }
+
+    /// 1-based inclusive bounds, `1..=u32::MAX` for a whole contig.
+    pub fn bounds(&self) -> (u32, u32) {
+        (self.start.unwrap_or(1), self.end.unwrap_or(u32::MAX))
     }
 }
 
@@ -415,6 +427,8 @@ impl MmapWriter {
             .truncate(true)
             .open(path)?;
         file.set_len(size as u64)?;
+        // SAFETY: the file was just created and sized by this process; no other
+        // mapping or writer touches it while the map is alive.
         let map = unsafe { MmapMut::map_mut(&file)? };
         Ok(Self {
             file,
@@ -456,8 +470,14 @@ impl MmapWriter {
         }
         self.map.flush()?;
         self.file.set_len(new_size as u64)?;
+        // SAFETY: the previous map was flushed and is replaced here; the file is
+        // owned by this writer and not shared.
         self.map = unsafe { MmapMut::map_mut(&self.file)? };
         self.map_size = new_size;
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/util.rs"]
+mod tests;

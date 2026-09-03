@@ -2,7 +2,11 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct ReheaderArgs {
+    #[arg(long = "help", action = clap::ArgAction::Help, help = "Print help")]
+    pub help: Option<bool>,
+
     pub input: PathBuf,
 
     #[arg(short = 'h', long = "header")]
@@ -29,6 +33,6 @@ pub struct ReheaderArgs {
     #[arg(short = 'v', long = "verbosity", default_value_t = 1)]
     pub verbosity: u8,
 
-    #[arg(last = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    #[arg(last = true, allow_hyphen_values = true)]
     pub passthrough: Vec<String>,
 }

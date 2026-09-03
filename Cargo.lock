@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "kira-bio-tools"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1044,6 +1044,7 @@ dependencies = [
  "kira-ls-aligner",
  "kira_kv_engine",
  "lazy_static",
+ "libdeflater",
  "memchr",
  "memmap2",
  "noodles-bam",
@@ -1053,7 +1054,6 @@ dependencies = [
  "noodles-csi",
  "noodles-fasta",
  "noodles-sam",
- "num_cpus",
  "once_cell",
  "percent-encoding",
  "pest",

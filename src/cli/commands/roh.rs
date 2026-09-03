@@ -378,19 +378,9 @@ impl Region {
 }
 
 fn parse_region(s: &str) -> Option<Region> {
-    if let Some((chrom, tail)) = s.split_once(':') {
-        if let Some((a, b)) = tail.split_once('-') {
-            return Some(Region {
-                chrom: chrom.to_string(),
-                start: a.parse::<u32>().ok(),
-                end: b.parse::<u32>().ok(),
-            });
-        }
-        return Some(Region {
-            chrom: chrom.to_string(),
-            start: None,
-            end: None,
-        });
+    if s.contains(':') {
+        let (chrom, beg, end) = crate::regions::parse_region_spec(s).ok()?;
+        return Some(Region { chrom, start: Some(beg), end: (end != u32::MAX).then_some(end) });
     }
     Some(Region {
         chrom: s.to_string(),

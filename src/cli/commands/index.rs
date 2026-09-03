@@ -1,239 +1,180 @@
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
-use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::cli::args::{IndexArgs, RegionIndexArgs};
-use crate::{
-    VcfFormat, VcfReader, build_csi_index, build_kbi_index, detect_format, read_csi_index,
-};
+use crate::csi::{BinIndex, IndexKind, build_index, build_index_in_memory, find_index_for};
+use crate::vcf::header::HeaderInfo;
+use crate::{VcfFormat, VcfReader, build_kbi_index, detect_format};
 
 pub fn cmd_index(args: IndexArgs) -> Result<()> {
-    let cfg = IndexCompatCfg {
+    let mut cfg = IndexCompatCfg {
         tbi: args.tbi,
-        csi: args.csi && !args.tbi,
         force: args.force,
         stats: args.stats,
         num: args.nrecords,
+        all: args.all,
+        min_shift: args.min_shift as u8,
         output: args.output.clone(),
     };
-    let _ = parse_index_compat_args(&args.passthrough)?;
+    apply_passthrough(&mut cfg, &args.passthrough)?;
 
     if cfg.stats {
-        print_stats_from_input(&args.input, args.all)?;
-        return Ok(());
+        return print_stats(&args.input, cfg.all);
     }
     if cfg.num {
-        print_num_from_input_or_index(&args.input)?;
-        return Ok(());
+        return print_num(&args.input);
     }
 
-    // kira-bt produces CSI indexes (htslib/bcftools read `.csi`). Legacy TBI is not emitted; `-t`/
-    // `--tbi` is accepted for bcftools muscle-memory but still yields a working `.csi` (previously it
-    // wrote a 4-byte stub that shadowed and broke an existing bcftools `.tbi`).
-    let out = resolve_index_output(&args.input, &cfg);
+    let kind = if cfg.tbi { IndexKind::Tbi } else { IndexKind::Csi };
+    let out = resolve_index_output(&args.input, &cfg, kind);
     if out.exists() && !cfg.force {
-        anyhow::bail!("index file already exists (use -f to overwrite): {}", out.display());
+        bail!("index file already exists (use -f to overwrite): {}", out.display());
     }
-    if cfg.tbi {
-        eprintln!(
-            "[kira-bt index] note: producing a CSI index (htslib/bcftools-compatible); legacy .tbi is not generated -> {}",
-            out.display()
-        );
+    if !(1..=30).contains(&cfg.min_shift) {
+        bail!("--min-shift must be between 1 and 30");
     }
-    if is_bcf_or_bcf_index_path(&args.input) {
-        let mut f = fs::File::create(&out)?;
-        f.write_all(b"CSI\x01")?;
-    } else {
-        build_csi_index(&args.input, &out)?;
-    }
+    build_index(&args.input, &out, kind, Some(cfg.min_shift))?;
     Ok(())
 }
 
 #[derive(Default)]
 struct IndexCompatCfg {
     tbi: bool,
-    csi: bool,
     force: bool,
     stats: bool,
     num: bool,
+    all: bool,
+    min_shift: u8,
     output: Option<PathBuf>,
 }
 
-fn parse_index_compat_args(args: &[String]) -> Result<IndexCompatCfg> {
-    let mut cfg = IndexCompatCfg::default();
+fn apply_passthrough(cfg: &mut IndexCompatCfg, args: &[String]) -> Result<()> {
     let mut i = 0usize;
     while i < args.len() {
         match args[i].as_str() {
-            "--tbi" => cfg.tbi = true,
-            "--csi" => cfg.csi = true,
+            "-t" | "--tbi" => cfg.tbi = true,
+            "-c" | "--csi" => cfg.tbi = false,
             "-f" | "--force" => cfg.force = true,
             "-s" | "--stats" => cfg.stats = true,
             "-n" | "--nrecords" => cfg.num = true,
+            "-a" | "--all" => cfg.all = true,
+            "-m" | "--min-shift" => {
+                i += 1;
+                let v = args.get(i).ok_or_else(|| anyhow::anyhow!("missing value for -m/--min-shift"))?;
+                cfg.min_shift = v.parse().with_context(|| format!("bad --min-shift {v:?}"))?;
+            }
             "-o" | "--output" => {
                 i += 1;
-                let p = args
-                    .get(i)
-                    .ok_or_else(|| anyhow::anyhow!("missing value for -o/--output"))?;
+                let p = args.get(i).ok_or_else(|| anyhow::anyhow!("missing value for -o/--output"))?;
                 cfg.output = Some(PathBuf::from(p));
             }
-            _ => {}
+            "--threads" => {
+                i += 1;
+            }
+            other => {
+                if let Some(v) = other.strip_prefix("-m") {
+                    cfg.min_shift = v.parse().with_context(|| format!("bad --min-shift {v:?}"))?;
+                } else {
+                    bail!("index: unknown option {other:?}");
+                }
+            }
         }
         i += 1;
     }
-    Ok(cfg)
+    Ok(())
 }
 
-fn resolve_index_output(input: &Path, cfg: &IndexCompatCfg) -> PathBuf {
+fn resolve_index_output(input: &Path, cfg: &IndexCompatCfg, kind: IndexKind) -> PathBuf {
     if let Some(p) = &cfg.output {
         return p.clone();
     }
-    // Always a CSI sidecar (`<input>.csi`); `-t`/`--tbi` no longer changes the format.
-    let mut p = input.to_path_buf();
-    let name = input
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "in.vcf.gz".to_string());
-    p.set_file_name(format!("{name}.csi"));
-    p
+    let mut s = input.as_os_str().to_os_string();
+    s.push(match kind {
+        IndexKind::Csi => ".csi",
+        IndexKind::Tbi => ".tbi",
+    });
+    PathBuf::from(s)
 }
 
-fn print_num_from_input_or_index(input: &Path) -> Result<()> {
-    if input
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("csi"))
-        .unwrap_or(false)
-    {
-        let base = strip_index_suffix(input);
-        if base.exists() {
-            let (mut reader, _headers) = open_reader_with_bcf_header_fallback(&base)?;
-            let mut n = 0usize;
-            while reader.next_record()?.is_some() {
-                n += 1;
-            }
-            println!("{n}");
-            return Ok(());
-        }
-        if let Ok(idx) = read_csi_index(input) {
-            println!("{}", idx.reference_sequences().len());
-            return Ok(());
-        }
-        let n = count_reference_sequences_in_header(&base)?;
-        println!("{n}");
-        return Ok(());
-    }
-
-    let (mut reader, _headers) = open_reader_with_bcf_header_fallback(input)?;
-    let mut n = 0usize;
-    while reader.next_record()?.is_some() {
-        n += 1;
-    }
-    println!("{n}");
-    Ok(())
-}
-
-fn print_stats_from_input(input: &Path, show_all: bool) -> Result<()> {
-    let (mut reader, headers) = open_reader_with_bcf_header_fallback(input)?;
-    let contigs = parse_contig_lengths(&headers);
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    while let Some(rec) = reader.next_record()? {
-        *counts.entry(rec.chrom).or_insert(0) += 1;
-    }
-    for (id, len) in &contigs {
-        let n = counts.get(id).copied().unwrap_or(0);
-        if show_all || n > 0 {
-            println!("{}\t{}\t{}", id, len, n);
-        }
-    }
-    if show_all {
-        for (chr, n) in &counts {
-            if !contigs.iter().any(|(c, _)| c == chr) {
-                println!("{}\t.\t{}", chr, n);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn parse_contig_lengths(headers: &[String]) -> Vec<(String, u64)> {
-    let mut out = Vec::new();
-    for h in headers {
-        if !h.starts_with("##contig=<") {
-            continue;
-        }
-        let body = h.trim_start_matches("##contig=<").trim_end_matches('>');
-        let mut id = None::<String>;
-        let mut len = None::<u64>;
-        for part in body.split(',') {
-            if let Some(v) = part.strip_prefix("ID=") {
-                id = Some(v.to_string());
-            } else if let Some(v) = part.strip_prefix("length=") {
-                len = v.parse::<u64>().ok();
-            }
-        }
-        if let (Some(i), Some(l)) = (id, len) {
-            out.push((i, l));
-        }
-    }
-    out
-}
-
-fn strip_index_suffix(path: &Path) -> PathBuf {
+fn strip_index_suffix(path: &Path) -> Option<PathBuf> {
     let s = path.to_string_lossy();
-    if let Some(b) = s.strip_suffix(".csi") {
-        return PathBuf::from(b);
-    }
-    if let Some(b) = s.strip_suffix(".tbi") {
-        return PathBuf::from(b);
-    }
-    path.to_path_buf()
-}
-
-fn count_reference_sequences_in_header(input: &Path) -> Result<usize> {
-    let mut reader = VcfReader::open(input)?;
-    let headers = reader.header()?;
-    Ok(headers
-        .iter()
-        .filter(|h| h.starts_with("##contig=<"))
-        .count())
-}
-
-fn is_bcf_or_bcf_index_path(path: &Path) -> bool {
-    let s = path.to_string_lossy().to_ascii_lowercase();
-    s.ends_with(".bcf") || s.ends_with(".bcf.csi") || s.ends_with(".bcf.tbi")
-}
-
-fn open_reader_with_bcf_fallback(path: &Path) -> Result<VcfReader> {
-    match VcfReader::open(path) {
-        Ok(r) => Ok(r),
-        Err(e) => {
-            let s = path.to_string_lossy().to_ascii_lowercase();
-            if !s.ends_with(".bcf") {
-                return Err(e.into());
-            }
-            let alt = path.with_extension("vcf");
-            VcfReader::open(&alt).map_err(anyhow::Error::from)
+    for suf in [".csi", ".tbi"] {
+        if let Some(b) = s.strip_suffix(suf) {
+            return Some(PathBuf::from(b));
         }
     }
+    None
 }
 
-fn open_reader_with_bcf_header_fallback(path: &Path) -> Result<(VcfReader, Vec<String>)> {
-    let mut r = open_reader_with_bcf_fallback(path)?;
-    let h = r.header()?;
-    if !h.is_empty() {
-        return Ok((r, h));
+/// The data file and its index for `-n`/`-s`: `input` may be the data file
+/// or the index itself. Builds the index in memory when none is on disk.
+fn load_data_and_index(input: &Path) -> Result<(PathBuf, BinIndex)> {
+    if let Some(base) = strip_index_suffix(input) {
+        let idx = BinIndex::load(input).with_context(|| format!("read index {}", input.display()))?;
+        return Ok((base, idx));
     }
-    let s = path.to_string_lossy().to_ascii_lowercase();
-    if s.ends_with(".bcf") {
-        let alt = path.with_extension("vcf");
-        let mut ar = VcfReader::open(&alt)?;
-        let ah = ar.header()?;
-        return Ok((ar, ah));
+    if let Some(p) = find_index_for(input) {
+        let idx = BinIndex::load(&p).with_context(|| format!("read index {}", p.display()))?;
+        return Ok((input.to_path_buf(), idx));
     }
-    Ok((r, h))
+    let idx = build_index_in_memory(input, IndexKind::Csi, None)
+        .with_context(|| format!("no index for {} and it could not be built", input.display()))?;
+    Ok((input.to_path_buf(), idx))
+}
+
+/// Contig names in index order with their header lengths.
+fn contig_table(data: &Path, idx: &BinIndex) -> Result<Vec<(String, Option<u64>)>> {
+    let mut names: Vec<String> = idx.names().to_vec();
+    let info = if data.exists() {
+        let mut r = VcfReader::open(data)?;
+        let h = r.header()?;
+        Some(HeaderInfo::parse(&h))
+    } else {
+        None
+    };
+    if names.is_empty() {
+        // BCF index: names come from the header in rid order.
+        if let Some(i) = &info {
+            names = i.contigs.names().to_vec();
+        }
+    }
+    Ok(names
+        .into_iter()
+        .map(|n| {
+            let len = info.as_ref().and_then(|i| i.contigs.id(&n).and_then(|id| i.contigs.length(id)));
+            (n, len)
+        })
+        .collect())
+}
+
+fn print_num(input: &Path) -> Result<()> {
+    let (_, idx) = load_data_and_index(input)?;
+    println!("{}", idx.total_records());
+    Ok(())
+}
+
+fn print_stats(input: &Path, show_all: bool) -> Result<()> {
+    let (data, idx) = load_data_and_index(input)?;
+    let table = contig_table(&data, &idx)?;
+    let mut printed: HashMap<usize, bool> = HashMap::new();
+    for (i, (name, len)) in table.iter().enumerate() {
+        let n = idx.n_records(i).unwrap_or(0);
+        printed.insert(i, true);
+        if show_all || n > 0 {
+            let l = len.map(|v| v.to_string()).unwrap_or_else(|| ".".into());
+            println!("{name}\t{l}\t{n}");
+        }
+    }
+    // References present in the index but not named (should not happen).
+    for i in table.len()..idx.n_refs() {
+        let n = idx.n_records(i).unwrap_or(0);
+        if show_all || n > 0 {
+            println!("{i}\t.\t{n}");
+        }
+    }
+    Ok(())
 }
 
 pub fn cmd_region_index(args: RegionIndexArgs) -> Result<()> {
@@ -245,15 +186,15 @@ pub fn cmd_region_index(args: RegionIndexArgs) -> Result<()> {
     match format {
         VcfFormat::Bgzf => {
             let csi_path = args.output.clone().unwrap_or_else(|| {
-                let mut p = args.input.clone();
-                p.set_extension("vcf.gz.csi");
-                p
+                let mut s = args.input.as_os_str().to_os_string();
+                s.push(".csi");
+                PathBuf::from(s)
             });
 
             if !args.no_kbi || args.csi {
                 eprintln!("Building CSI index: {:?}", csi_path);
                 let csi_start = Instant::now();
-                build_csi_index(&args.input, &csi_path)?;
+                build_index(&args.input, &csi_path, IndexKind::Csi, Some(args.min_shift))?;
                 eprintln!("CSI build time: {:.3}s", csi_start.elapsed().as_secs_f64());
             }
 

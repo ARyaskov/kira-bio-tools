@@ -107,53 +107,6 @@ impl BgzfBlock {
     }
 }
 
-pub struct WritePool {
-    pool: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
-}
-
-impl WritePool {
-    pub fn new(n: usize, capacity: usize) -> Self {
-        let mut v = Vec::with_capacity(n);
-        for _ in 0..n {
-            let mut buf = Vec::with_capacity(capacity);
-            unsafe {
-                buf.set_len(capacity);
-            }
-            v.push(buf);
-        }
-        Self {
-            pool: std::sync::Arc::new(std::sync::Mutex::new(v)),
-        }
-    }
-
-    #[inline]
-    pub fn get(&self, capacity: usize) -> Vec<u8> {
-        self.pool.lock().unwrap().pop().unwrap_or_else(|| {
-            let mut b = Vec::with_capacity(capacity);
-            unsafe {
-                b.set_len(capacity);
-            }
-            b
-        })
-    }
-
-    #[inline]
-    pub fn put(&self, mut buf: Vec<u8>, capacity: usize) {
-        unsafe {
-            buf.set_len(capacity);
-        }
-        self.pool.lock().unwrap().push(buf);
-    }
-}
-
-impl Clone for WritePool {
-    fn clone(&self) -> Self {
-        Self {
-            pool: self.pool.clone(),
-        }
-    }
-}
-
 pub struct CompressedBlock {
     pub data: Vec<u8>,
     pub sequence: usize,
@@ -175,3 +128,19 @@ pub const BGZF_SI1: u8 = 0x42;
 pub const BGZF_SI2: u8 = 0x43;
 pub const BGZF_BLOCK_SIZE: usize = 64 * 1024;
 pub const CHUNK_SIZE: usize = 64 * 1024 - 256;
+
+/// True when `head` (the first bytes of a file) carries the BGZF extra field.
+pub fn is_bgzf_header(head: &[u8]) -> bool {
+    head.len() >= 18
+        && head[0] == 0x1f
+        && head[1] == 0x8b
+        && head[2] == 0x08
+        && (head[3] & 0x04) != 0
+        && head[12] == BGZF_SI1
+        && head[13] == BGZF_SI2
+}
+
+/// True when `head` starts with the gzip magic (BGZF or plain gzip).
+pub fn is_gzip_header(head: &[u8]) -> bool {
+    head.len() >= 2 && head[0] == 0x1f && head[1] == 0x8b
+}

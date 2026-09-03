@@ -5,7 +5,9 @@ use std::io::{BufWriter, Write};
 
 use crate::cli::args::{HeaderArgs, ListArgs, QueryCompatArgs, RegionQueryArgs, StatArgs};
 use crate::filter::FilterEngine;
-use crate::{CsiQuery, KbiIndex, Region, VcfReader, chr_id_to_name, chr_name_to_id, fetch_line};
+use crate::csi::{BinIndex, IndexKind, IndexedVcfReader, find_index_for};
+use crate::{KbiIndex, LineFetcher, Region, RegionSet, VcfReader};
+use std::path::Path;
 
 pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
     let cfg = parse_query_args(&args.bcftools_args)?;
@@ -36,7 +38,8 @@ pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
     let filter_expr = include.as_deref().or(exclude.as_deref());
     let filter_engine = FilterEngine::new(&headers, filter_expr, exclude.is_some())?;
 
-    let region_filter = build_region_filter_pair(&cfg)?;
+    let region_filter = RegionSet::from_args(cfg.regions.as_deref(), cfg.regions_file.as_deref().map(Path::new))?;
+    let target_filter = RegionSet::from_args(cfg.targets.as_deref(), cfg.targets_file.as_deref().map(Path::new))?;
     let no_nas = cfg.no_nas.clone();
     let exclude_uncalled = cfg.exclude_uncalled;
 
@@ -53,23 +56,25 @@ pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
         out.write_all(b"\n")?;
     }
 
-    while let Some(rec) = reader.next_record()? {
-        if let Some(rf) = &region_filter {
-            if !rf.passes(&rec) { continue; }
+    let mut handle = |rec: &crate::vcf::VcfRecord| -> Result<()> {
+        if let Some(tf) = &target_filter {
+            if !tf.record_passes(&rec.chrom, rec.pos, &rec.ref_allele, &rec.alt, 0) {
+                return Ok(());
+            }
         }
-        let eval = filter_engine.eval(&rec)?;
+        let eval = filter_engine.eval(rec)?;
         let site_pass = if let Some(ps) = eval.pass_samples.as_ref() {
-            sample_idx
-                .iter()
-                .any(|&i| ps.get(i).copied().unwrap_or(false))
+            sample_idx.iter().any(|&i| ps.get(i).copied().unwrap_or(false))
         } else {
             eval.pass_site
         };
         if !site_pass {
-            continue;
+            return Ok(());
         }
-        if exclude_uncalled && record_all_missing(&rec) { continue; }
-        let mut s = fmt_ctx.render_record(&rec, eval.pass_samples.as_deref())?;
+        if exclude_uncalled && record_all_missing(rec) {
+            return Ok(());
+        }
+        let mut s = fmt_ctx.render_record(rec, eval.pass_samples.as_deref())?;
         if let Some(repl) = &no_nas {
             s = s.replace("\t.\t", &format!("\t{}\t", repl)).replace("\t.\n", &format!("\t{}\n", repl));
         }
@@ -77,61 +82,33 @@ pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
         if !s.ends_with('\n') {
             out.write_all(b"\n")?;
         }
+        Ok(())
+    };
+
+    // `-r` reads only the indexed blocks when the input has a .csi/.tbi;
+    // without an index (or from stdin) every record is scanned.
+    let use_index = region_filter.is_some() && cfg.input != Path::new("-") && find_index_for(&cfg.input).is_some();
+    if use_index {
+        let rf = region_filter.as_ref().unwrap();
+        rf.stream_with_index(&cfg.input, 1, |line| {
+            if let Some(rec) = crate::vcf::parse_vcf_line(line) {
+                handle(&rec)?;
+            }
+            Ok(())
+        })?;
+    } else {
+        while let Some(rec) = reader.next_record()? {
+            if let Some(rf) = &region_filter {
+                if !rf.record_passes(&rec.chrom, rec.pos, &rec.ref_allele, &rec.alt, 1) {
+                    continue;
+                }
+            }
+            handle(&rec)?;
+        }
     }
+    out.flush()?;
 
     Ok(())
-}
-
-struct RecRegionFilter {
-    regions: Vec<(String, u32, u32)>,
-}
-
-impl RecRegionFilter {
-    fn passes(&self, rec: &crate::vcf::VcfRecord) -> bool {
-        if self.regions.is_empty() { return true; }
-        let pos = rec.pos;
-        let chrom = rec.chrom.as_str();
-        for (c, s, e) in &self.regions {
-            if c == chrom && pos >= *s && pos <= *e { return true; }
-        }
-        false
-    }
-}
-
-fn build_region_filter_pair(cfg: &QueryConfig) -> Result<Option<RecRegionFilter>> {
-    let mut regions: Vec<(String, u32, u32)> = Vec::new();
-    if let Some(s) = cfg.regions.as_deref().or(cfg.targets.as_deref()) {
-        for tok in s.split(',') {
-            if let Some(r) = parse_region_token(tok) { regions.push(r); }
-        }
-    }
-    let file = cfg.regions_file.as_deref().or(cfg.targets_file.as_deref());
-    if let Some(p) = file {
-        let f = File::open(p)?;
-        for line in BufReader::new(f).lines() {
-            let l = line?;
-            let t = l.trim();
-            if t.is_empty() || t.starts_with('#') { continue; }
-            let mut parts = t.split('\t');
-            let chr = parts.next().unwrap_or("").to_string();
-            let beg: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-            let end: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(u32::MAX);
-            if !chr.is_empty() { regions.push((chr, beg, end)); }
-        }
-    }
-    if regions.is_empty() { Ok(None) } else { Ok(Some(RecRegionFilter { regions })) }
-}
-
-fn parse_region_token(s: &str) -> Option<(String, u32, u32)> {
-    if let Some((c, r)) = s.split_once(':') {
-        if let Some((b, e)) = r.split_once('-') {
-            let b: u32 = b.parse().ok()?; let e: u32 = e.parse().ok()?;
-            return Some((c.to_string(), b, e));
-        }
-        if let Ok(b) = r.parse::<u32>() { return Some((c.to_string(), b, b)); }
-        return Some((c.to_string(), 0, u32::MAX));
-    }
-    Some((s.to_string(), 0, u32::MAX))
 }
 
 fn record_all_missing(rec: &crate::vcf::VcfRecord) -> bool {
@@ -148,17 +125,10 @@ pub fn cmd_region_query(args: RegionQueryArgs) -> Result<()> {
     }
 
     let kbi_path = args.file.with_extension("kbi");
-    let csi_path = {
-        let mut p = args.file.clone();
-        let name = p.file_name().unwrap().to_string_lossy().to_string();
-        p.set_file_name(format!("{}.csi", name));
-        p
-    };
+    let bin_index = find_index_for(&args.file);
+    let use_kbi = kbi_path.exists() && bin_index.is_none();
 
-    let use_kbi = kbi_path.exists();
-    let use_csi = csi_path.exists() && !use_kbi;
-
-    if !use_kbi && !use_csi {
+    if !use_kbi && bin_index.is_none() {
         anyhow::bail!("No index found. Run 'kira-bt index {:?}' first.", args.file);
     }
 
@@ -166,7 +136,10 @@ pub fn cmd_region_query(args: RegionQueryArgs) -> Result<()> {
     if let Some(ref regions_file) = args.regions_file {
         let file = File::open(regions_file)?;
         for line in BufReader::new(file).lines() {
-            regions.push(line?);
+            let l = line?;
+            if !l.trim().is_empty() && !l.starts_with('#') {
+                regions.push(l);
+            }
         }
     }
 
@@ -178,59 +151,53 @@ pub fn cmd_region_query(args: RegionQueryArgs) -> Result<()> {
         print_vcf_header(&args.file)?;
     }
 
+    let stdout = std::io::stdout();
+    let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
     let mut total_count = 0usize;
 
     if use_kbi {
         let index = KbiIndex::load(&kbi_path)?;
-
+        // One open handle serves every hit; consecutive hits in a BGZF block share its decompression.
+        let mut fetcher: Option<LineFetcher> = None;
         for region_str in &regions {
             let region = Region::parse(region_str)
                 .ok_or_else(|| anyhow::anyhow!("Invalid region: {}", region_str))?;
-
-            let chr_id = chr_name_to_id(&region.chr)
-                .ok_or_else(|| anyhow::anyhow!("Unknown chromosome: {}", region.chr))?;
-
-            let start = region.start.unwrap_or(0);
-            let end = region.end.unwrap_or(u32::MAX);
-
-            let results = index.range(chr_id, start, end);
+            let (start, end) = region.bounds();
+            let results = index.range_by_name(&region.chr, start, end);
             total_count += results.len();
-
             if !args.count {
+                let fetcher = match fetcher.as_mut() {
+                    Some(f) => f,
+                    None => fetcher.insert(LineFetcher::open(&args.file)?),
+                };
                 for (_pos, offset) in results {
-                    let line = fetch_line(&args.file, offset)?;
-                    println!("{}", line);
+                    out.write_all(fetcher.fetch(offset)?.as_bytes())?;
+                    out.write_all(b"\n")?;
                 }
             }
         }
-    } else if use_csi {
-        let csi = CsiQuery::open(&csi_path)?;
-
+    } else {
+        let mut reader = IndexedVcfReader::open_with_index(&args.file, bin_index.as_ref().unwrap())?;
         for region_str in &regions {
             let region = Region::parse(region_str)
                 .ok_or_else(|| anyhow::anyhow!("Invalid region: {}", region_str))?;
-
-            let chr_id = chr_name_to_id(&region.chr)
-                .ok_or_else(|| anyhow::anyhow!("Unknown chromosome: {}", region.chr))?;
-
-            let start = region.start.unwrap_or(0);
-            let end = region.end.unwrap_or(u32::MAX);
-
-            let chunks = csi.query((chr_id - 1) as usize, start, end);
-
-            for (chunk_start, _chunk_end) in chunks {
-                let line = fetch_line(&args.file, chunk_start)?;
-                if !args.count {
-                    println!("{}", line);
-                }
+            let (start, end) = region.bounds();
+            let count_only = args.count;
+            reader.query(&region.chr, start, end, |line| {
                 total_count += 1;
-            }
+                if !count_only {
+                    out.write_all(line.as_bytes())?;
+                    out.write_all(b"\n")?;
+                }
+                Ok(true)
+            })?;
         }
     }
 
     if args.count {
-        println!("{}", total_count);
+        writeln!(out, "{}", total_count)?;
     }
+    out.flush()?;
 
     Ok(())
 }
@@ -252,6 +219,7 @@ pub fn cmd_stat(args: StatArgs) -> Result<()> {
             file_size as f64 / 1024.0 / 1024.0
         );
         println!("Entries:       {}", index.len());
+        println!("Contigs:       {}", index.contigs().len());
         println!(
             "Memory usage:  {} bytes ({:.2} MB)",
             index.memory_usage(),
@@ -264,9 +232,9 @@ pub fn cmd_stat(args: StatArgs) -> Result<()> {
         .map(|e| e == "csi" || e == "tbi")
         .unwrap_or(false)
     {
-        let _csi = CsiQuery::open(&args.index)?;
+        let idx = BinIndex::load(&args.index)?;
 
-        println!("Index Statistics (CSI/TBI)");
+        println!("Index Statistics ({})", if idx.kind == IndexKind::Csi { "CSI" } else { "TBI" });
         println!("==========================");
         println!("File:          {:?}", args.index);
         println!(
@@ -274,7 +242,14 @@ pub fn cmd_stat(args: StatArgs) -> Result<()> {
             file_size,
             file_size as f64 / 1024.0 / 1024.0
         );
-        println!("Format:        CSI/TBI (tabix-compatible)");
+        println!("min_shift:     {}", idx.min_shift);
+        println!("depth:         {}", idx.depth);
+        println!("References:    {}", idx.n_refs());
+        println!("Records:       {}", idx.total_records());
+        let bins: usize = idx.refs.iter().map(|r| r.bins.len()).sum();
+        let chunks: usize = idx.refs.iter().flat_map(|r| r.bins.values()).map(|b| b.chunks.len()).sum();
+        println!("Bins:          {}", bins);
+        println!("Chunks:        {}", chunks);
     } else {
         anyhow::bail!("Unknown index format");
     }
@@ -283,28 +258,28 @@ pub fn cmd_stat(args: StatArgs) -> Result<()> {
 }
 
 pub fn cmd_list(args: ListArgs) -> Result<()> {
-    let kbi_path = args.file.with_extension("kbi");
-
-    if kbi_path.exists() {
-        let index = KbiIndex::load(&kbi_path)?;
-
-        for chr_id in 1..=25u8 {
-            if let Some(name) = chr_id_to_name(chr_id) {
-                let results = index.range(chr_id, 0, u32::MAX);
-                if !results.is_empty() {
-                    println!("{}", name);
-                }
+    if let Some(p) = find_index_for(&args.file) {
+        let idx = BinIndex::load(&p)?;
+        if !idx.names().is_empty() {
+            for name in idx.names() {
+                println!("{}", name);
             }
-        }
-    } else {
-        let mut reader = VcfReader::open(&args.file)?;
-        let _ = reader.header()?;
-
-        for name in reader.reference_sequences()? {
-            println!("{}", name);
+            return Ok(());
         }
     }
-
+    let kbi_path = args.file.with_extension("kbi");
+    if kbi_path.exists() {
+        let index = KbiIndex::load(&kbi_path)?;
+        for name in index.contigs_with_records() {
+            println!("{}", name);
+        }
+        return Ok(());
+    }
+    let mut reader = VcfReader::open(&args.file)?;
+    let _ = reader.header()?;
+    for name in reader.reference_sequences()? {
+        println!("{}", name);
+    }
     Ok(())
 }
 
@@ -322,7 +297,6 @@ fn print_vcf_header(path: &std::path::Path) -> Result<()> {
 
     Ok(())
 }
-
 #[derive(Default)]
 struct QueryConfig {
     input: std::path::PathBuf,
@@ -427,18 +401,7 @@ fn parse_query_args(args: &[String]) -> Result<QueryConfig> {
 }
 
 fn extract_sample_names(headers: &[String]) -> Vec<String> {
-    headers
-        .iter()
-        .find(|h| h.starts_with("#CHROM"))
-        .map(|h| {
-            let parts: Vec<&str> = h.split('\t').collect();
-            if parts.len() > 9 {
-                parts[9..].iter().map(|s| s.to_string()).collect()
-            } else {
-                Vec::new()
-            }
-        })
-        .unwrap_or_default()
+    crate::vcf::header::extract_samples(headers)
 }
 
 fn resolve_samples(

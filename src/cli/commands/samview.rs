@@ -170,23 +170,9 @@ fn write_sam_record<W: Write>(w: &mut W, header: &sam::Header, rec: &bam::Record
 
 fn parse_region(s: Option<&str>, header: &sam::Header) -> Result<Option<(usize, u32, u32)>> {
     let Some(s) = s else { return Ok(None); };
-    let (chr, range) = match s.split_once(':') {
-        Some((c, r)) => (c, Some(r)),
-        None => (s, None),
-    };
+    let (chr, beg, end) = crate::regions::parse_region_spec(s)?;
     let rid = header.reference_sequences().get_index_of(chr.as_bytes())
         .ok_or_else(|| anyhow::anyhow!("unknown contig {chr:?}"))?;
-    let (beg, end) = match range {
-        None => (1u32, u32::MAX),
-        Some(r) => match r.split_once('-') {
-            Some((b, e)) => {
-                let b: u32 = b.parse().context("region beg")?;
-                let e: u32 = if e.is_empty() { u32::MAX } else { e.parse().context("region end")? };
-                (b, e)
-            }
-            None => { let b: u32 = r.parse().context("region beg")?; (b, b) }
-        }
-    };
     Ok(Some((rid, beg, end)))
 }
 

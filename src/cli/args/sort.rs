@@ -29,6 +29,6 @@ pub struct SortArgs {
     #[arg(short = 'v', long = "verbosity", default_value_t = 1)]
     pub verbosity: u8,
 
-    #[arg(last = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    #[arg(last = true, allow_hyphen_values = true)]
     pub passthrough: Vec<String>,
 }

@@ -39,18 +39,25 @@ pub fn cmd_csq(args: CsqArgs) -> Result<()> {
     headers.retain(|h| !h.starts_with("##INFO=<ID=BCSQ,"));
     headers.retain(|h| !h.starts_with("##FORMAT=<ID=BCSQ,"));
 
+    use std::io::Write as _;
+    let mut out: Box<dyn std::io::Write> = match cfg.output.as_deref() {
+        Some(p) if p != "-" => Box::new(std::io::BufWriter::with_capacity(
+            1 << 20,
+            std::fs::File::create(p).map_err(|e| anyhow!("create {p}: {e}"))?,
+        )),
+        _ => Box::new(std::io::BufWriter::with_capacity(1 << 20, std::io::stdout())),
+    };
     let mut inserted = false;
     for h in &headers {
         if !inserted && h.starts_with("#CHROM\t") {
-            println!(
+            writeln!(
+                out,
                 "##INFO=<ID=BCSQ,Number=.,Type=String,Description=\"Consequence annotation compatible with bcftools csq\">"
-            );
-            println!(
-                "##FORMAT=<ID=BCSQ,Number=.,Type=Integer,Description=\"Per-sample csq indexes\">"
-            );
+            )?;
+            writeln!(out, "##FORMAT=<ID=BCSQ,Number=.,Type=Integer,Description=\"Per-sample csq indexes\">")?;
             inserted = true;
         }
-        println!("{h}");
+        writeln!(out, "{h}")?;
     }
 
     // Buffer per chromosome so the haplotype-aware pass can combine phased
@@ -59,15 +66,16 @@ pub fn cmd_csq(args: CsqArgs) -> Result<()> {
     let mut cur_chrom = String::new();
     while let Some(rec) = reader.next_record()? {
         if !buf.is_empty() && rec.chrom != cur_chrom {
-            emit_chunk(&buf, &anno, fasta.as_ref());
+            emit_chunk(&buf, &anno, fasta.as_ref(), &mut *out)?;
             buf.clear();
         }
         cur_chrom = rec.chrom.clone();
         buf.push(rec);
     }
     if !buf.is_empty() {
-        emit_chunk(&buf, &anno, fasta.as_ref());
+        emit_chunk(&buf, &anno, fasta.as_ref(), &mut *out)?;
     }
+    out.flush()?;
 
     Ok(())
 }
@@ -93,7 +101,8 @@ fn emit_chunk(
     buf: &[crate::vcf::structs::VcfRecord],
     anno: &AnnotationDb,
     fasta: Option<&FastaDb>,
-) {
+    out: &mut dyn std::io::Write,
+) -> Result<()> {
     let combos = build_combinations(buf, anno, fasta);
     for (ri, rec0) in buf.iter().enumerate() {
         let mut rec = rec0.clone();
@@ -142,8 +151,9 @@ fn emit_chunk(
             }
         }
 
-        print_record(&rec);
+        write_record(out, &rec)?;
     }
+    Ok(())
 }
 
 /// Coding effects carry strand|aa|dna fields and are the elements the
@@ -341,6 +351,7 @@ struct CsqCfg {
     fasta: Option<String>,
     gff: Option<String>,
     input: Option<String>,
+    output: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<CsqCfg> {
@@ -358,6 +369,12 @@ fn parse_args(args: &[String]) -> Result<CsqCfg> {
                 i += 1;
                 if let Some(v) = args.get(i) {
                     cfg.gff = Some(v.clone());
+                }
+            }
+            "-o" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    cfg.output = Some(v.clone());
                 }
             }
             "-p" | "--ncsq" | "--unify-chr-names" => {
@@ -390,7 +407,6 @@ struct Transcript {
     start: u32,
     end: u32,
     strand: char,
-    gene_id: String,
     gene_name: String,
     biotype: String,
     exons: Vec<Region>,
@@ -433,8 +449,7 @@ impl AnnotationDb {
             }
             let chrom = cols[0].to_string();
             let feature = cols[2];
-            let start = cols[3].parse::<u32>().unwrap_or(0);
-            let end = cols[4].parse::<u32>().unwrap_or(0);
+            let (Ok(start), Ok(end)) = (cols[3].parse::<u32>(), cols[4].parse::<u32>()) else { continue };
             let strand = cols[6].chars().next().unwrap_or('+');
             let attrs = parse_attrs(cols[8]);
 
@@ -489,7 +504,6 @@ impl AnnotationDb {
                             start,
                             end,
                             strand,
-                            gene_id: parent.clone(),
                             gene_name: gm.name,
                             biotype: gm.biotype,
                             exons: Vec::new(),
@@ -521,7 +535,6 @@ impl AnnotationDb {
                         start,
                         end,
                         strand,
-                        gene_id: build.parent.clone(),
                         gene_name: gm.name,
                         biotype: gm.biotype,
                         exons: Vec::new(),
@@ -610,14 +623,6 @@ impl FastaDb {
             seqs.insert(name, seq);
         }
         Ok(Self { seqs })
-    }
-
-    fn base_at(&self, chrom: &str, pos1: u32) -> Option<char> {
-        let idx = pos1.checked_sub(1)? as usize;
-        self.seqs
-            .get(chrom)
-            .and_then(|s| s.as_bytes().get(idx).copied())
-            .map(|b| b as char)
     }
 
     fn slice(&self, chrom: &str, start1: u32, end1: u32) -> Option<String> {
@@ -1026,16 +1031,18 @@ fn render_info_map(info: &HashMap<String, String>) -> String {
         .join(";")
 }
 
-fn print_record(rec: &crate::vcf::structs::VcfRecord) {
-    print!(
+fn write_record(out: &mut dyn std::io::Write, rec: &crate::vcf::structs::VcfRecord) -> Result<()> {
+    write!(
+        out,
         "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         rec.chrom, rec.pos, rec.id, rec.ref_allele, rec.alt, rec.qual, rec.filter, rec.info
-    );
+    )?;
     if let Some(fmt) = &rec.format {
-        print!("\t{fmt}");
+        write!(out, "\t{fmt}")?;
         for s in &rec.samples {
-            print!("\t{s}");
+            write!(out, "\t{s}")?;
         }
     }
-    println!();
+    writeln!(out)?;
+    Ok(())
 }

@@ -1,0 +1,3 @@
+source=\\?\C:\Users\user\Desktop\projects\kira_bio_tools\tests\annotate\test1\db.tab
+source_len=84
+columns=CHROM,FROM,TO,T_STR

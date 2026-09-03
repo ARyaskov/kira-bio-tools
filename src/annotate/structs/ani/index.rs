@@ -154,6 +154,9 @@ impl<'a> CStrRef<'a> {
     }
 
     pub fn as_str(&self) -> &str {
+        // SAFETY: both buffers hold ANI string sections, which the loader
+        // validates as UTF-8 once when it maps or decompresses them, and
+        // `start..end` are the bounds of one string within that section.
         match &self.data {
             CStrData::Borrowed(bytes) => unsafe {
                 std::str::from_utf8_unchecked(&bytes[self.start..self.end])
@@ -234,6 +237,8 @@ pub struct AniPosIndex {
     pub entry_indices: Vec<u32>,
 }
 
+// SAFETY: plain `#[repr(C)]` integer structs (bytemuck `Pod`), copied to the
+// device byte for byte.
 #[cfg(feature = "gpu")]
 unsafe impl DeviceCopy for AniPosContig {}
 
@@ -344,6 +349,8 @@ impl PosContigLut {
 impl AniIndex {
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
+        // SAFETY: read-only mapping of an index that is replaced atomically on
+        // rebuild, never modified in place while mapped.
         let mmap = unsafe { MmapOptions::new().map(&file)? };
 
         if mmap.len() < mem::size_of::<AniHeaderV3>() {
@@ -594,8 +601,9 @@ impl AniIndex {
                         drop(guard);
                         let block = &blocks[idx];
                         let decompressed = match self.decompress_block(idx, block) {
-                            Ok(v) => Arc::new(v),
-                            Err(_) => {
+                            // Validated once per block so `CStrRef::as_str` can skip the check.
+                            Ok(v) if std::str::from_utf8(&v).is_ok() => Arc::new(v),
+                            _ => {
                                 return CStrRef {
                                     data: CStrData::Borrowed(&[]),
                                     start: 0,
@@ -1321,7 +1329,10 @@ fn read_pod_slice<T: Pod>(bytes: &[u8]) -> Result<Vec<T>> {
 }
 
 fn read_header(mmap: &Mmap) -> Result<AniHeader> {
-    let h3: AniHeaderV3 = unsafe { *(mmap.as_ptr() as *const AniHeaderV3) };
+    if mmap.len() < mem::size_of::<AniHeaderV3>() {
+        return Err(anyhow!("ANI file too small for a header"));
+    }
+    let h3: AniHeaderV3 = bytemuck::pod_read_unaligned(&mmap[..mem::size_of::<AniHeaderV3>()]);
     if h3.magic != ANI_MAGIC {
         return Err(anyhow!("Bad ANI magic"));
     }
@@ -1331,7 +1342,7 @@ fn read_header(mmap: &Mmap) -> Result<AniHeader> {
             if mmap.len() < mem::size_of::<AniHeaderV6>() {
                 return Err(anyhow!("ANI file too small for v6 header (rebuild)"));
             }
-            let h6: AniHeaderV6 = unsafe { *(mmap.as_ptr() as *const AniHeaderV6) };
+            let h6: AniHeaderV6 = bytemuck::pod_read_unaligned(&mmap[..mem::size_of::<AniHeaderV6>()]);
             Ok(AniHeader {
                 magic: h6.magic,
                 version: h6.version,
@@ -1402,7 +1413,8 @@ fn load_entries_v2(mmap: &Mmap, ent_start: usize, n_entries: usize) -> Result<Ve
     let mut entries = Vec::with_capacity(n_entries);
 
     for chunk in mmap[ent_start..ent_end].chunks_exact(ent_size) {
-        let e: AniEntryV2 = unsafe { *(chunk.as_ptr() as *const AniEntryV2) };
+        // SAFETY: chunk is exactly size_of::<AniEntryV2>() bytes of a plain-data struct.
+        let e: AniEntryV2 = unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const AniEntryV2) };
         entries.push(AniEntry {
             chr_id: e.chr_id as u32,
             pos: e.pos,
@@ -1427,7 +1439,8 @@ fn load_entries_v3(mmap: &Mmap, ent_start: usize, n_entries: usize) -> Result<Ve
     let mut entries = Vec::with_capacity(n_entries);
 
     for chunk in mmap[ent_start..ent_end].chunks_exact(ent_size) {
-        let e: AniEntry = unsafe { *(chunk.as_ptr() as *const AniEntry) };
+        // SAFETY: chunk is exactly size_of::<AniEntry>() bytes of a plain-data struct.
+        let e: AniEntry = unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const AniEntry) };
         entries.push(e);
     }
 
@@ -1446,7 +1459,8 @@ fn load_strings(mmap: &Mmap, header: &AniHeader) -> Result<StringSource> {
 
         let mut blocks = Vec::with_capacity(count);
         for chunk in mmap[start..end].chunks_exact(ent_size) {
-            let e: AniBlockEntry = unsafe { *(chunk.as_ptr() as *const AniBlockEntry) };
+            // SAFETY: chunk is exactly size_of::<AniBlockEntry>() bytes of a plain-data struct.
+            let e: AniBlockEntry = unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const AniBlockEntry) };
             blocks.push(e);
         }
 
@@ -1463,6 +1477,10 @@ fn load_strings(mmap: &Mmap, header: &AniHeader) -> Result<StringSource> {
     } else {
         let str_start = header.off_strings as usize;
         let len = mmap.len().saturating_sub(str_start);
+        // Validated once here so `CStrRef::as_str` can skip the check.
+        if std::str::from_utf8(&mmap[str_start.min(mmap.len())..]).is_err() {
+            return Err(anyhow!("ANI string section is not valid UTF-8 (rebuild the index)"));
+        }
         Ok(StringSource::Raw(StringStorage::Mmap {
             offset: str_start,
             len,
@@ -1483,7 +1501,8 @@ fn load_pos_index(mmap: &Mmap, header: &AniHeader) -> Result<Option<AniPosIndex>
     if bytes.len() < mem::size_of::<AniPosIndexHeader>() {
         return Err(anyhow!("ANI pos index too small"));
     }
-    let h = unsafe { *(bytes.as_ptr() as *const AniPosIndexHeader) };
+    // SAFETY: length checked above; the header is a plain-data struct.
+    let h = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const AniPosIndexHeader) };
     let contig_start = h.off_contigs as usize;
     let block_start = h.off_blocks as usize;
     let pos_offsets_start = h.off_pos_offsets as usize;
@@ -1554,7 +1573,8 @@ fn load_info_blob(mmap: &Mmap, header: &AniHeader) -> Result<Option<AniInfoBlob>
     if bytes.len() < mem::size_of::<AniInfoBlobHeader>() {
         return Err(anyhow!("ANI blob too small"));
     }
-    let h = unsafe { *(bytes.as_ptr() as *const AniInfoBlobHeader) };
+    // SAFETY: length checked above; the header is a plain-data struct.
+    let h = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const AniInfoBlobHeader) };
     let dict_offsets_start = h.off_dict_offsets as usize;
     let dict_data_start = h.off_dict_data as usize;
     let entry_offsets_start = h.off_entry_offsets as usize;

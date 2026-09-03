@@ -198,6 +198,7 @@ fn build_call_config(args: &SolidArgs) -> Result<Option<CallConfig>> {
         sex_map: Default::default(),
         samples: None,
         samples_file: None,
+        ..CallConfig::default()
     };
     cfg.validate()?;
     Ok(Some(cfg))

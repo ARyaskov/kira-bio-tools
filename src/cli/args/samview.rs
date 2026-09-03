@@ -2,7 +2,11 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct SamViewArgs {
+    #[arg(long = "help", action = clap::ArgAction::Help, help = "Print help")]
+    pub help: Option<bool>,
+
     pub input: PathBuf,
 
     #[arg(short = 'o', long = "output")]

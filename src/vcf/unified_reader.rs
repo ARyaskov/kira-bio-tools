@@ -1,18 +1,21 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Cursor, Read};
 use std::path::Path;
 
+use flate2::read::MultiGzDecoder;
+
 use crate::annotate::ktile::KtileReader;
+use crate::bcf::BCF_MAGIC;
 use crate::bgzf::{
-    BgzfReader as NoodlesBgzfReader, MtBgzfReader as ParallelBgzfReader, VirtualPosition,
+    BgzfReader as NoodlesBgzfReader, MtBgzfReader, VirtualPosition, is_bgzf_header, is_gzip_header,
 };
-use crate::util::{VcfFormat, chr_name_to_id, detect_format};
-use crate::vcf::parser::extract_contig_id;
+use crate::vcf::header::ContigDict;
 use crate::vcf::structs::{Result, VcfError, VcfRecord};
 
+/// Reader over any VCF-like source: plain/gzip/BGZF VCF text, BCF (detected by
+/// magic, compressed or not), `.ktile` sidecars, files or standard input.
 pub enum UnifiedVcfReader {
-    Plain(PlainReader),
-    Bgzf(BgzfReader),
+    Text(TextReader),
     BgzfIndexing(BgzfIndexingReader),
     Ktile(KtileSourceReader),
     Bcf(BcfSourceReader),
@@ -21,6 +24,7 @@ pub enum UnifiedVcfReader {
 pub struct BcfSourceReader {
     inner: crate::bcf::BcfReader,
     header_lines: Vec<String>,
+    contigs: ContigDict,
     header_emitted: bool,
     cursor_in_header: usize,
 }
@@ -28,11 +32,39 @@ pub struct BcfSourceReader {
 impl BcfSourceReader {
     pub fn open(path: &Path) -> Result<Self> {
         let inner = crate::bcf::BcfReader::open(path)
-            .map_err(|e| VcfError::Io(std::io::Error::other(format!("bcf open: {e}"))))?;
-        let header_lines = inner.header_lines.clone();
-        Ok(Self { inner, header_lines, header_emitted: false, cursor_in_header: 0 })
+            .map_err(|e| VcfError::Io(io::Error::other(format!("bcf open: {e}"))))?;
+        Ok(Self::from_reader(inner))
     }
+
+    pub fn from_bufread(r: Box<dyn BufRead + Send>) -> Result<Self> {
+        let inner = crate::bcf::BcfReader::from_bufread(r)
+            .map_err(|e| VcfError::Io(io::Error::other(format!("bcf open: {e}"))))?;
+        Ok(Self::from_reader(inner))
+    }
+
+    fn from_reader(inner: crate::bcf::BcfReader) -> Self {
+        let header_lines = inner.header_lines.clone();
+        // Contig ids follow BCF `rid` order.
+        let mut contigs = ContigDict::new();
+        let max_rid = inner.dict.contig_idx.values().copied().max();
+        if let Some(max) = max_rid {
+            for rid in 0..=max {
+                match inner.dict.contig_name(rid) {
+                    Some(n) => {
+                        contigs.insert(n);
+                    }
+                    None => {
+                        contigs.insert(&format!("__unnamed_rid_{rid}"));
+                    }
+                }
+            }
+        }
+        Self { inner, header_lines, contigs, header_emitted: false, cursor_in_header: 0 }
+    }
+
     pub fn header(&self) -> &[String] { &self.header_lines }
+
+    /// Header lines first (once), then records.
     pub fn read_line(&mut self) -> Result<Option<String>> {
         if !self.header_emitted {
             if self.cursor_in_header < self.header_lines.len() {
@@ -42,15 +74,29 @@ impl BcfSourceReader {
             }
             self.header_emitted = true;
         }
-        self.inner.read_record_line().map_err(|e| VcfError::Io(std::io::Error::other(format!("bcf read: {e}"))))
+        self.read_data_line()
+    }
+
+    pub fn read_data_line(&mut self) -> Result<Option<String>> {
+        self.inner
+            .read_record_line()
+            .map_err(|e| VcfError::Io(io::Error::other(format!("bcf read: {e}"))))
+    }
+
+    pub fn read_record(&mut self) -> Result<Option<VcfRecord>> {
+        match self.read_data_line()? {
+            Some(line) => parse_vcf_record(&line, 0, &mut self.contigs),
+            None => Ok(None),
+        }
     }
 }
 
 impl UnifiedVcfReader {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-
-        // `.ktile` sidecars are extension-dispatched.
+        if path == Path::new("-") {
+            return Self::from_stream(Box::new(io::stdin()));
+        }
         if path
             .extension()
             .and_then(|e| e.to_str())
@@ -58,19 +104,29 @@ impl UnifiedVcfReader {
         {
             return Self::open_ktile(path);
         }
-        if path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("bcf"))
-        {
-            return Ok(Self::Bcf(BcfSourceReader::open(path)?));
-        }
+        let file = File::open(path)?;
+        Self::from_stream(Box::new(file))
+    }
 
-        let format = detect_format(path)?;
-        match format {
-            VcfFormat::Plain => Ok(Self::Plain(PlainReader::open(path)?)),
-            VcfFormat::Bgzf => Ok(Self::Bgzf(BgzfReader::open(path)?)),
-            VcfFormat::Gzip => Err(VcfError::InvalidFormat),
+    /// Open from any byte stream: format is sniffed from the first bytes
+    /// (BGZF, plain gzip or plain text; BCF by magic after decompression).
+    pub fn from_stream(r: Box<dyn Read + Send>) -> Result<Self> {
+        let (head, r) = peek_prefix(r, 18)?;
+        let mut buf: Box<dyn BufRead + Send> = if is_bgzf_header(&head) {
+            Box::new(MtBgzfReader::new(r))
+        } else if is_gzip_header(&head) {
+            Box::new(BufReader::with_capacity(1 << 20, MultiGzDecoder::new(r)))
+        } else {
+            Box::new(BufReader::with_capacity(1 << 20, r))
+        };
+        let is_bcf = {
+            let b = buf.fill_buf()?;
+            b.len() >= BCF_MAGIC.len() && &b[..BCF_MAGIC.len()] == BCF_MAGIC
+        };
+        if is_bcf {
+            Ok(Self::Bcf(BcfSourceReader::from_bufread(buf)?))
+        } else {
+            Ok(Self::Text(TextReader::new(buf)?))
         }
     }
 
@@ -85,27 +141,20 @@ impl UnifiedVcfReader {
 
     pub fn read_record(&mut self) -> Result<Option<VcfRecord>> {
         match self {
-            Self::Plain(r) => r.read_record(),
-            Self::Bgzf(r) => r.read_record(),
+            Self::Text(r) => r.read_record(),
             Self::BgzfIndexing(r) => r.read_record(),
             Self::Ktile(r) => r.read_record(),
-            Self::Bcf(_) => Err(VcfError::InvalidFormat),
+            Self::Bcf(r) => r.read_record(),
         }
     }
 
+    /// Next data line (header lines are never returned).
     pub fn read_line(&mut self) -> Result<Option<String>> {
         match self {
-            Self::Plain(r) => r.read_line(),
-            Self::Bgzf(r) => r.read_line(),
+            Self::Text(r) => r.read_line(),
             Self::BgzfIndexing(r) => r.read_line(),
             Self::Ktile(r) => r.read_line(),
-            Self::Bcf(r) => {
-                while let Some(l) = r.read_line()? {
-                    if l.starts_with('#') { continue; }
-                    return Ok(Some(l));
-                }
-                Ok(None)
-            }
+            Self::Bcf(r) => r.read_data_line(),
         }
     }
 
@@ -139,35 +188,31 @@ impl UnifiedVcfReader {
 
     pub fn header(&self) -> Result<Vec<String>> {
         match self {
-            Self::Plain(r) => Ok(r.headers.clone()),
-            Self::Bgzf(r) => Ok(r.headers.clone()),
+            Self::Text(r) => Ok(r.headers.clone()),
             Self::BgzfIndexing(r) => Ok(r.headers.clone()),
             Self::Ktile(r) => Ok(r.headers.clone()),
             Self::Bcf(r) => Ok(r.header_lines.clone()),
         }
     }
 
-    pub fn contigs(&self) -> Vec<String> {
+    /// Contig dictionary: header contigs plus any contig met in the data so far.
+    pub fn contigs(&self) -> &ContigDict {
         match self {
-            Self::Plain(r) => r.contigs.clone(),
-            Self::Bgzf(r) => r.contigs.clone(),
-            Self::BgzfIndexing(r) => r.contigs.clone(),
-            Self::Ktile(r) => r.contigs.clone(),
-            Self::Bcf(r) => r.inner.dict.contigs.clone(),
+            Self::Text(r) => &r.contigs,
+            Self::BgzfIndexing(r) => &r.contigs,
+            Self::Ktile(r) => &r.contigs,
+            Self::Bcf(r) => &r.contigs,
         }
     }
 
     pub fn reference_sequences(&self) -> Result<Vec<String>> {
-        Ok(self.contigs())
+        Ok(self.contigs().names().to_vec())
     }
 
     pub fn virtual_position(&self) -> Option<VirtualPosition> {
         match self {
-            Self::Plain(_) => None,
-            Self::Bgzf(_) => None,
             Self::BgzfIndexing(r) => Some(r.vpos),
-            Self::Ktile(_) => None,
-            Self::Bcf(_) => None,
+            _ => None,
         }
     }
 
@@ -177,173 +222,118 @@ impl UnifiedVcfReader {
             _ => Err(VcfError::InvalidFormat),
         }
     }
+
+    /// Next data line with its start/end virtual positions (BGZF indexing source only).
+    pub fn next_line_with_vpos(&mut self) -> Result<Option<(String, VirtualPosition, VirtualPosition)>> {
+        match self {
+            Self::BgzfIndexing(r) => r.next_line_with_vpos(),
+            _ => Err(VcfError::InvalidFormat),
+        }
+    }
 }
 
-pub struct PlainReader {
-    reader: BufReader<File>,
+fn peek_prefix(mut r: Box<dyn Read + Send>, n: usize) -> io::Result<(Vec<u8>, Box<dyn Read + Send>)> {
+    let mut head = vec![0u8; n];
+    let mut got = 0usize;
+    while got < n {
+        let k = r.read(&mut head[got..])?;
+        if k == 0 {
+            break;
+        }
+        got += k;
+    }
+    head.truncate(got);
+    let chained: Box<dyn Read + Send> = Box::new(Cursor::new(head.clone()).chain(r));
+    Ok((head, chained))
+}
+
+fn read_header_lines<R: BufRead + ?Sized>(
+    reader: &mut R,
+    buffer: &mut String,
+    offset: &mut u64,
+) -> Result<(Vec<String>, ContigDict, Option<String>)> {
+    let mut headers = Vec::new();
+    let mut first_data_line = None;
+    loop {
+        buffer.clear();
+        let n = reader.read_line(buffer)?;
+        if n == 0 {
+            break;
+        }
+        *offset += n as u64;
+        if !buffer.starts_with('#') {
+            first_data_line = Some(buffer.trim_end_matches(['\r', '\n']).to_string());
+            break;
+        }
+        headers.push(buffer.trim_end_matches(['\r', '\n']).to_string());
+    }
+    let contigs = ContigDict::from_header_lines(headers.iter().map(String::as_str));
+    Ok((headers, contigs, first_data_line))
+}
+
+/// Streaming text VCF (plain, gzip or BGZF; file or stdin).
+pub struct TextReader {
+    reader: Box<dyn BufRead + Send>,
     buffer: String,
-    contigs: Vec<String>,
     headers: Vec<String>,
+    contigs: ContigDict,
     offset: u64,
     first_data_line: Option<String>,
 }
 
-impl PlainReader {
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
+impl TextReader {
+    pub fn new(mut reader: Box<dyn BufRead + Send>) -> Result<Self> {
         let mut buffer = String::new();
-        let mut contigs = Vec::new();
-        let mut headers = Vec::new();
         let mut offset = 0u64;
-        let mut first_data_line = None;
-
-        loop {
-            buffer.clear();
-            let n = reader.read_line(&mut buffer)?;
-            if n == 0 {
-                break;
-            }
-            offset += n as u64;
-            if !buffer.starts_with('#') {
-                first_data_line = Some(buffer.trim_end().to_string());
-                break;
-            }
-            headers.push(buffer.trim_end().to_string());
-            if buffer.starts_with("##contig=") {
-                if let Some(id) = extract_contig_id(&buffer) {
-                    contigs.push(id);
-                }
-            }
-        }
-
-        Ok(Self {
-            reader,
-            buffer: String::new(),
-            contigs,
-            headers,
-            offset,
-            first_data_line,
-        })
+        let (headers, contigs, first_data_line) = read_header_lines(&mut *reader, &mut buffer, &mut offset)?;
+        Ok(Self { reader, buffer: String::new(), headers, contigs, offset, first_data_line })
     }
 
     pub fn read_record(&mut self) -> Result<Option<VcfRecord>> {
         if let Some(line) = self.first_data_line.take() {
-            return parse_vcf_record(&line, self.offset);
+            let start = self.offset - (line.len() as u64 + 1);
+            return parse_vcf_record(&line, start, &mut self.contigs);
         }
-
-        let start_offset = self.offset;
-        self.buffer.clear();
-        let n = self.reader.read_line(&mut self.buffer)?;
-        if n == 0 {
-            return Ok(None);
+        loop {
+            let start_offset = self.offset;
+            self.buffer.clear();
+            let n = self.reader.read_line(&mut self.buffer)?;
+            if n == 0 {
+                return Ok(None);
+            }
+            self.offset += n as u64;
+            if self.buffer.starts_with('#') || self.buffer.trim_end().is_empty() {
+                continue;
+            }
+            return parse_vcf_record(&self.buffer, start_offset, &mut self.contigs);
         }
-        self.offset += n as u64;
-
-        if self.buffer.starts_with('#') {
-            return self.read_record();
-        }
-
-        parse_vcf_record(&self.buffer, start_offset)
     }
 
     pub fn read_line(&mut self) -> Result<Option<String>> {
         if let Some(line) = self.first_data_line.take() {
             return Ok(Some(line));
         }
-
-        self.buffer.clear();
-        let n = self.reader.read_line(&mut self.buffer)?;
-        if n == 0 {
-            return Ok(None);
-        }
-        self.offset += n as u64;
-        Ok(Some(self.buffer.trim_end().to_string()))
-    }
-}
-
-/// Streaming BGZF reader using the multithreaded inflater pool. For
-/// tabix-indexing use [`BgzfIndexingReader`].
-pub struct BgzfReader {
-    reader: ParallelBgzfReader<File>,
-    buffer: String,
-    contigs: Vec<String>,
-    headers: Vec<String>,
-    first_data_line: Option<String>,
-}
-
-impl BgzfReader {
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let mut reader = ParallelBgzfReader::open(path)?;
-        let mut buffer = String::new();
-        let mut contigs = Vec::new();
-        let mut headers = Vec::new();
-        let mut first_data_line = None;
-
         loop {
-            buffer.clear();
-            let n = reader.read_line(&mut buffer)?;
+            self.buffer.clear();
+            let n = self.reader.read_line(&mut self.buffer)?;
             if n == 0 {
-                break;
+                return Ok(None);
             }
-            if !buffer.starts_with('#') {
-                first_data_line = Some(buffer.trim_end().to_string());
-                break;
+            self.offset += n as u64;
+            if self.buffer.starts_with('#') {
+                continue;
             }
-            headers.push(buffer.trim_end().to_string());
-            if buffer.starts_with("##contig=") {
-                if let Some(id) = extract_contig_id(&buffer) {
-                    contigs.push(id);
-                }
-            }
+            return Ok(Some(self.buffer.trim_end_matches(['\r', '\n']).to_string()));
         }
-
-        Ok(Self {
-            reader,
-            buffer: String::new(),
-            contigs,
-            headers,
-            first_data_line,
-        })
-    }
-
-    pub fn read_record(&mut self) -> Result<Option<VcfRecord>> {
-        if let Some(line) = self.first_data_line.take() {
-            return parse_vcf_record(&line, 0);
-        }
-
-        self.buffer.clear();
-        let n = self.reader.read_line(&mut self.buffer)?;
-        if n == 0 {
-            return Ok(None);
-        }
-
-        if self.buffer.starts_with('#') {
-            return self.read_record();
-        }
-
-        parse_vcf_record(&self.buffer, 0)
-    }
-
-    pub fn read_line(&mut self) -> Result<Option<String>> {
-        if let Some(line) = self.first_data_line.take() {
-            return Ok(Some(line));
-        }
-
-        self.buffer.clear();
-        let n = self.reader.read_line(&mut self.buffer)?;
-        if n == 0 {
-            return Ok(None);
-        }
-        Ok(Some(self.buffer.trim_end().to_string()))
     }
 }
 
+/// Single-threaded BGZF reader that tracks virtual positions, for index building.
 pub struct BgzfIndexingReader {
     reader: NoodlesBgzfReader<File>,
     buffer: String,
-    contigs: Vec<String>,
     headers: Vec<String>,
+    contigs: ContigDict,
     vpos: VirtualPosition,
     first_data_line: Option<String>,
 }
@@ -352,11 +342,10 @@ impl BgzfIndexingReader {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let mut reader = NoodlesBgzfReader::open(path)?;
         let mut buffer = String::new();
-        let mut contigs = Vec::new();
         let mut headers = Vec::new();
         let mut first_data_line = None;
-        // Virtual position at the START of the first data record (captured before that line is read,
-        // since the header scan consumes it). This is the record's chunk-start offset for indexing.
+        // Virtual position at the START of the first data record, captured before that line is
+        // read, since the header scan consumes it.
         let vpos = loop {
             let vpos_before = reader.virtual_position();
             buffer.clear();
@@ -365,57 +354,49 @@ impl BgzfIndexingReader {
                 break vpos_before;
             }
             if !buffer.starts_with('#') {
-                first_data_line = Some(buffer.trim_end().to_string());
+                first_data_line = Some(buffer.trim_end_matches(['\r', '\n']).to_string());
                 break vpos_before;
             }
-            headers.push(buffer.trim_end().to_string());
-            if buffer.starts_with("##contig=") {
-                if let Some(id) = extract_contig_id(&buffer) {
-                    contigs.push(id);
-                }
-            }
+            headers.push(buffer.trim_end_matches(['\r', '\n']).to_string());
         };
-
-        Ok(Self {
-            reader,
-            buffer: String::new(),
-            contigs,
-            headers,
-            vpos,
-            first_data_line,
-        })
+        let contigs = ContigDict::from_header_lines(headers.iter().map(String::as_str));
+        Ok(Self { reader, buffer: String::new(), headers, contigs, vpos, first_data_line })
     }
 
     pub fn read_record(&mut self) -> Result<Option<VcfRecord>> {
         if let Some(line) = self.first_data_line.take() {
-            return parse_vcf_record(&line, self.vpos.as_u64());
+            return parse_vcf_record(&line, self.vpos.as_u64(), &mut self.contigs);
         }
-
-        self.vpos = self.reader.virtual_position();
-        self.buffer.clear();
-        let n = self.reader.read_line(&mut self.buffer)?;
-        if n == 0 {
-            return Ok(None);
+        loop {
+            self.vpos = self.reader.virtual_position();
+            self.buffer.clear();
+            let n = self.reader.read_line(&mut self.buffer)?;
+            if n == 0 {
+                return Ok(None);
+            }
+            if self.buffer.starts_with('#') || self.buffer.trim_end().is_empty() {
+                continue;
+            }
+            return parse_vcf_record(&self.buffer, self.vpos.as_u64(), &mut self.contigs);
         }
-
-        if self.buffer.starts_with('#') {
-            return self.read_record();
-        }
-
-        parse_vcf_record(&self.buffer, self.vpos.as_u64())
     }
 
     pub fn read_line(&mut self) -> Result<Option<String>> {
         if let Some(line) = self.first_data_line.take() {
             return Ok(Some(line));
         }
-
-        self.buffer.clear();
-        let n = self.reader.read_line(&mut self.buffer)?;
-        if n == 0 {
-            return Ok(None);
+        loop {
+            self.vpos = self.reader.virtual_position();
+            self.buffer.clear();
+            let n = self.reader.read_line(&mut self.buffer)?;
+            if n == 0 {
+                return Ok(None);
+            }
+            if self.buffer.starts_with('#') {
+                continue;
+            }
+            return Ok(Some(self.buffer.trim_end_matches(['\r', '\n']).to_string()));
         }
-        Ok(Some(self.buffer.trim_end().to_string()))
     }
 
     pub fn current_vpos(&self) -> VirtualPosition {
@@ -423,8 +404,8 @@ impl BgzfIndexingReader {
     }
 
     pub fn next_record_with_vpos(&mut self) -> Result<Option<(VcfRecord, VirtualPosition)>> {
-        // The record carries its own start vpos (`offset`); here we return the position AFTER the
-        // record so the indexer can form a proper [start, end) chunk (not a zero-length one).
+        // The record carries its own start vpos (`offset`); the returned position is the one
+        // AFTER the record so the indexer can form a proper [start, end) chunk.
         match self.read_record()? {
             Some(rec) => {
                 let after = self.reader.virtual_position();
@@ -433,16 +414,41 @@ impl BgzfIndexingReader {
             None => Ok(None),
         }
     }
+
+    /// Next data line with `(start, end)` virtual positions.
+    pub fn next_line_with_vpos(&mut self) -> Result<Option<(String, VirtualPosition, VirtualPosition)>> {
+        if let Some(line) = self.first_data_line.take() {
+            let start = self.vpos;
+            let after = self.reader.virtual_position();
+            return Ok(Some((line, start, after)));
+        }
+        loop {
+            let start = self.reader.virtual_position();
+            self.buffer.clear();
+            let n = self.reader.read_line(&mut self.buffer)?;
+            if n == 0 {
+                return Ok(None);
+            }
+            self.vpos = start;
+            if self.buffer.starts_with('#') {
+                continue;
+            }
+            let after = self.reader.virtual_position();
+            return Ok(Some((self.buffer.trim_end_matches(['\r', '\n']).to_string(), start, after)));
+        }
+    }
 }
 
 /// Parse a single VCF data line held in memory. `offset` is meaningless for a
-/// record that never came from a file, so it is reported as 0.
+/// record that never came from a file, so it is reported as 0; the contig id is
+/// 0 because there is no dictionary to resolve it against.
 pub fn parse_vcf_line(line: &str) -> Option<VcfRecord> {
-    parse_vcf_record(line, 0).ok().flatten()
+    let mut dict = ContigDict::new();
+    parse_vcf_record(line, 0, &mut dict).ok().flatten()
 }
 
-fn parse_vcf_record(line: &str, offset: u64) -> Result<Option<VcfRecord>> {
-    let cols: Vec<&str> = line.trim_end().split('\t').collect();
+pub fn parse_vcf_record(line: &str, offset: u64, contigs: &mut ContigDict) -> Result<Option<VcfRecord>> {
+    let cols: Vec<&str> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
     if cols.len() < 8 {
         return Ok(None);
     }
@@ -450,9 +456,9 @@ fn parse_vcf_record(line: &str, offset: u64) -> Result<Option<VcfRecord>> {
     let chrom = cols[0];
     let pos = cols[1]
         .parse::<u32>()
-        .map_err(|_| VcfError::InvalidFormat)?;
+        .map_err(|_| VcfError::ParseError(format!("invalid POS {:?} on {chrom}", cols[1])))?;
 
-    let chr_id = chr_name_to_id(chrom).unwrap_or(0);
+    let chr_id = contigs.insert(chrom);
 
     let format = if cols.len() > 8 {
         Some(cols[8].to_string())
@@ -488,31 +494,20 @@ pub struct KtileSourceReader {
     reader: KtileReader,
     cursor: usize,
     pub(crate) headers: Vec<String>,
-    pub(crate) contigs: Vec<String>,
+    pub(crate) contigs: ContigDict,
 }
 
 impl KtileSourceReader {
     pub fn open(path: &Path) -> Result<Self> {
         let reader = KtileReader::open(path).map_err(|_| VcfError::InvalidFormat)?;
-        let mut headers: Vec<String> = Vec::new();
-        let mut contigs: Vec<String> = Vec::new();
-        for line in reader.headers_block().split('\n') {
-            if line.is_empty() {
-                continue;
-            }
-            headers.push(line.to_string());
-            if line.starts_with("##contig=") {
-                if let Some(id) = extract_contig_id(line) {
-                    contigs.push(id);
-                }
-            }
-        }
-        Ok(Self {
-            reader,
-            cursor: 0,
-            headers,
-            contigs,
-        })
+        let headers: Vec<String> = reader
+            .headers_block()
+            .split('\n')
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect();
+        let contigs = ContigDict::from_header_lines(headers.iter().map(String::as_str));
+        Ok(Self { reader, cursor: 0, headers, contigs })
     }
 
     pub fn read_line(&mut self) -> Result<Option<String>> {
@@ -525,9 +520,7 @@ impl KtileSourceReader {
     }
 
     /// Like [`read_line`] but also returns the pre-stored (chr_id, pos).
-    pub fn read_line_with_meta(
-        &mut self,
-    ) -> Result<Option<(String, Option<(u32, u32)>)>> {
+    pub fn read_line_with_meta(&mut self) -> Result<Option<(String, Option<(u32, u32)>)>> {
         if self.cursor >= self.reader.n_records() {
             return Ok(None);
         }
@@ -539,7 +532,7 @@ impl KtileSourceReader {
         Ok(Some((line, Some((chr_id, pos)))))
     }
 
-    /// Zero-copy fast path — appends the next line directly into `batch`.
+    /// Zero-copy fast path: appends the next line directly into `batch`.
     pub fn read_line_into_batch(
         &mut self,
         batch: &mut crate::annotate::cpu_v2::ReadBatch,
@@ -559,10 +552,6 @@ impl KtileSourceReader {
         let i = self.cursor;
         self.cursor += 1;
         let line = self.reader.line_owned(i);
-        let mut rec = parse_vcf_record(&line, 0)?;
-        if let Some(ref mut r) = rec {
-            r.chr_id = self.reader.chr_id(i) as u8;
-        }
-        Ok(rec)
+        parse_vcf_record(&line, 0, &mut self.contigs)
     }
 }

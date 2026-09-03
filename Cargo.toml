@@ -1,6 +1,6 @@
 [package]
 name = "kira-bio-tools"
-version = "0.6.3"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.95"
 description = "High-performance VCF indexer with full tabix compatibility"
@@ -18,7 +18,8 @@ rayon = "1.10"
 indexmap = "2.7"
 lazy_static = "1.5"
 
-noodles-bgzf = "0.47"
+noodles-bgzf = { version = "0.47", features = ["libdeflate"] }
+libdeflater = "1.22"
 noodles-csi = "0.56"
 noodles-bam = "0.89"
 noodles-sam = "0.85"
@@ -37,14 +38,13 @@ pest_derive = "2.8.4"
 regex = "1.11"
 cust = { version = "0.3.2", optional = true }
 which = "8.0.0"
-flate2 = "1.1"
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 crc32fast = "1.4"
 crossbeam-channel = "0.5"
 indicatif = "0.18"
 smallvec = { version = "1.13", features = ["union", "const_generics"] }
 memchr = "2.7"
 itoa = "1.0"
-num_cpus = "1.17"
 percent-encoding = "2.3.2"
 url = "2.5.7"
 form_urlencoded = "1.2.2"

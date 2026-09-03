@@ -1,220 +1,235 @@
-//! Genotype likelihoods + Hardy-Weinberg prior + QUAL.
-//!
-//! Likelihoods are kept as natural-log values (`log_p`), normalised so the most
-//! likely genotype is 0. Integer PLs are derived for output; QUAL is computed
-//! from the (unsaturated) log posterior so it is a true float, not a `u8`.
+//! Genotype likelihoods with dependent errors: port of htslib `errmod.c`
+//! (Li 2011, the model behind `bcftools mpileup` PLs). Bases are packed as
+//! `q << 5 | strand << 4 | base`; repeated observations of the same base on
+//! the same strand are down-weighted by `fk[k] = (1 - depcorr)^k (1 - eps) + eps`.
 
-const MAX_QUAL: usize = 64;
-const PL_CAP: u32 = 255;
+use std::sync::OnceLock;
 
-pub struct ErrorModel {
-    log_factorial: Vec<f64>,
+/// `bcf_call_init(theta = 0.83)`: dependency coefficient `1 - theta`.
+const DEPCORR: f64 = 1.0 - 0.83;
+const EPS: f64 = 0.03;
+/// Sites deeper than this are subsampled, as htslib does.
+const MAX_BASES: usize = 255;
+
+struct Coef {
+    fk: Vec<f64>,
+    /// `beta[q << 16 | n << 8 | k]`.
+    beta: Vec<f64>,
+    /// `lhet[n << 8 | k]`.
+    lhet: Vec<f64>,
 }
 
-#[derive(Clone)]
-pub struct GenotypeLikelihoods {
-    /// Per-genotype log-likelihood (natural log), normalised so max == 0.
-    pub log_p: Vec<f64>,
-    /// Phred-scaled likelihoods for output (min == 0, capped at 255).
-    pub pl: Vec<u32>,
+fn lgamma(x: f64) -> f64 {
+    // Lanczos approximation (g = 7), accurate to ~1e-13 for x > 0.
+    const G: f64 = 7.0;
+    const C: [f64; 9] = [
+        0.999_999_999_999_809_9,
+        676.520_368_121_885_1,
+        -1_259.139_216_722_402_8,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
+        12.507_343_278_686_905,
+        -0.138_571_095_265_720_12,
+        9.984_369_578_019_572e-6,
+        1.505_632_735_149_311_6e-7,
+    ];
+    if x < 0.5 {
+        let pi = std::f64::consts::PI;
+        return (pi / (pi * x).sin()).ln() - lgamma(1.0 - x);
+    }
+    let x = x - 1.0;
+    let mut a = C[0];
+    let t = x + G + 0.5;
+    for (i, c) in C.iter().enumerate().skip(1) {
+        a += c / (x + i as f64);
+    }
+    0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + a.ln()
 }
 
-impl GenotypeLikelihoods {
-    /// Build from raw natural-log likelihoods (any scale); normalises so the
-    /// best genotype is 0 and derives capped integer PLs.
-    fn from_log_p(mut log_p: Vec<f64>) -> Self {
-        let max = log_p.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        if max.is_finite() {
-            for l in log_p.iter_mut() {
-                *l -= max;
-            }
-        } else {
-            for l in log_p.iter_mut() {
-                *l = 0.0;
+fn cal_coef(depcorr: f64, eps: f64) -> Coef {
+    let mut fk = vec![0.0; 256];
+    fk[0] = 1.0;
+    for (k, v) in fk.iter_mut().enumerate().skip(1) {
+        *v = (1.0 - depcorr).powi(k as i32) * (1.0 - eps) + eps;
+    }
+    let mut lc = vec![0.0f64; 256 * 256];
+    for n in 1..256usize {
+        let lgn = lgamma(n as f64 + 1.0);
+        for k in 1..=n {
+            lc[n << 8 | k] = lgn - lgamma(k as f64 + 1.0) - lgamma((n - k) as f64 + 1.0);
+        }
+    }
+    // Binomial tails in log space, as errmod.c does, so deep sites with
+    // high qualities do not underflow.
+    let mut beta = vec![0.0f64; 256 * 256 * 64];
+    for q in 1..64usize {
+        let e = 10f64.powf(-(q as f64) / 10.0);
+        let le = e.ln();
+        let le1 = (1.0 - e).ln();
+        for n in 1..=255usize {
+            let base = q << 16 | n << 8;
+            let mut sum1 = lc[n << 8 | n] + n as f64 * le;
+            beta[base + n] = f64::INFINITY;
+            let mut k = n as i64 - 1;
+            while k >= 0 {
+                let ku = k as usize;
+                let sum = sum1 + (lc[n << 8 | ku] + ku as f64 * le + (n - ku) as f64 * le1 - sum1).exp().ln_1p();
+                beta[base + ku] = -10.0 / std::f64::consts::LN_10 * (sum1 - sum);
+                sum1 = sum;
+                k -= 1;
             }
         }
-        let pl = log_p
-            .iter()
-            .map(|&l| {
-                let phred = (-10.0 * l / std::f64::consts::LN_10).round();
-                phred.clamp(0.0, PL_CAP as f64) as u32
-            })
-            .collect();
-        Self { log_p, pl }
+    }
+    let mut lhet = vec![0.0f64; 256 * 256];
+    for n in 0..256usize {
+        for k in 0..256usize {
+            lhet[n << 8 | k] = lc[n << 8 | k] - std::f64::consts::LN_2 * n as f64;
+        }
+    }
+    Coef { fk, beta, lhet }
+}
+
+static COEF: OnceLock<Coef> = OnceLock::new();
+
+/// `drand48` (48-bit LCG), seeded like `srand48(0)`, for the deep-site subsample.
+struct Drand48(u64);
+
+impl Drand48 {
+    fn new(seed: u32) -> Self {
+        Self(((seed as u64) << 16) | 0x330E)
+    }
+    fn next(&mut self) -> f64 {
+        self.0 = (self.0.wrapping_mul(0x5DEE_CE66D).wrapping_add(0xB)) & ((1u64 << 48) - 1);
+        self.0 as f64 / (1u64 << 48) as f64
+    }
+}
+
+thread_local! {
+    static RNG: std::cell::RefCell<Drand48> = std::cell::RefCell::new(Drand48::new(0));
+}
+
+/// Pack one observation: quality (clamped to 4..=63 like `bcf_call_glfgen`),
+/// strand (1 = reverse) and base code.
+#[inline]
+pub fn pack_base(q: u8, reverse: bool, base: u8) -> u16 {
+    let q = q.clamp(4, 63) as u16;
+    (q << 5) | ((reverse as u16) << 4) | (base as u16 & 0xf)
+}
+
+#[derive(Clone, Copy)]
+pub struct ErrorModel {
+    coef: &'static Coef,
+}
+
+impl Default for ErrorModel {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl ErrorModel {
     pub fn new() -> Self {
-        let mut lf = vec![0.0; 4096];
-        for i in 2..lf.len() {
-            lf[i] = lf[i - 1] + (i as f64).ln();
-        }
-        Self { log_factorial: lf }
+        Self { coef: COEF.get_or_init(|| cal_coef(DEPCORR, EPS)) }
     }
 
-    /// Count-based likelihoods: one averaged quality per allele. Used by the
-    /// indel / synthetic-quality paths where per-read bases are not available.
-    pub fn likelihoods(
-        &self,
-        n_alleles: usize,
-        counts: &[u32],
-        quals: &[u32],
-    ) -> GenotypeLikelihoods {
-        let n_gt = n_alleles * (n_alleles + 1) / 2;
-        let total: u32 = counts.iter().sum();
-        if total == 0 {
-            return GenotypeLikelihoods::from_log_p(vec![0.0; n_gt]);
+    /// `errmod_cal`: phred-scaled genotype likelihoods `q[i * m + j]` over
+    /// `m` base codes. `bases` is reordered (sorted, subsampled when deep).
+    pub fn cal(&self, bases: &mut Vec<u16>, m: usize) -> Vec<f32> {
+        let mut q = vec![0.0f32; m * m];
+        if bases.is_empty() || m == 0 || m > 16 {
+            return q;
         }
-
-        let avg_q = |i: usize| -> f64 {
-            if counts[i] == 0 {
-                30.0
-            } else {
-                (quals[i] as f64 / counts[i] as f64).min(MAX_QUAL as f64)
+        let mut n = bases.len();
+        if n > MAX_BASES {
+            RNG.with(|r| {
+                let mut r = r.borrow_mut();
+                let mut i = n;
+                while i > 1 {
+                    let j = (r.next() * i as f64) as usize;
+                    bases.swap(j, i - 1);
+                    i -= 1;
+                }
+            });
+            n = MAX_BASES;
+        }
+        bases[..n].sort_unstable();
+        let coef = self.coef;
+        let mut w = [0u32; 32];
+        let mut fsum = [0.0f64; 16];
+        let mut bsum = [0.0f64; 16];
+        let mut c = [0u32; 16];
+        for j in (0..n).rev() {
+            let b = bases[j];
+            let mut qv = (b >> 5) as usize;
+            if qv < 4 {
+                qv = 4;
             }
-        };
-
-        let mut log_p: Vec<f64> = vec![f64::NEG_INFINITY; n_gt];
-        let mut gt_idx = 0usize;
-        for j in 0..n_alleles {
-            for i in 0..=j {
-                let mut ll = 0.0f64;
-                for k in 0..n_alleles {
-                    let c = counts[k] as f64;
-                    if c == 0.0 {
+            if qv > 63 {
+                qv = 63;
+            }
+            let k = (b & 0x1f) as usize;
+            let kb = k & 0xf;
+            let fkw = coef.fk[(w[k] as usize).min(255)];
+            fsum[kb] += fkw;
+            bsum[kb] += fkw * coef.beta[qv << 16 | n << 8 | (c[kb] as usize).min(255)];
+            c[kb] += 1;
+            w[k] += 1;
+        }
+        for j in 0..m {
+            let (mut tmp1, mut tmp3, mut tmp2) = (0.0f64, 0.0f64, 0u32);
+            for k in 0..m {
+                if k == j {
+                    continue;
+                }
+                tmp1 += bsum[k];
+                tmp2 += c[k];
+                tmp3 += fsum[k];
+            }
+            let _ = tmp3;
+            if tmp2 > 0 {
+                q[j * m + j] = tmp1 as f32;
+            }
+            for k in j + 1..m {
+                let cjk = (c[j] + c[k]) as usize;
+                let (mut tmp1, mut tmp2) = (0.0f64, 0u32);
+                for i in 0..m {
+                    if i == j || i == k {
                         continue;
                     }
-                    let e = 10f64.powf(-avg_q(k) / 10.0);
-                    ll += c * allele_prob(i, j, k, e).max(1e-30).ln();
+                    tmp1 += bsum[i];
+                    tmp2 += c[i];
                 }
-                log_p[gt_idx] = ll;
-                gt_idx += 1;
+                let lhet = coef.lhet[cjk.min(255) << 8 | (c[k] as usize).min(255)];
+                let v = if tmp2 > 0 { -4.343 * lhet + tmp1 } else { -4.343 * lhet };
+                q[j * m + k] = v as f32;
+                q[k * m + j] = v as f32;
             }
-        }
-        let _ = &self.log_factorial;
-        GenotypeLikelihoods::from_log_p(log_p)
-    }
-
-    /// Exact per-read genotype likelihoods. `reads` is `(allele_index, qual)`
-    /// per observed base, with quality already capped by mapping quality
-    /// (samtools-style `min(BQ, MAPQ)`). This is the correct diploid model —
-    /// a product over reads, not a single averaged quality per allele.
-    pub fn likelihoods_per_read(
-        &self,
-        n_alleles: usize,
-        reads: &[(usize, u8)],
-    ) -> GenotypeLikelihoods {
-        let n_gt = n_alleles * (n_alleles + 1) / 2;
-        if reads.is_empty() {
-            return GenotypeLikelihoods::from_log_p(vec![0.0; n_gt]);
-        }
-        // Pre-compute ln-probabilities per read once.
-        let err: Vec<f64> = reads
-            .iter()
-            .map(|&(_, q)| 10f64.powf(-(q as f64) / 10.0))
-            .collect();
-
-        let mut log_p: Vec<f64> = vec![0.0; n_gt];
-        let mut gt_idx = 0usize;
-        for j in 0..n_alleles {
-            for i in 0..=j {
-                let mut ll = 0.0f64;
-                for (r, &(a, _)) in reads.iter().enumerate() {
-                    ll += allele_prob(i, j, a, err[r]).max(1e-30).ln();
+            for k in 0..m {
+                if q[j * m + k] < 0.0 {
+                    q[j * m + k] = 0.0;
                 }
-                log_p[gt_idx] = ll;
-                gt_idx += 1;
             }
         }
-        GenotypeLikelihoods::from_log_p(log_p)
-    }
-}
-
-/// P(observed allele `a` | diploid genotype `i/j`, per-base error `e`).
-#[inline]
-fn allele_prob(i: usize, j: usize, a: usize, e: f64) -> f64 {
-    if i == a && j == a {
-        1.0 - e
-    } else if i == a || j == a {
-        0.5 * (1.0 - e) + 0.5 * (e / 3.0)
-    } else {
-        e / 3.0
-    }
-}
-
-impl GenotypeLikelihoods {
-    pub fn to_pl_string(&self) -> String {
-        self.pl
-            .iter()
-            .map(u32::to_string)
-            .collect::<Vec<_>>()
-            .join(",")
+        q
     }
 
-    pub fn most_likely_gt(&self, n_alleles: usize) -> (usize, usize) {
-        let mut best_idx = 0;
-        let mut best = f64::NEG_INFINITY;
-        for (k, &v) in self.log_p.iter().enumerate() {
-            if v > best {
-                best = v;
-                best_idx = k;
-            }
-        }
-        for j in 0..n_alleles {
+    /// PLs for the genotypes over `alleles` (base codes in output allele
+    /// order, VCF genotype order), min-normalised and capped at 255 like
+    /// `bcf_call_combine`.
+    pub fn pls(&self, bases: &mut Vec<u16>, alleles: &[u8]) -> Vec<u32> {
+        let m = 1 + alleles.iter().copied().max().unwrap_or(0) as usize;
+        let m = m.max(alleles.len()).min(16);
+        let q = self.cal(bases, m);
+        let n = alleles.len();
+        let mut raw: Vec<f32> = Vec::with_capacity(n * (n + 1) / 2);
+        for j in 0..n {
             for i in 0..=j {
-                if best_idx == 0 {
-                    return (i, j);
-                }
-                best_idx -= 1;
+                let (a, b) = (alleles[i] as usize, alleles[j] as usize);
+                raw.push(q[a * m + b]);
             }
         }
-        (0, 0)
-    }
-
-    /// Apply Hardy-Weinberg prior with given per-allele variant rate.
-    /// Returns posterior likelihoods (data + prior), renormalised.
-    pub fn with_prior(&self, n_alleles: usize, alt_rate: f64) -> GenotypeLikelihoods {
-        let ref_freq = (1.0 - alt_rate).max(1e-12);
-        let alt_freq_each = if n_alleles > 1 {
-            alt_rate / (n_alleles as f64 - 1.0)
-        } else {
-            0.0
-        };
-        let freq = |i: usize| if i == 0 { ref_freq } else { alt_freq_each };
-
-        let mut post: Vec<f64> = Vec::with_capacity(self.log_p.len());
-        let mut gt_idx = 0;
-        for j in 0..n_alleles {
-            for i in 0..=j {
-                let p_prior = freq(i) * freq(j) * if i == j { 1.0 } else { 2.0 };
-                post.push(self.log_p[gt_idx] + p_prior.max(1e-30).ln());
-                gt_idx += 1;
-            }
-        }
-        GenotypeLikelihoods::from_log_p(post)
-    }
-
-    /// Variant QUAL = -10·log10 P(genotype 0/0 | data), as a true float.
-    /// 0 ⇒ reference is the best call; large ⇒ strong variant signal.
-    /// Call after [`with_prior`] for a posterior-based QUAL.
-    pub fn qual(&self) -> f64 {
-        if self.log_p.is_empty() {
-            return 0.0;
-        }
-        // log_p is normalised so max == 0; convert to posterior over genotypes.
-        let z: f64 = self.log_p.iter().map(|&l| l.exp()).sum();
-        if z <= 0.0 {
-            return 0.0;
-        }
-        let p_ref = self.log_p[0].exp() / z;
-        (-10.0 * p_ref.max(1e-30).log10()).max(0.0)
-    }
-
-    /// True if the best posterior GT is not 0/0.
-    pub fn is_variant(&self, n_alleles: usize) -> bool {
-        let (gi, gj) = self.most_likely_gt(n_alleles);
-        gi != 0 || gj != 0
+        let min = raw.iter().copied().fold(f32::INFINITY, f32::min);
+        raw.iter().map(|&x| ((x - min + 0.499) as i64).clamp(0, 255) as u32).collect()
     }
 }
 

@@ -14,7 +14,7 @@ use noodles_bgzf as bgzf;
 use crate::bgzf::structs::{Result, VirtualPosition};
 
 /// Default decompression worker count. Honours `KIRA_BT_BGZF_THREADS`;
-/// otherwise `max(1, num_cpus() / 4)`.
+/// otherwise a share of the process thread budget ([`crate::threads`]).
 pub fn default_bgzf_workers() -> NonZeroUsize {
     if let Ok(v) = std::env::var("KIRA_BT_BGZF_THREADS")
         && let Ok(n) = v.parse::<usize>()
@@ -22,8 +22,7 @@ pub fn default_bgzf_workers() -> NonZeroUsize {
     {
         return NonZeroUsize::new(n).unwrap();
     }
-    let n = (num_cpus::get() / 4).max(1);
-    NonZeroUsize::new(n).unwrap()
+    NonZeroUsize::new(crate::threads::decompress_workers()).unwrap()
 }
 
 /// Multithreaded BGZF reader for streaming (annotate) workloads.

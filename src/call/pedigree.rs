@@ -56,6 +56,13 @@ pub fn ploidy_at_site(
 ) -> Vec<u8> {
     samples.iter().map(|name| {
         let sex = sex_map.get(name).map(|s| s.as_str()).unwrap_or("");
+        // A bare 0/1/2 in the sample file is the ploidy itself, not a sex.
+        match sex {
+            "0" => return 0,
+            "1" => return 1,
+            "2" => return 2,
+            _ => {}
+        }
         for r in regions {
             // `*` applies to every chromosome / every sex, as in bcftools.
             let chrom_matches = r.chrom == "*" || r.chrom == chrom;
@@ -99,10 +106,11 @@ pub fn parse_groups<P: AsRef<Path>>(p: P, samples: &[String]) -> Result<Vec<Samp
         let l = line?;
         let t = l.trim();
         if t.is_empty() || t.starts_with('#') { continue; }
+        // `sample<TAB>group`, as `bcftools call -G` reads it.
         let parts: Vec<&str> = t.split_whitespace().collect();
         if parts.len() < 2 { continue; }
-        let group = parts[0].to_string();
-        let sample = parts[1];
+        let sample = parts[0];
+        let group = parts[1].to_string();
         if let Some(&si) = idx.get(sample) {
             by_name.entry(group).or_default().push(si);
         }
@@ -122,7 +130,11 @@ pub fn parse_sex_file<P: AsRef<Path>>(p: P) -> Result<HashMap<String, String>> {
         match parts.len() {
             0 | 1 => {}
             2..=4 => { m.insert(parts[0].to_string(), parts[1].to_string()); }
-            _ => { m.insert(parts[1].to_string(), parts[4].to_string()); }
+            // PED: sex 1/2 becomes the M/F the ploidy file is keyed on.
+            _ => {
+                let sex = match parts[4] { "1" => "M", "2" => "F", other => other };
+                m.insert(parts[1].to_string(), sex.to_string());
+            }
         }
     }
     Ok(m)

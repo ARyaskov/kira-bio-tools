@@ -309,30 +309,9 @@ fn parse_region_file(path: &str) -> Result<Vec<RegionSpec>> {
 }
 
 fn parse_region(s: &str) -> Option<RegionSpec> {
-    if let Some((chr, rest)) = s.split_once(':') {
-        if let Some((a, b)) = rest.split_once('-') {
-            let start = if a.is_empty() {
-                None
-            } else {
-                a.parse::<u32>().ok()
-            };
-            let end = if b.is_empty() {
-                None
-            } else {
-                b.parse::<u32>().ok()
-            };
-            return Some(RegionSpec {
-                chr: chr.to_string(),
-                start,
-                end,
-            });
-        }
-        let pos = rest.parse::<u32>().ok()?;
-        return Some(RegionSpec {
-            chr: chr.to_string(),
-            start: Some(pos),
-            end: Some(pos),
-        });
+    if s.contains(':') {
+        let (chr, beg, end) = crate::regions::parse_region_spec(s).ok()?;
+        return Some(RegionSpec { chr, start: Some(beg), end: (end != u32::MAX).then_some(end) });
     }
     Some(RegionSpec {
         chr: s.to_string(),
@@ -356,15 +335,14 @@ fn record_matches_regions(chrom: &str, pos: u32, regions: &[RegionSpec]) -> bool
 }
 
 fn extract_sample_names(header: &[String]) -> Result<Vec<String>> {
-    let line = header
-        .iter()
-        .find(|l| l.starts_with("#CHROM"))
-        .ok_or_else(|| anyhow!("VCF header does not contain #CHROM line"))?;
-    let cols: Vec<&str> = line.split('\t').collect();
-    if cols.len() <= 9 {
+    if !header.iter().any(|l| l.starts_with("#CHROM")) {
+        return Err(anyhow!("VCF header does not contain #CHROM line"));
+    }
+    let samples = crate::vcf::header::extract_samples(header);
+    if samples.is_empty() {
         return Err(anyhow!("VCF does not contain sample columns"));
     }
-    Ok(cols[9..].iter().map(|s| s.to_string()).collect())
+    Ok(samples)
 }
 
 fn build_format_index(format: &str) -> HashMap<String, usize> {
@@ -812,25 +790,3 @@ fn run_viterbi_per_chrom(points: &mut [SamplePoint], t_same: f64, baf_weight: f6
 #[cfg(test)]
 #[path = "../../tests/unit/cnv.rs"]
 mod tests;
-
-fn chromosome_spans(points: &[SamplePoint]) -> Vec<(String, u32, u32)> {
-    if points.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    let mut chr = points[0].chr.clone();
-    let mut start = points[0].pos;
-    let mut end = points[0].pos;
-    for p in points.iter().skip(1) {
-        if p.chr != chr {
-            out.push((chr, start, end));
-            chr = p.chr.clone();
-            start = p.pos;
-            end = p.pos;
-        } else {
-            end = p.pos;
-        }
-    }
-    out.push((chr, start, end));
-    out
-}

@@ -132,9 +132,12 @@ pub fn write_ktile_from_vcf_with<I: AsRef<Path>, O: AsRef<Path>>(
         if tab_count < 5 {
             continue;
         }
-        let chrom = unsafe { std::str::from_utf8_unchecked(&bytes[..tabs[0] as usize]) };
-        let pos_str = unsafe {
-            std::str::from_utf8_unchecked(&bytes[(tabs[0] as usize + 1)..tabs[1] as usize])
+        // File bytes are untrusted: validate instead of assuming UTF-8.
+        let Ok(chrom) = std::str::from_utf8(&bytes[..tabs[0] as usize]) else {
+            continue;
+        };
+        let Ok(pos_str) = std::str::from_utf8(&bytes[(tabs[0] as usize + 1)..tabs[1] as usize]) else {
+            continue;
         };
         let Ok(pos) = pos_str.parse::<u32>() else {
             continue;

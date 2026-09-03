@@ -70,10 +70,10 @@ impl ConsensusCfg {
         cfg.mark_del = a.mark_del.clone();
         cfg.mark_ins = a.mark_ins.clone();
         cfg.mark_snv = a.mark_snv.clone();
-        if let Some(p) = &a.mask {
+        for (i, p) in a.mask.iter().enumerate() {
             cfg.masks.push(MaskSpec {
                 bed_path: p.clone(),
-                mode: a.mask_with.clone().unwrap_or_else(|| "N".to_string()),
+                mode: a.mask_with.get(i).cloned().unwrap_or_else(|| "N".to_string()),
             });
         }
         cfg
@@ -84,113 +84,6 @@ impl ConsensusCfg {
 struct MaskSpec {
     bed_path: PathBuf,
     mode: String,
-}
-
-fn parse_args(args: &[String]) -> ConsensusCfg {
-    let mut cfg = ConsensusCfg::default();
-    let mut i = 0usize;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-f" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    cfg.ref_fasta = Some(PathBuf::from(v));
-                }
-            }
-            "-c" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    cfg.chain_path = Some(PathBuf::from(v));
-                }
-            }
-            "-s" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    cfg.sample = Some(v.clone());
-                }
-            }
-            "-S" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    cfg.sample_file = Some(PathBuf::from(v));
-                }
-            }
-            "-H" | "--haplotype" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    cfg.haplotype = Some(v.clone());
-                }
-            }
-            "-a" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    cfg.absent_char = v.chars().next();
-                }
-            }
-            "-M" | "--missing" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    cfg.missing_char = v.chars().next();
-                }
-            }
-            "-i" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    cfg.include_expr = Some(v.clone());
-                }
-            }
-            "-e" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    cfg.exclude_expr = Some(v.clone());
-                }
-            }
-            "--mark-del" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    cfg.mark_del = Some(v.clone());
-                }
-            }
-            "--mark-ins" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    cfg.mark_ins = Some(v.clone());
-                }
-            }
-            "--mark-snv" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    cfg.mark_snv = Some(v.clone());
-                }
-            }
-            "-m" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    cfg.masks.push(MaskSpec {
-                        bed_path: PathBuf::from(v),
-                        mode: "N".to_string(),
-                    });
-                }
-            }
-            "--mask-with" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    if let Some(last) = cfg.masks.last_mut() {
-                        last.mode = v.clone();
-                    }
-                }
-            }
-            "--" => {}
-            "-I" => cfg.iupac = true,
-            _ => {
-                if !args[i].starts_with('-') || args[i] == "-" {
-                    cfg.input = Some(PathBuf::from(&args[i]));
-                }
-            }
-        }
-        i += 1;
-    }
-    cfg
 }
 
 fn read_fasta(path: &PathBuf) -> Vec<(String, String)> {
@@ -710,8 +603,8 @@ fn apply_masks(records: &mut [(String, String)], masks: &[MaskSpec]) {
                 continue;
             }
             let chrom = cols[0];
-            let start0 = cols[1].parse::<usize>().ok().unwrap_or(0);
-            let end0 = cols[2].parse::<usize>().ok().unwrap_or(start0);
+            // Malformed rows are skipped rather than masking from position 0.
+            let (Ok(start0), Ok(end0)) = (cols[1].parse::<usize>(), cols[2].parse::<usize>()) else { continue };
             for (name, seq) in records.iter_mut() {
                 if name != chrom {
                     continue;

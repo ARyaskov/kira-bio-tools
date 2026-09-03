@@ -55,6 +55,7 @@ pub struct VcfRecord {
     pub info: String,
     pub format: Option<String>,
     pub samples: Vec<String>,
+    /// Contig id from the reader's dictionary (header order, then first appearance).
     pub chr_id: ChrId,
     pub position: u32,
     pub offset: u64,
@@ -146,7 +147,7 @@ pub fn fast_parse_u32(bytes: &[u8]) -> Option<u32> {
         if !byte.is_ascii_digit() {
             return None;
         }
-        result = result.wrapping_mul(10).wrapping_add((byte - b'0') as u32);
+        result = result.checked_mul(10)?.checked_add((byte - b'0') as u32)?;
     }
 
     Some(result)

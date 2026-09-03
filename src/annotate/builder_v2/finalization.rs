@@ -407,14 +407,14 @@ fn write_ani_file(
     let file = File::create(output)?;
     let mut file = BufWriter::with_capacity(8 * 1024 * 1024, file);
 
-    let hdr_bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(&header as *const _ as *const u8, hdr_size) };
+    let hdr_bytes: &[u8] = bytemuck::bytes_of(&header);
+    debug_assert_eq!(hdr_bytes.len(), hdr_size);
     file.write_all(hdr_bytes)?;
 
     file.write_all(index_bytes)?;
 
-    let entries_bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(entries.as_ptr() as *const u8, ent_size) };
+    let entries_bytes: &[u8] = bytemuck::cast_slice(entries);
+    debug_assert_eq!(entries_bytes.len(), ent_size);
     file.write_all(entries_bytes)?;
 
     let mut block_entries = Vec::with_capacity(blocks.len());
@@ -429,12 +429,7 @@ fn write_ani_file(
         cur_off += b.data.len() as u64;
     }
 
-    let block_entries_bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(
-            block_entries.as_ptr() as *const u8,
-            block_entries.len() * mem::size_of::<AniBlockEntry>(),
-        )
-    };
+    let block_entries_bytes: &[u8] = bytemuck::cast_slice(&block_entries);
     file.write_all(block_entries_bytes)?;
 
     for b in blocks {
@@ -456,9 +451,8 @@ fn write_ani_file(
         let zeros = vec![0u8; entry_keys_pad];
         file.write_all(&zeros)?;
     }
-    let entry_keys_bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(entry_keys.as_ptr() as *const u8, entry_keys_size)
-    };
+    let entry_keys_bytes: &[u8] = bytemuck::cast_slice(entry_keys);
+    debug_assert_eq!(entry_keys_bytes.len(), entry_keys_size);
     file.write_all(entry_keys_bytes)?;
 
     file.flush()?;
@@ -624,8 +618,7 @@ fn build_pos_index(entries: &[AniEntry]) -> Vec<u8> {
         off_entry_indices: off_entry_indices as u32,
     };
 
-    let hdr_bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(&header as *const _ as *const u8, header_size) };
+    let hdr_bytes: &[u8] = bytemuck::bytes_of(&header);
     out[..header_size].copy_from_slice(hdr_bytes);
     out
 }
@@ -765,8 +758,7 @@ fn build_info_blob(entries: &[AniEntry], pool: &mut StringPool) -> Result<Vec<u8
         off_values: off_values as u64,
     };
 
-    let hdr_bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(&header as *const _ as *const u8, header_size) };
+    let hdr_bytes: &[u8] = bytemuck::bytes_of(&header);
     out[..header_size].copy_from_slice(hdr_bytes);
     Ok(out)
 }

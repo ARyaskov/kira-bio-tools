@@ -112,6 +112,8 @@ mod arch_avx2 {
     impl FilterArch for Avx2Impl {
         #[inline]
         fn split_key_value<'a>(&self, s: &'a str) -> Option<(&'a str, &'a str)> {
+            // SAFETY: this module only exists when the build targets AVX2
+            // (`cfg(target_feature = "avx2")`), so the intrinsics are available.
             unsafe { split_eq_avx2(s) }
         }
 
@@ -141,6 +143,9 @@ mod arch_avx2 {
         }
     }
 
+    /// # Safety
+    /// Requires AVX2 (guaranteed by this module's `cfg`). Loads stay within
+    /// `s`, and the split point is an ASCII `=`, so both halves are valid UTF-8.
     #[target_feature(enable = "avx2")]
     pub unsafe fn split_eq_avx2<'a>(s: &'a str) -> Option<(&'a str, &'a str)> {
         use core::arch::x86_64::*;
@@ -247,6 +252,8 @@ mod arch_neon {
 
     impl FilterArch for NeonImpl {
         fn split_key_value(&self, s: &str) -> Option<(&str, &str)> {
+            // SAFETY: this module only exists when the build targets NEON
+            // (`cfg(target_feature = "neon")`), so the intrinsics are available.
             unsafe { split_eq_neon(s) }
         }
 
@@ -271,6 +278,9 @@ mod arch_neon {
         }
     }
 
+    /// # Safety
+    /// Requires NEON (guaranteed by this module's `cfg`). Loads stay within
+    /// `s`, and the split point is an ASCII `=`, so both halves are valid UTF-8.
     #[target_feature(enable = "neon")]
     unsafe fn split_eq_neon(s: &str) -> Option<(&str, &str)> {
         let bytes = s.as_bytes();

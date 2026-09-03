@@ -40,6 +40,14 @@ Add to your `.bashrc` or `.zshrc`:
 alias tabix='kira-bt tabix'
 ```
 
+## Index Formats
+
+`kira-bt tabix` writes `.tbi` unless `-C` asks for `.csi`; `kira-bt index`
+writes `.csi` unless `-t` asks for `.tbi`. Both formats are read by htslib
+tools (`tabix`, `bcftools view -r`, `bcftools index -n/-s`) and kira-bt reads
+indexes made by htslib. Plain gzip and uncompressed inputs are accepted for
+streaming; indexing needs BGZF.
+
 ## Command Mapping
 
 All tabix commands work identically with `kira-bt tabix`:

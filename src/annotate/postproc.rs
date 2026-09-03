@@ -379,8 +379,18 @@ pub fn process_record_line(
     if line.is_empty() || line.as_bytes()[0] == b'#' {
         return LineAction::Keep;
     }
+    let cols: Vec<&str> = line.split('\t').collect();
+    process_record_cols(line, &cols, pp, matched_db)
+}
 
-    let cols_borrow: Vec<&str> = line.split('\t').collect();
+/// [`process_record_line`] on columns the caller already split, so a command
+/// that splits the line for its own filters does not split it twice.
+pub fn process_record_cols(
+    line: &str,
+    cols_borrow: &[&str],
+    pp: &PostProcessor,
+    matched_db: bool,
+) -> LineAction {
     if cols_borrow.len() < 8 { return LineAction::Keep; }
 
     let chrom_renamed: Option<String> = pp.rename_chrs.as_ref().and_then(|m| m.get(cols_borrow[0]).cloned());
@@ -388,7 +398,7 @@ pub fn process_record_line(
 
     if let Some(p) = pp.include.as_ref().or(pp.exclude.as_ref()) {
         let include_mode = pp.include.is_some();
-        let pass = eval_predicate(p, line);
+        let pass = eval_predicate(p, cols_borrow);
         let keep = if include_mode { pass } else { !pass };
         if !keep {
             return if pp.keep_sites { LineAction::Keep } else { LineAction::Drop };
@@ -592,13 +602,13 @@ fn render_id_template(t: &IdTemplate, chrom: &str, pos: &str, ref_: &str, alt: &
     s
 }
 
-fn eval_predicate(p: &Predicate, line: &str) -> bool {
-    let Some(rec) = parse_record_for_filter(line) else { return true; };
+fn eval_predicate(p: &Predicate, cols: &[&str]) -> bool {
+    let Some(rec) = parse_record_for_filter(cols) else { return true; };
     p.engine.eval(&rec).map(|r| r.pass_site).unwrap_or(true)
 }
 
-fn parse_record_for_filter(line: &str) -> Option<crate::vcf::VcfRecord> {
-    let cols: Vec<&str> = line.trim_end().split('\t').collect();
+/// Record for the filter engine from already split columns.
+fn parse_record_for_filter(cols: &[&str]) -> Option<crate::vcf::VcfRecord> {
     if cols.len() < 8 { return None; }
     let pos: u32 = cols[1].parse().ok()?;
     let format = if cols.len() > 8 { Some(cols[8].to_string()) } else { None };
@@ -696,181 +706,8 @@ pub fn read_columns_file<P: AsRef<Path>>(p: P) -> Result<(Vec<String>, Vec<Optio
     Ok((cols, types))
 }
 
-#[derive(Clone, Default)]
-pub struct RegionFilter {
-    pub by_chr: FxHashMap<String, Vec<(u32, u32)>>,
-}
-
-impl RegionFilter {
-    pub fn has_index_for<P: AsRef<Path>>(input: P) -> Option<std::path::PathBuf> {
-        let p = input.as_ref();
-        let s = p.to_string_lossy();
-        for ext in &[".tbi", ".csi"] {
-            let cand = std::path::PathBuf::from(format!("{}{}", s, ext));
-            if cand.exists() { return Some(cand); }
-        }
-        None
-    }
-
-    /// Stream lines from a BGZF file using CSI index to skip irrelevant blocks.
-    /// Returns lines that pass the region filter. If index not present,
-    /// falls back to streaming everything through `line_passes`.
-    pub fn stream_with_index<P: AsRef<Path>>(
-        &self,
-        input: P,
-        contigs: &[String],
-        mut cb: impl FnMut(&str),
-    ) -> anyhow::Result<()> {
-        use crate::bgzf::BgzfSeekReader;
-        use crate::csi::CsiQuery;
-        let path = input.as_ref();
-        let Some(idx_path) = Self::has_index_for(path) else {
-            anyhow::bail!("no .tbi/.csi index for {:?}", path);
-        };
-        let q = CsiQuery::open(&idx_path)?;
-        let mut chunks: Vec<(u64, u64)> = Vec::new();
-        for (rid, contig) in contigs.iter().enumerate() {
-            if let Some(ranges) = self.by_chr.get(contig) {
-                for _ in ranges {
-                    let cs = q.query(rid, 0, u32::MAX);
-                    chunks.extend(cs);
-                }
-            }
-        }
-        chunks.sort_unstable_by_key(|c| c.0);
-        chunks.dedup();
-
-        let mut reader = BgzfSeekReader::open(path)?;
-        for (start, end) in chunks {
-            reader.seek_to(start)?;
-            while let Some(line) = reader.read_line()? {
-                if line.is_empty() || line.starts_with('#') { continue; }
-                if !self.line_passes(&line) { continue; }
-                cb(&line);
-                if reader_past(&reader, end) { break; }
-            }
-        }
-        Ok(())
-    }
-
-    pub fn from_cli(spec: &str) -> Result<Self> {
-        let mut f = RegionFilter::default();
-        for raw in spec.split(',') {
-            let item = raw.trim();
-            if item.is_empty() { continue; }
-            let (chr, beg, end) = parse_region_item(item)?;
-            f.by_chr.entry(chr).or_default().push((beg, end));
-        }
-        f.finalize();
-        Ok(f)
-    }
-
-    pub fn from_file<P: AsRef<Path>>(p: P) -> Result<Self> {
-        let mut f = RegionFilter::default();
-        let path = p.as_ref();
-        let is_bed = matches!(path.extension().and_then(|e| e.to_str()), Some("bed") | Some("BED"));
-        for line in BufReader::new(File::open(path)?).lines() {
-            let line = line?;
-            let t = line.trim();
-            if t.is_empty() || t.starts_with('#') || t.starts_with("track") || t.starts_with("browser") { continue; }
-            let parts: Vec<&str> = t.split('\t').collect();
-            if parts.is_empty() { continue; }
-            let chr = parts[0].to_string();
-            let (beg, end) = match parts.len() {
-                1 => (1, u32::MAX),
-                2 => {
-                    let b: u32 = parts[1].parse().context("region beg")?;
-                    (if is_bed { b + 1 } else { b }, u32::MAX)
-                }
-                _ => {
-                    let b: u32 = parts[1].parse().context("region beg")?;
-                    let e: u32 = parts[2].parse().context("region end")?;
-                    (if is_bed { b + 1 } else { b }, e)
-                }
-            };
-            f.by_chr.entry(chr).or_default().push((beg, end));
-        }
-        f.finalize();
-        Ok(f)
-    }
-
-    fn finalize(&mut self) {
-        for v in self.by_chr.values_mut() {
-            v.sort_unstable_by_key(|r| r.0);
-            let mut merged: Vec<(u32, u32)> = Vec::with_capacity(v.len());
-            for r in v.drain(..) {
-                if let Some(last) = merged.last_mut() {
-                    if r.0 <= last.1.saturating_add(1) { last.1 = last.1.max(r.1); continue; }
-                }
-                merged.push(r);
-            }
-            *v = merged;
-        }
-    }
-
-    pub fn contains(&self, chr: &str, pos: u32) -> bool {
-        let Some(ranges) = self.by_chr.get(chr) else { return false; };
-        let idx = ranges.partition_point(|r| r.1 < pos);
-        idx < ranges.len() && ranges[idx].0 <= pos
-    }
-
-    pub fn line_passes(&self, line: &str) -> bool {
-        self.line_passes_mode(line, 1)
-    }
-
-    /// Overlap mode: 0 = POS in region; 1 = record overlaps (REF span);
-    /// 2 = variant overlaps (REF + ALT span). Matches bcftools `--regions-overlap`.
-    pub fn line_passes_mode(&self, line: &str, mode: u8) -> bool {
-        let bytes = line.as_bytes();
-        let Some(t1) = memchr(b'\t', bytes) else { return false; };
-        let chr = &line[..t1];
-        let rest = &line[t1 + 1..];
-        let Some(t2) = memchr(b'\t', rest.as_bytes()) else { return false; };
-        let pos_str = &rest[..t2];
-        let Ok(pos) = pos_str.parse::<u32>() else { return false; };
-        if mode == 0 { return self.contains(chr, pos); }
-        let after = &rest[t2 + 1..];
-        let cols: Vec<&str> = after.splitn(4, '\t').collect();
-        if cols.len() < 3 { return self.contains(chr, pos); }
-        let refa = cols[1];
-        let alt = cols[2];
-        let end = if mode == 2 {
-            let max_alt: usize = alt.split(',').filter_map(|a| if a.starts_with('<') { None } else { Some(a.len()) }).max().unwrap_or(refa.len());
-            pos + (refa.len().max(max_alt) as u32) - 1
-        } else {
-            pos + (refa.len() as u32) - 1
-        };
-        self.overlaps_range(chr, pos, end)
-    }
-
-    pub fn overlaps_range(&self, chr: &str, beg: u32, end: u32) -> bool {
-        let Some(ranges) = self.by_chr.get(chr) else { return false; };
-        let idx = ranges.partition_point(|r| r.1 < beg);
-        idx < ranges.len() && ranges[idx].0 <= end
-    }
-}
-
-fn reader_past(_r: &crate::bgzf::BgzfSeekReader, _end: u64) -> bool { false }
-
-fn parse_region_item(s: &str) -> Result<(String, u32, u32)> {
-    let (chr, range) = match s.split_once(':') {
-        Some((c, r)) => (c.to_string(), Some(r)),
-        None => (s.to_string(), None),
-    };
-    match range {
-        None => Ok((chr, 1, u32::MAX)),
-        Some(r) => {
-            if let Some((b, e)) = r.split_once('-') {
-                let beg: u32 = b.parse().context("region beg")?;
-                let end: u32 = if e.is_empty() { u32::MAX } else { e.parse().context("region end")? };
-                Ok((chr, beg, end))
-            } else {
-                let beg: u32 = r.parse().context("region beg")?;
-                Ok((chr, beg, beg))
-            }
-        }
-    }
-}
+/// Region sets live in [`crate::regions`]; this alias keeps the old name.
+pub use crate::regions::RegionSet as RegionFilter;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PairLogic { Snps, Indels, Both, All, Some_, Exact, Id }

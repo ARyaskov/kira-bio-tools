@@ -274,8 +274,8 @@ pub fn parse_genetic_map<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<
         let parts: Vec<&str> = t.split_whitespace().collect();
         if parts.len() < 4 { continue; }
         let chrom = parts[0].to_string();
-        let pos: u32 = parts[1].parse().unwrap_or(0);
-        let cm: f64 = parts[3].parse().unwrap_or(0.0);
+        // Malformed rows are skipped rather than read as position 0.
+        let (Ok(pos), Ok(cm)) = (parts[1].parse::<u32>(), parts[3].parse::<f64>()) else { continue };
         map.entry(chrom).or_default().push((pos, cm));
     }
     for v in map.values_mut() { v.sort_by_key(|x| x.0); }

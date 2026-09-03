@@ -2,7 +2,11 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser)]
+#[command(disable_help_flag = true)]
 pub struct TabixArgs {
+    #[arg(long = "help", action = clap::ArgAction::Help, help = "Print help")]
+    pub help: Option<bool>,
+
     #[arg(help = "Input file (for indexing) or indexed file (for querying)")]
     pub input: PathBuf,
 

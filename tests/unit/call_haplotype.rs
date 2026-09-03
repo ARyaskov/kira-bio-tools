@@ -47,3 +47,39 @@ fn residual_mismatch_is_counted() {
 fn clean_read_finds_no_indel() {
     assert!(discover_indel(REFW, REFW).is_none(), "exact read should yield no indel");
 }
+
+#[test]
+fn haplotype_pls_separate_carriers_from_reference_reads() {
+    use crate::bam::pileup::CigarOps;
+    use noodles_sam::alignment::record::cigar::op::Kind;
+    let mut alt = Vec::new();
+    alt.extend_from_slice(&REFW[..12]);
+    alt.extend_from_slice(&REFW[14..]);
+    let call = AssembledCall {
+        pos1: 12,
+        ref_str: "GG".into(),
+        alt_str: "G".into(),
+        support: 2,
+        total: 4,
+        win_lo: 0,
+        win_hi: REFW.len() as u32,
+        hap_ref: REFW.to_vec(),
+        hap_alt: alt.clone(),
+    };
+    let mk = |seq: &[u8], cigar: Vec<(Kind, u32)>, sample: usize| {
+        LiveRead::new(seq, &vec![35; seq.len()], cigar.into_iter().collect::<CigarOps>(), 0, 0, 60, sample, 0)
+    };
+    let reads = vec![
+        mk(REFW, vec![(Kind::Match, REFW.len() as u32)], 0),
+        mk(REFW, vec![(Kind::Match, REFW.len() as u32)], 0),
+        mk(&alt, vec![(Kind::Match, 12), (Kind::Deletion, 2), (Kind::Match, 18)], 1),
+        mk(&alt, vec![(Kind::Match, 12), (Kind::Deletion, 2), (Kind::Match, 18)], 1),
+    ];
+    let hs = haplotype_pls(&reads, 2, &call);
+    assert_eq!(hs[0].pl[0], 0, "{:?}", hs[0]);
+    assert!(hs[0].pl[2] > 20, "{:?}", hs[0]);
+    assert_eq!((hs[0].n_ref, hs[0].n_alt), (2, 0));
+    assert_eq!(hs[1].pl[2], 0);
+    assert!(hs[1].pl[0] > 20, "{:?}", hs[1]);
+    assert_eq!((hs[1].n_ref, hs[1].n_alt), (0, 2));
+}

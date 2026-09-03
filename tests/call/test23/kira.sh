@@ -1,1 +1,1 @@
-kira-bt call in.vcf -o out.kira.vcf -- -cv -a GP,GQ
+kira-bt call in.vcf -o out.kira.vcf -- -m -G call.af-fixation.txt -a GP,GQ

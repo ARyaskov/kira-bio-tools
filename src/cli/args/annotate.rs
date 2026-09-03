@@ -11,12 +11,16 @@ pub struct AnnotateIndexArgs {
 }
 
 #[derive(Parser)]
+#[command(disable_help_flag = true)]
 #[command(group(
     ArgGroup::new("anno_source")
         .required(true)
         .args(["annotations", "ani"])
 ))]
 pub struct AnnotateArgs {
+    #[arg(long = "help", action = clap::ArgAction::Help, help = "Print help")]
+    pub help: Option<bool>,
+
     #[arg(help = "Input VCF file (.vcf)")]
     pub input: PathBuf,
 

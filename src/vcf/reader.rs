@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crate::bgzf::VirtualPosition;
+use crate::vcf::header::ContigDict;
 use crate::vcf::structs::{Result, VcfRecord};
 use crate::vcf::unified_reader::UnifiedVcfReader;
 
@@ -44,12 +45,24 @@ impl VcfReader {
         self.inner.reference_sequences()
     }
 
+    pub fn contigs(&self) -> &ContigDict {
+        self.inner.contigs()
+    }
+
     pub fn virtual_position(&self) -> Option<VirtualPosition> {
         self.inner.virtual_position()
     }
 
     pub fn next_record_with_vpos(&mut self) -> Result<Option<(VcfRecord, VirtualPosition)>> {
         self.inner.next_record_with_vpos()
+    }
+
+    pub fn next_line_with_vpos(&mut self) -> Result<Option<(String, VirtualPosition, VirtualPosition)>> {
+        self.inner.next_line_with_vpos()
+    }
+
+    pub fn into_inner(self) -> UnifiedVcfReader {
+        self.inner
     }
 }
 
@@ -69,7 +82,7 @@ impl<'a> Iterator for RecordIterator<'a> {
     }
 }
 
-fn format_vcf_record(rec: &VcfRecord) -> String {
+pub fn format_vcf_record(rec: &VcfRecord) -> String {
     let mut line = format!(
         "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         rec.chrom, rec.pos, rec.id, rec.ref_allele, rec.alt, rec.qual, rec.filter, rec.info

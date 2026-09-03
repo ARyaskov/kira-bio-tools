@@ -6,6 +6,6 @@ pub struct PolysomyArgs {
     #[arg(help = "Input VCF/BCF file")]
     pub input: PathBuf,
 
-    #[arg(last = true, trailing_var_arg = true)]
+    #[arg(last = true)]
     pub bcftools_args: Vec<String>,
 }

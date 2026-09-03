@@ -29,11 +29,11 @@ pub struct ConsensusArgs {
     #[arg(long = "mark-snv")]
     pub mark_snv: Option<String>,
 
-    #[arg(short = 'm', long = "mask")]
-    pub mask: Option<PathBuf>,
+    #[arg(short = 'm', long = "mask", action = clap::ArgAction::Append)]
+    pub mask: Vec<PathBuf>,
 
-    #[arg(long = "mask-with")]
-    pub mask_with: Option<String>,
+    #[arg(long = "mask-with", action = clap::ArgAction::Append)]
+    pub mask_with: Vec<String>,
 
     #[arg(short = 'M', long = "missing")]
     pub missing: Option<String>,

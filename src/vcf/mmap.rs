@@ -1,7 +1,7 @@
 use memmap2::Mmap;
 use rayon::prelude::*;
 
-use crate::util::chr_name_to_id;
+use crate::vcf::header::ContigDict;
 use crate::vcf::structs::VcfRecord;
 
 pub struct MmapVcfParser<'a> {
@@ -58,6 +58,8 @@ impl<'a> MmapVcfParser<'a> {
     fn parse_chunk(&self, start: usize, end: usize) -> Vec<VcfRecord> {
         let mut records = Vec::new();
         let mut pos = start;
+        // Contig ids are local to the chunk; callers needing global ids resolve by name.
+        let mut contigs = ContigDict::new();
 
         while pos < end {
             let line_end = self.data[pos..end]
@@ -70,7 +72,9 @@ impl<'a> MmapVcfParser<'a> {
 
             if !line.is_empty() && line[0] != b'#' {
                 if let Ok(line_str) = std::str::from_utf8(line) {
-                    if let Some(rec) = parse_full_vcf_record(line_str, pos as u64) {
+                    if let Ok(Some(rec)) =
+                        crate::vcf::unified_reader::parse_vcf_record(line_str, pos as u64, &mut contigs)
+                    {
                         records.push(rec);
                     }
                 }
@@ -81,43 +85,4 @@ impl<'a> MmapVcfParser<'a> {
 
         records
     }
-}
-
-fn parse_full_vcf_record(line: &str, offset: u64) -> Option<VcfRecord> {
-    let cols: Vec<&str> = line.split('\t').collect();
-    if cols.len() < 8 {
-        return None;
-    }
-
-    let chrom = cols[0];
-    let pos = cols[1].parse::<u32>().ok()?;
-    let chr_id = chr_name_to_id(chrom).unwrap_or(0);
-
-    let format = if cols.len() > 8 {
-        Some(cols[8].to_string())
-    } else {
-        None
-    };
-
-    let samples = if cols.len() > 9 {
-        cols[9..].iter().map(|s| s.to_string()).collect()
-    } else {
-        Vec::new()
-    };
-
-    Some(VcfRecord {
-        chrom: chrom.to_string(),
-        pos,
-        id: cols[2].to_string(),
-        ref_allele: cols[3].to_string(),
-        alt: cols[4].to_string(),
-        qual: cols[5].to_string(),
-        filter: cols[6].to_string(),
-        info: cols[7].to_string(),
-        format,
-        samples,
-        chr_id,
-        position: pos,
-        offset,
-    })
 }

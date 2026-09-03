@@ -549,21 +549,8 @@ fn parse_sample_names(headers: &[String]) -> Vec<String> {
 }
 
 fn parse_region(s: &str) -> Region {
-    if let Some((chrom, rest)) = s.split_once(':') {
-        if let Some((a, b)) = rest.split_once('-') {
-            let start = a.parse::<u32>().unwrap_or(1);
-            let end = b.parse::<u32>().unwrap_or(u32::MAX);
-            return Region {
-                chrom: Some(chrom.to_string()),
-                start,
-                end,
-            };
-        }
-        return Region {
-            chrom: Some(chrom.to_string()),
-            start: 1,
-            end: u32::MAX,
-        };
+    if let Ok((chrom, start, end)) = crate::regions::parse_region_spec(s) {
+        return Region { chrom: Some(chrom), start, end };
     }
     Region {
         chrom: Some(s.to_string()),

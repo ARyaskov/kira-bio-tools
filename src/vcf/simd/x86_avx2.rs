@@ -1,3 +1,7 @@
+//! AVX2 line parsers. Safety contract shared by every `unsafe fn` here: the
+//! caller has verified AVX2 support at runtime (`super::is_simd_available`),
+//! and all vector loads stay inside the input slice (the `pos + 32 <= len`
+//! loop guards); text is validated as UTF-8 before it is handed out as `&str`.
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use crate::util::chr_name_to_id;
@@ -23,7 +27,8 @@ pub unsafe fn parse_vcf_line_simd(line: &[u8]) -> Option<VcfFieldsFull<'_>> {
         return None;
     }
 
-    let line_str = std::str::from_utf8_unchecked(line);
+    // File bytes are untrusted: validate rather than assume UTF-8.
+    let line_str = std::str::from_utf8(line).ok()?;
 
     // Helper: safe slice
     #[inline(always)]
@@ -94,7 +99,7 @@ pub unsafe fn parse_vcf_fields_avx2(line: &[u8]) -> Option<VcfFields<'_>> {
         return None;
     }
 
-    let line_str = std::str::from_utf8_unchecked(line);
+    let line_str = std::str::from_utf8(line).ok()?;
 
     #[inline(always)]
     fn slice<'a>(s: &'a str, start: usize, end: usize) -> &'a str {
@@ -130,17 +135,17 @@ pub unsafe fn parse_chr_pos_avx2(line: &[u8]) -> Option<(u8, u32)> {
     }
 
     let chrom_bytes = &line[..tabs[0]];
-    let chrom_str = std::str::from_utf8_unchecked(chrom_bytes);
+    let chrom_str = std::str::from_utf8(chrom_bytes).ok()?;
     let chr_id = chr_name_to_id(chrom_str)?;
 
     let pos_start = tabs[0] + 1;
-    let pos_end = tabs.get(1).copied().unwrap_or(line.len());
+    let pos_end = if found >= 2 { tabs[1] } else { line.len() };
 
     if pos_start >= pos_end {
         return None;
     }
 
-    let pos = parse_u32_fast(line.as_ptr().add(pos_start), pos_end - pos_start);
+    let pos = super::parse_u32_strict(&line[pos_start..pos_end])?;
     Some((chr_id, pos))
 }
 
@@ -176,23 +181,6 @@ unsafe fn find_tabs_avx2(buf: &[u8], out: &mut [usize]) -> usize {
     }
 
     found
-}
-
-#[target_feature(enable = "avx2")]
-pub unsafe fn parse_u32_fast(ptr: *const u8, len: usize) -> u32 {
-    let mut x = 0u32;
-    let mut i = 0;
-
-    while i < len && i < 10 {
-        let c = *ptr.add(i);
-        if c < b'0' || c > b'9' {
-            break;
-        }
-        x = x * 10 + (c - b'0') as u32;
-        i += 1;
-    }
-
-    x
 }
 
 #[target_feature(enable = "avx2")]

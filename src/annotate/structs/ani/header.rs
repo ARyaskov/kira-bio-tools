@@ -26,7 +26,7 @@ pub const fn ani_sentinel_entry() -> AniEntry {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct AniHeaderV3 {
     pub magic: u64,
     pub version: u64,
@@ -73,7 +73,7 @@ pub struct AniHeaderV5 {
 
 /// On-disk v6 header.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct AniHeaderV6 {
     pub magic: u64,
     pub version: u64,
@@ -154,7 +154,7 @@ impl AniHeader {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct AniBlockEntry {
     pub raw_start: u64,
     pub raw_len: u32,
@@ -178,7 +178,7 @@ pub struct AniEntryV2 {
 
 /// On-disk variant record.
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct AniEntry {
     pub chr_id: u32,
     pub pos: u32,

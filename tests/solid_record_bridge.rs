@@ -80,10 +80,10 @@ fn make_fixture(dir: &std::path::Path) -> (std::path::PathBuf, Vec<std::path::Pa
         }
         // Vary the qualities so an encoding mistake cannot hide behind a constant.
         let q1: String = (0..r1.len())
-            .map(|j| (b'#' + ((j as u8 + i as u8) % 40)) as char)
+            .map(|j| (b'#' + ((j + i) % 40) as u8) as char)
             .collect();
         let q2: String = (0..r2.len())
-            .map(|j| (b'#' + ((j as u8 * 3 + i as u8) % 40)) as char)
+            .map(|j| (b'#' + ((j * 3 + i) % 40) as u8) as char)
             .collect();
         writeln!(f1, "@rd{i}/1\n{}\n+\n{}", String::from_utf8_lossy(&r1), q1).unwrap();
         writeln!(f2, "@rd{i}/2\n{}\n+\n{}", String::from_utf8_lossy(&r2), q2).unwrap();

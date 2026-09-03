@@ -2,7 +2,11 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct MpileupArgs {
+    #[arg(long = "help", action = clap::ArgAction::Help, help = "Print help")]
+    pub help: Option<bool>,
+
     #[arg(required = true)]
     pub inputs: Vec<PathBuf>,
 
@@ -21,8 +25,9 @@ pub struct MpileupArgs {
     #[arg(long = "no-reference")]
     pub no_reference: bool,
 
-    #[arg(short = 'a', long = "annotate")]
-    pub annotate: Option<String>,
+    /// Comma list of tags; a leading `-` removes a tag (`-a -AD`); may repeat.
+    #[arg(short = 'a', long = "annotate", allow_hyphen_values = true, action = clap::ArgAction::Append)]
+    pub annotate: Vec<String>,
 
     #[arg(short = 'b', long = "bam-list")]
     pub bam_list: Option<PathBuf>,
@@ -46,7 +51,7 @@ pub struct MpileupArgs {
     pub skip_indels: bool,
 
     /// Fused with `call -m -v`: emit only sites whose posterior best GT is non-ref.
-    #[arg(long = "variants-only")]
+    #[arg(short = 'v', long = "variants-only")]
     pub variants_only: bool,
 
     /// Per-allele variant prior for Bayesian GT call (bcftools default 1.1e-3).
@@ -65,14 +70,41 @@ pub struct MpileupArgs {
     #[arg(long = "min-qual", default_value_t = 10)]
     pub min_qual: u8,
 
-    #[arg(short = 'x', long = "no-BAQ")]
+    #[arg(short = 'B', long = "no-BAQ")]
     pub no_baq: bool,
-
-    #[arg(short = 'B', long = "no-BAQ-old")]
-    pub no_baq_old: bool,
 
     #[arg(short = 'E', long = "redo-BAQ")]
     pub redo_baq: bool,
+
+    /// Disable read-pair overlap detection (mates sharing a base then count twice).
+    #[arg(short = 'x', long = "ignore-overlaps")]
+    pub ignore_overlaps: bool,
+
+    /// Down-weight qualities of reads with a high mismatch rate (paralog
+    /// suspects): `off`, `auto`, or `FULL,SLOPE`. A kira extension, off by default.
+    #[arg(long = "nm-weight", default_value = "off")]
+    pub nm_weight: String,
+
+    /// Require more support for short indels inside homopolymer/STR tracts and
+    /// lower their quality by run length. A kira extension, off by default.
+    #[arg(long = "hp-indel")]
+    pub hp_indel: bool,
+
+    /// Confirm indel candidates by pair-HMM realignment of the covering reads:
+    /// `off`, `ins` (insertions) or `all`. A kira extension, off by default.
+    #[arg(long = "indel-realign", default_value = "off")]
+    pub indel_realign: String,
+
+    /// Recover indels the aligner hid as mismatches by local assembly in active
+    /// regions; records may need sorting afterwards. A kira extension.
+    #[arg(long = "assemble")]
+    pub assemble: bool,
+
+    /// Recalibrate base qualities from the data (reported Q × reference
+    /// trinucleotide × strand × cycle, learned at non-variant sites) before
+    /// BAQ. A kira extension; needs `-f` and is not available with `--stream`.
+    #[arg(long = "recal")]
+    pub recal: bool,
 
     #[arg(short = 'X', long = "config")]
     pub config: Option<String>,
@@ -86,7 +118,7 @@ pub struct MpileupArgs {
     #[arg(short = 'L', long = "max-idepth-orphan")]
     pub max_idepth_orphan: Option<u32>,
 
-    #[arg(short = 'o', long = "open-prob")]
+    #[arg(long = "open-prob")]
     pub open_prob_dup: Option<u32>,
 
     #[arg(short = 's', long = "samples")]
@@ -119,11 +151,57 @@ pub struct MpileupArgs {
     #[arg(long = "nf")]
     pub nf: Option<u32>,
 
-    #[arg(long = "rf", aliases = ["incl-flags"])]
+    #[arg(long = "rf", aliases = ["incl-flags", "skip-any-unset"])]
     pub rf: Option<String>,
 
-    #[arg(long = "ff", aliases = ["excl-flags"], default_value = "UNMAP,SECONDARY,QCFAIL,DUP")]
+    #[arg(long = "ff", aliases = ["excl-flags", "skip-any-set"], default_value = "UNMAP,SECONDARY,QCFAIL,DUP")]
     pub ff: Option<String>,
+
+    #[arg(long = "skip-all-set")]
+    pub skip_all_set: Option<String>,
+
+    #[arg(long = "skip-all-unset")]
+    pub skip_all_unset: Option<String>,
+
+    // Accepted for bcftools compatibility; they do not change the pileup.
+    #[arg(short = 'A', long = "count-orphans")]
+    pub count_orphans: bool,
+
+    #[arg(long = "ambig-reads")]
+    pub ambig_reads: Option<String>,
+
+    #[arg(short = 'G', long = "read-groups")]
+    pub read_groups: Option<PathBuf>,
+
+    #[arg(short = 'p', long = "per-sample-mF")]
+    pub per_sample_mf: bool,
+
+    #[arg(short = 'P', long = "platforms")]
+    pub platforms: Option<String>,
+
+    #[arg(short = 'C', long = "adjust-MQ", default_value_t = 0)]
+    pub adjust_mq: u32,
+
+    #[arg(short = 'e', long = "ext-prob", default_value_t = 20)]
+    pub ext_prob: u32,
+
+    #[arg(long = "seed")]
+    pub seed: Option<u64>,
+
+    #[arg(long = "indels-2.0")]
+    pub indels_20: bool,
+
+    #[arg(long = "indels-cns")]
+    pub indels_cns: bool,
+
+    #[arg(long = "indel-bias")]
+    pub indel_bias: Option<f64>,
+
+    #[arg(long = "max-BQ")]
+    pub max_bq: Option<u32>,
+
+    #[arg(long = "delta-BQ")]
+    pub delta_bq: Option<u32>,
 
     #[arg(short = 'M', long = "min-ireads-frac")]
     pub min_ireads_frac: Option<f64>,
@@ -137,9 +215,9 @@ pub struct MpileupArgs {
     #[arg(long = "stream", help = "Streaming mode: spawn reader thread per BAM (no full Vec<Record> in RAM)")]
     pub stream: bool,
 
-    #[arg(short = 'v', long = "verbosity", default_value_t = 1)]
+    #[arg(long = "verbosity", default_value_t = 1)]
     pub verbosity: u8,
 
-    #[arg(last = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    #[arg(last = true, allow_hyphen_values = true)]
     pub passthrough: Vec<String>,
 }

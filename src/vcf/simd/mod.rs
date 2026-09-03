@@ -25,12 +25,14 @@ impl SimdVcfParser {
         #[cfg(target_arch = "x86_64")]
         {
             if is_simd_available() {
+                // SAFETY: AVX2 support was verified at runtime just above.
                 return unsafe { x86_avx2::parse_vcf_line_simd(line) };
             }
         }
 
         #[cfg(target_arch = "aarch64")]
         {
+            // SAFETY: NEON is a baseline feature of every aarch64 target.
             return unsafe { arm_neon::parse_vcf_line_simd(line) };
         }
 
@@ -43,12 +45,14 @@ impl SimdVcfParser {
         #[cfg(target_arch = "x86_64")]
         {
             if is_simd_available() {
+                // SAFETY: AVX2 support was verified at runtime just above.
                 return unsafe { x86_avx2::parse_vcf_fields_avx2(line) };
             }
         }
 
         #[cfg(target_arch = "aarch64")]
         {
+            // SAFETY: NEON is a baseline feature of every aarch64 target.
             return unsafe { arm_neon::parse_vcf_fields_neon(line) };
         }
 
@@ -61,12 +65,14 @@ impl SimdVcfParser {
         #[cfg(target_arch = "x86_64")]
         {
             if is_simd_available() {
+                // SAFETY: AVX2 support was verified at runtime just above.
                 return unsafe { x86_avx2::parse_chr_pos_avx2(line) };
             }
         }
 
         #[cfg(target_arch = "aarch64")]
         {
+            // SAFETY: NEON is a baseline feature of every aarch64 target.
             return unsafe { arm_neon::parse_chr_pos_neon(line) };
         }
 
@@ -75,20 +81,24 @@ impl SimdVcfParser {
     }
 }
 
+/// Strict decimal parse: `None` for empty input, a non-digit or overflow
+/// (`12abc` is rejected rather than truncated to 12).
+#[inline]
+pub fn parse_u32_strict(bytes: &[u8]) -> Option<u32> {
+    if bytes.is_empty() || bytes.len() > 10 {
+        return None;
+    }
+    let mut x: u32 = 0;
+    for &c in bytes {
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        x = x.checked_mul(10)?.checked_add((c - b'0') as u32)?;
+    }
+    Some(x)
+}
+
 #[inline(always)]
 pub fn parse_u32_bytes(bytes: &[u8]) -> Option<u32> {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_simd_available() {
-            return Some(unsafe { x86_avx2::parse_u32_fast(bytes.as_ptr(), bytes.len()) });
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        return Some(unsafe { arm_neon::parse_u32_fast(bytes.as_ptr(), bytes.len()) });
-    }
-
-    #[cfg(not(target_arch = "aarch64"))]
-    fallback::parse_u32_scalar(bytes)
+    parse_u32_strict(bytes)
 }

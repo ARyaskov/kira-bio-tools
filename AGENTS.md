@@ -35,9 +35,13 @@ Drop-in compatible alternative to bcftools with strict Tabix compatibility.
 
 ## Architecture
 - Streaming-first design
-- Zero-copy where possible
-- SIMD-accelerated parsing
-- Minimal allocations
+- Borrowed column slices where the code path allows it; line readers still
+  hand out owned `String`s and most commands split columns into owned
+  strings, so "zero-copy" only holds for the annotate hot loop and the
+  region/predicate checks on raw lines
+- SIMD-accelerated parsing in the annotate hot loop (validated UTF-8, never
+  `from_utf8_unchecked` on file bytes)
+- Allocations reused across records where a buffer can live outside the loop
 - Separation of:
     - IO
     - Parsing

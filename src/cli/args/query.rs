@@ -8,7 +8,11 @@ pub struct QueryCompatArgs {
 }
 
 #[derive(Parser)]
+#[command(disable_help_flag = true)]
 pub struct RegionQueryArgs {
+    #[arg(long = "help", action = clap::ArgAction::Help, help = "Print help")]
+    pub help: Option<bool>,
+
     #[arg(help = "Indexed VCF file")]
     pub file: PathBuf,
 

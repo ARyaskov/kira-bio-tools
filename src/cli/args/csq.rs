@@ -38,6 +38,10 @@ pub struct CsqArgs {
     #[arg(long = "ncsq", default_value_t = 5)]
     pub ncsq: u32,
 
+    /// Accepted for bcftools compatibility; chromosome names are matched as given.
+    #[arg(long = "unify-chr-names", default_value_t = 0)]
+    pub unify_chr_names: u8,
+
     #[arg(short = 'o', long = "output")]
     pub output: Option<PathBuf>,
 

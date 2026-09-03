@@ -378,14 +378,7 @@ fn select_text_output(cfg: &ConvertCfg) -> VcfTextOutput {
 }
 
 fn extract_samples(headers: &[String]) -> Vec<String> {
-    let Some(line) = headers.iter().find(|h| h.starts_with("#CHROM\t")) else {
-        return Vec::new();
-    };
-    let cols = line.split('\t').collect::<Vec<_>>();
-    if cols.len() <= 9 {
-        return Vec::new();
-    }
-    cols[9..].iter().map(|s| (*s).to_string()).collect()
+    crate::vcf::header::extract_samples(headers)
 }
 
 fn gt_index(fmt: Option<&str>) -> Option<usize> {

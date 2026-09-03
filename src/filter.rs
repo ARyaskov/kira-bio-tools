@@ -124,7 +124,6 @@ struct FieldMeta {
 pub struct HeaderMeta {
     info: HashMap<String, FieldMeta>,
     format: HashMap<String, FieldMeta>,
-    filters: HashSet<String>,
     samples: Vec<String>,
 }
 
@@ -147,7 +146,6 @@ enum ValueKind {
 #[derive(Clone)]
 struct ValueVec {
     values: Vec<Value>,
-    is_str: bool,
     kind: ValueKind,
 }
 
@@ -155,7 +153,6 @@ struct ValueVec {
 struct SampleValues {
     values: Vec<Vec<Value>>,
     mask: Vec<bool>,
-    is_str: bool,
     kind: ValueKind,
 }
 
@@ -310,7 +307,6 @@ impl<'a> EvalContext<'a> {
 }
 
 struct FormatCache<'a> {
-    keys: Vec<&'a str>,
     key_index: HashMap<&'a str, usize>,
     samples: Vec<Vec<&'a str>>,
 }
@@ -329,7 +325,6 @@ impl<'a> FormatCache<'a> {
             samples.push(vals);
         }
         Self {
-            keys,
             key_index,
             samples,
         }
@@ -351,7 +346,6 @@ impl<'a> FormatCache<'a> {
 fn parse_header_meta(headers: &[String]) -> Result<HeaderMeta> {
     let mut info = HashMap::new();
     let mut format = HashMap::new();
-    let mut filters = HashSet::new();
     let mut samples = Vec::new();
 
     for h in headers {
@@ -362,10 +356,6 @@ fn parse_header_meta(headers: &[String]) -> Result<HeaderMeta> {
         } else if h.starts_with("##FORMAT=") {
             if let Some((id, ty)) = parse_header_kv(h, "ID", "Type") {
                 format.insert(id, FieldMeta { field_type: ty });
-            }
-        } else if h.starts_with("##FILTER=") {
-            if let Some(id) = extract_header_id(h, "ID") {
-                filters.insert(id);
             }
         } else if h.starts_with("#CHROM") {
             let parts: Vec<&str> = h.split('\t').collect();
@@ -378,7 +368,6 @@ fn parse_header_meta(headers: &[String]) -> Result<HeaderMeta> {
     Ok(HeaderMeta {
         info,
         format,
-        filters,
         samples,
     })
 }
@@ -1289,25 +1278,21 @@ fn eval_value(expr: &Expr, ctx: &mut EvalContext) -> Result<EvalValue> {
         Expr::Literal(lit) => match lit {
             Literal::Int(i) => Ok(EvalValue::Scalar(ValueVec {
                 values: vec![Value::Int(*i)],
-                is_str: false,
                 kind: ValueKind::Normal,
             })),
             Literal::Float(f) => Ok(EvalValue::Scalar(ValueVec {
                 values: vec![Value::Float(*f)],
-                is_str: false,
                 kind: ValueKind::Normal,
             })),
             Literal::Str(s) => {
                 if s == "." {
                     Ok(EvalValue::Scalar(ValueVec {
                         values: vec![Value::Missing],
-                        is_str: true,
                         kind: ValueKind::Normal,
                     }))
                 } else {
                     Ok(EvalValue::Scalar(ValueVec {
                         values: vec![Value::Str(s.clone())],
-                        is_str: true,
                         kind: ValueKind::Normal,
                     }))
                 }
@@ -1350,22 +1335,18 @@ fn eval_std_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValue> 
     match name {
         "CHROM" => Ok(EvalValue::Scalar(ValueVec {
             values: vec![Value::Str(rec.chrom.clone())],
-            is_str: true,
             kind: ValueKind::Normal,
         })),
         "POS" => Ok(EvalValue::Scalar(ValueVec {
             values: vec![Value::Int(rec.pos as i64)],
-            is_str: false,
             kind: ValueKind::Normal,
         })),
         "ID" => Ok(EvalValue::Scalar(ValueVec {
             values: vec![Value::Str(rec.id.clone())],
-            is_str: true,
             kind: ValueKind::Normal,
         })),
         "REF" => Ok(EvalValue::Scalar(ValueVec {
             values: vec![Value::Str(rec.ref_allele.clone())],
-            is_str: true,
             kind: ValueKind::Normal,
         })),
         "ALT" => Ok(EvalValue::Scalar(ValueVec {
@@ -1374,22 +1355,18 @@ fn eval_std_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValue> 
             } else {
                 split_to_values(&rec.alt, FieldType::String)
             },
-            is_str: true,
             kind: ValueKind::Normal,
         })),
         "QUAL" => Ok(EvalValue::Scalar(ValueVec {
             values: parse_numeric_value(&rec.qual),
-            is_str: false,
             kind: ValueKind::Normal,
         })),
         "FILTER" => Ok(EvalValue::Scalar(ValueVec {
             values: split_filter_values(&rec.filter),
-            is_str: true,
             kind: ValueKind::Filter,
         })),
         "TYPE" => Ok(EvalValue::Scalar(ValueVec {
             values: vec![Value::Int(variant_type_mask(rec) as i64)],
-            is_str: false,
             kind: ValueKind::Type,
         })),
         "N_ALT" => {
@@ -1403,13 +1380,11 @@ fn eval_std_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValue> 
             };
             Ok(EvalValue::Scalar(ValueVec {
                 values: vec![Value::Int(n)],
-                is_str: false,
                 kind: ValueKind::Normal,
             }))
         }
         "N_SAMPLES" => Ok(EvalValue::Scalar(ValueVec {
             values: vec![Value::Int(ctx.header.samples.len() as i64)],
-            is_str: false,
             kind: ValueKind::Normal,
         })),
         "MAC" => {
@@ -1438,7 +1413,6 @@ fn eval_std_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValue> 
             }
             Ok(EvalValue::Scalar(ValueVec {
                 values,
-                is_str: false,
                 kind: ValueKind::Normal,
             }))
         }
@@ -1452,17 +1426,14 @@ fn eval_std_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValue> 
             } else {
                 vec![Value::Int(variant_ilen(rec) as i64)]
             },
-            is_str: false,
             kind: ValueKind::Normal,
         })),
         "F_MISSING" => Ok(EvalValue::Scalar(ValueVec {
             values: vec![Value::Float(f_missing(ctx))],
-            is_str: false,
             kind: ValueKind::Normal,
         })),
         _ => Ok(EvalValue::Scalar(ValueVec {
             values: Vec::new(),
-            is_str: false,
             kind: ValueKind::Normal,
         })),
     }
@@ -1497,7 +1468,6 @@ fn eval_info_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValue>
     }
     Ok(EvalValue::Scalar(ValueVec {
         values,
-        is_str: matches!(field_type, FieldType::String),
         kind: ValueKind::Normal,
     }))
 }
@@ -1517,7 +1487,6 @@ fn eval_format_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValu
             return Ok(EvalValue::Samples(SampleValues {
                 values: Vec::new(),
                 mask: Vec::new(),
-                is_str: false,
                 kind: ValueKind::Normal,
             }));
         }
@@ -1526,7 +1495,6 @@ fn eval_format_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValu
         return Ok(EvalValue::Samples(SampleValues {
             values: vec![Vec::new(); nsamples],
             mask: vec![true; nsamples],
-            is_str: false,
             kind: if is_gt {
                 ValueKind::Gt
             } else {
@@ -1568,7 +1536,6 @@ fn eval_format_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValu
     Ok(EvalValue::Samples(SampleValues {
         values,
         mask,
-        is_str: matches!(field_type, FieldType::String),
         kind: if is_gt {
             ValueKind::Gt
         } else {
@@ -2699,7 +2666,6 @@ fn apply_arith(op: BinaryOp, a: EvalValue, b: EvalValue) -> EvalValue {
     match (a, b) {
         (EvalValue::Scalar(av), EvalValue::Scalar(bv)) => EvalValue::Scalar(ValueVec {
             values: arith_values(op, &av.values, &bv.values),
-            is_str: false,
             kind: ValueKind::Normal,
         }),
         (EvalValue::Samples(av), EvalValue::Scalar(bv)) => {
@@ -2711,7 +2677,6 @@ fn apply_arith(op: BinaryOp, a: EvalValue, b: EvalValue) -> EvalValue {
             EvalValue::Samples(SampleValues {
                 values: out,
                 mask: av.mask,
-                is_str: false,
                 kind: ValueKind::Normal,
             })
         }
@@ -2724,7 +2689,6 @@ fn apply_arith(op: BinaryOp, a: EvalValue, b: EvalValue) -> EvalValue {
             EvalValue::Samples(SampleValues {
                 values: out,
                 mask: bv.mask,
-                is_str: false,
                 kind: ValueKind::Normal,
             })
         }
@@ -2737,7 +2701,6 @@ fn apply_arith(op: BinaryOp, a: EvalValue, b: EvalValue) -> EvalValue {
             EvalValue::Samples(SampleValues {
                 values: out,
                 mask: av.mask,
-                is_str: false,
                 kind: ValueKind::Normal,
             })
         }
@@ -2804,7 +2767,6 @@ fn eval_func(name: FuncName, args: &[Expr], ctx: &mut EvalContext) -> Result<Eva
             };
             Ok(EvalValue::Scalar(ValueVec {
                 values: vec![Value::Int(count)],
-                is_str: false,
                 kind: ValueKind::Normal,
             }))
         }
@@ -2829,7 +2791,6 @@ fn eval_func(name: FuncName, args: &[Expr], ctx: &mut EvalContext) -> Result<Eva
             };
             Ok(EvalValue::Scalar(ValueVec {
                 values: vec![Value::Float(frac)],
-                is_str: false,
                 kind: ValueKind::Normal,
             }))
         }
@@ -2919,7 +2880,6 @@ fn apply_count(v: EvalValue) -> EvalValue {
                 .count() as i64;
             EvalValue::Scalar(ValueVec {
                 values: vec![Value::Int(count)],
-                is_str: false,
                 kind: ValueKind::Normal,
             })
         }
@@ -2936,7 +2896,6 @@ fn apply_count(v: EvalValue) -> EvalValue {
             }
             EvalValue::Scalar(ValueVec {
                 values: vec![Value::Int(count)],
-                is_str: false,
                 kind: ValueKind::Normal,
             })
         }
@@ -2956,7 +2915,6 @@ fn apply_strlen(v: EvalValue) -> EvalValue {
             }
             EvalValue::Scalar(ValueVec {
                 values: out,
-                is_str: false,
                 kind: ValueKind::Normal,
             })
         }
@@ -2975,7 +2933,6 @@ fn apply_strlen(v: EvalValue) -> EvalValue {
             EvalValue::Samples(SampleValues {
                 values: out,
                 mask: vs.mask,
-                is_str: false,
                 kind: ValueKind::Normal,
             })
         }
@@ -2996,7 +2953,6 @@ fn apply_phred(v: EvalValue) -> EvalValue {
             }
             EvalValue::Scalar(ValueVec {
                 values: out,
-                is_str: false,
                 kind: ValueKind::Normal,
             })
         }
@@ -3016,7 +2972,6 @@ fn apply_phred(v: EvalValue) -> EvalValue {
             EvalValue::Samples(SampleValues {
                 values: out,
                 mask: vs.mask,
-                is_str: false,
                 kind: ValueKind::Normal,
             })
         }
@@ -3042,7 +2997,6 @@ fn apply_binom(args: &[Expr], ctx: &mut EvalContext) -> Result<EvalValue> {
                     Ok(EvalValue::Samples(SampleValues {
                         values: out,
                         mask: vs.mask,
-                        is_str: false,
                         kind: ValueKind::Normal,
                     }))
                 }
@@ -3050,7 +3004,6 @@ fn apply_binom(args: &[Expr], ctx: &mut EvalContext) -> Result<EvalValue> {
                     let (a, b) = first_two_numbers(&vs.values).unwrap_or((0.0, 0.0));
                     Ok(EvalValue::Scalar(ValueVec {
                         values: vec![Value::Float(binom_two_sided(a, b))],
-                        is_str: false,
                         kind: ValueKind::Normal,
                     }))
                 }
@@ -3073,7 +3026,6 @@ fn apply_binom_two_args(a: EvalValue, b: EvalValue) -> EvalValue {
             let y = first_number(&bv.values).unwrap_or(0.0);
             EvalValue::Scalar(ValueVec {
                 values: vec![Value::Float(binom_two_sided(x, y))],
-                is_str: false,
                 kind: ValueKind::Normal,
             })
         }
@@ -3087,7 +3039,6 @@ fn apply_binom_two_args(a: EvalValue, b: EvalValue) -> EvalValue {
             EvalValue::Samples(SampleValues {
                 values: out,
                 mask: av.mask,
-                is_str: false,
                 kind: ValueKind::Normal,
             })
         }
@@ -3101,7 +3052,6 @@ fn apply_binom_two_args(a: EvalValue, b: EvalValue) -> EvalValue {
             EvalValue::Samples(SampleValues {
                 values: out,
                 mask: bv.mask,
-                is_str: false,
                 kind: ValueKind::Normal,
             })
         }
@@ -3116,7 +3066,6 @@ fn apply_binom_two_args(a: EvalValue, b: EvalValue) -> EvalValue {
             EvalValue::Samples(SampleValues {
                 values: out,
                 mask: av.mask,
-                is_str: false,
                 kind: ValueKind::Normal,
             })
         }
@@ -3192,7 +3141,6 @@ fn apply_reduce(name: FuncName, v: EvalValue) -> EvalValue {
             let val = reduce_values(name, &vs.values);
             EvalValue::Scalar(ValueVec {
                 values: vec![val],
-                is_str: false,
                 kind: ValueKind::Normal,
             })
         }
@@ -3204,7 +3152,6 @@ fn apply_reduce(name: FuncName, v: EvalValue) -> EvalValue {
             let val = reduce_values(name, &all);
             EvalValue::Scalar(ValueVec {
                 values: vec![val],
-                is_str: false,
                 kind: ValueKind::Normal,
             })
         }
@@ -3231,7 +3178,6 @@ fn apply_sample_reduce(name: FuncName, v: EvalValue) -> EvalValue {
             EvalValue::Samples(SampleValues {
                 values: out,
                 mask: vs.mask,
-                is_str: false,
                 kind: ValueKind::Normal,
             })
         }
@@ -3302,14 +3248,12 @@ fn value_from_bool(res: EvalResult) -> EvalValue {
         return EvalValue::Samples(SampleValues {
             values,
             mask: vec![true; samples.len()],
-            is_str: false,
             kind: ValueKind::Normal,
         });
     }
     let v = if res.pass_site { 1 } else { 0 };
     EvalValue::Scalar(ValueVec {
         values: vec![Value::Int(v)],
-        is_str: false,
         kind: ValueKind::Normal,
     })
 }

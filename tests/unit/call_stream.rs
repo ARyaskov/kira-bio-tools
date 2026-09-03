@@ -39,7 +39,8 @@
         let vcf = call_one(CallConfig::default(), SITE);
         let calls = data_lines(&vcf);
         assert_eq!(calls.len(), 1);
-        assert_eq!(sample_col(calls[0]), "1/1");
+        // GT is called; the input PL is carried through, as bcftools does.
+        assert_eq!(sample_col(calls[0]), "1/1:255,255,0");
         assert!(info_of(calls[0]).contains("AN=2"), "{}", info_of(calls[0]));
         assert!(info_of(calls[0]).contains("AC=2"), "{}", info_of(calls[0]));
     }
@@ -50,7 +51,8 @@
         let vcf = call_one(cfg, SITE);
         let calls = data_lines(&vcf);
         assert_eq!(calls.len(), 1);
-        assert_eq!(sample_col(calls[0]), "1");
+        // Haploid: one allele, and the PL subset has one value per allele.
+        assert_eq!(sample_col(calls[0]), "1:255,0");
         // A haploid sample contributes exactly one allele to AC/AN.
         assert!(info_of(calls[0]).contains("AN=1"), "{}", info_of(calls[0]));
         assert!(info_of(calls[0]).contains("AC=1"), "{}", info_of(calls[0]));
@@ -70,12 +72,12 @@
             ..CallConfig::default()
         };
         let vcf = call_one(cfg.clone(), SITE);
-        assert_eq!(sample_col(data_lines(&vcf)[0]), "1");
+        assert_eq!(sample_col(data_lines(&vcf)[0]), "1:255,0");
 
         // Outside the region the uniform ploidy applies again.
         let far = SITE.replace("\t100\t", "\t5000\t");
         let vcf = call_one(cfg, &far);
-        assert_eq!(sample_col(data_lines(&vcf)[0]), "1/1");
+        assert_eq!(sample_col(data_lines(&vcf)[0]), "1/1:255,255,0");
     }
 
     #[test]

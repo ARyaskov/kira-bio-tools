@@ -59,7 +59,8 @@
 
         let ped = dir.path().join("fam.ped");
         std::fs::write(&ped, "Fam1\tsmpl1\t0\t0\t1\nFam1\tsmpl2\t0\t0\t2\n").unwrap();
+        // PED sex codes become the M/F labels a ploidy file is keyed on.
         let m = parse_sex_file(&ped).unwrap();
-        assert_eq!(m.get("smpl1").map(String::as_str), Some("1"));
-        assert_eq!(m.get("smpl2").map(String::as_str), Some("2"));
+        assert_eq!(m.get("smpl1").map(String::as_str), Some("M"));
+        assert_eq!(m.get("smpl2").map(String::as_str), Some("F"));
     }

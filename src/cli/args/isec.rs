@@ -9,7 +9,7 @@ pub struct IsecArgs {
     #[arg(short = 'p', long = "prefix")]
     pub prefix: Option<PathBuf>,
 
-    #[arg(short = 'n', long = "nfiles")]
+    #[arg(short = 'n', long = "nfiles", allow_hyphen_values = true)]
     pub nfiles: Option<String>,
 
     #[arg(short = 'w', long = "write")]

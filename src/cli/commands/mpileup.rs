@@ -1,15 +1,27 @@
+use crate::bam::pileup::strand_bias_phred;
+use crate::bam::pos_filter::InterestingMap;
 use crate::bam::{
-    AnnotateSpec, BamReader, ErrorModel, FlagFilters, LiveRead,
-    PileupSite, PresetConfig, mpileup_engine_from_records, mpileup_engine_multi,
-    parse_samples_filter,
+    AnnotateSpec, BamReader, ErrorModel, FlagFilters, LiveRead, PileupSite, PresetConfig,
+    mpileup_engine_from_records, parse_samples_filter,
 };
 use crate::call::GvcfBlocker;
 use crate::cli::args::MpileupArgs;
+use crate::regions::RegionSet;
+use crate::bam::errmod::pack_base;
+use crate::call::haplotype::haplotype_pls;
+use crate::call::mcall::{CallResult, CallSite, Caller, CallerOpts, PL_MISSING};
 use anyhow::{Context, Result, bail};
 use fxhash::FxHashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+
+/// Reference contigs are loaded on demand through the `.fai` index.
+pub(crate) type Fasta = crate::fasta::IndexedFasta;
+
+pub(crate) fn load_fasta(p: &PathBuf) -> Result<Fasta> {
+    Fasta::open(p)
+}
 
 /// Format a site/genotype QUAL float the way bcftools prints it: `.` for 0,
 /// an integer when whole, otherwise up to two decimals.
@@ -23,136 +35,286 @@ fn fmt_qual(q: f64) -> String {
     }
 }
 
+/// Per-BAM preparation shared by both entry points: flag filters, the
+/// reference pre-scan (skip-list + BAQ mask), BAQ, and the BAQ-less capping
+/// fallback. Returns the union skip-list across samples.
+fn prepare_bams(
+    bams: &mut [BamReader],
+    args: &MpileupArgs,
+    flag_filters: &FlagFilters,
+    baq_off: bool,
+    fasta: Option<&Fasta>,
+    timing: bool,
+) -> Option<InterestingMap> {
+    let mut combined: Option<InterestingMap> = None;
+    // Same threshold the emitter uses, so the sequential and parallel paths
+    // visit exactly the sites that can produce output.
+    let min_alt = if args.variants_only { args.min_alt_reads.max(1) } else { 1 };
+    for r in bams.iter_mut() {
+        if flag_filters.is_active() {
+            r.records_buf.retain(|lr| flag_filters.passes(lr.flags));
+        }
+        if !baq_off {
+            match fasta {
+                Some(fa) => {
+                    let ref_names = r.ref_names.clone();
+                    let t_pre = std::time::Instant::now();
+                    let pre_arc = std::sync::Arc::new(std::mem::take(&mut r.records_buf));
+                    let pre = crate::bam::pos_filter::pre_scan(std::slice::from_ref(&pre_arc), fa, &ref_names, min_alt);
+                    r.records_buf = std::sync::Arc::try_unwrap(pre_arc).unwrap_or_else(|arc| (*arc).clone());
+                    if timing {
+                        eprintln!(
+                            "[KIRA_BT] pre-scan: {:.1}s, skip-list={}, baq-skip={}/{}",
+                            t_pre.elapsed().as_secs_f64(),
+                            pre.pos_filter.total(),
+                            pre.skipped_baq,
+                            pre.needs_baq.len(),
+                        );
+                    }
+                    if args.recal {
+                        // Empirical qualities learned at non-candidate sites, before BAQ.
+                        let t_rc = std::time::Instant::now();
+                        let arc = std::sync::Arc::new(std::mem::take(&mut r.records_buf));
+                        let table = crate::bam::pos_filter::RecalTable::build(std::slice::from_ref(&arc), fa, &ref_names, &pre.pos_filter);
+                        r.records_buf = std::sync::Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone());
+                        table.apply(&mut r.records_buf, fa, &ref_names);
+                        if timing {
+                            eprintln!("[KIRA_BT] recal: {} cells calibrated in {:.1}s", table.n_calibrated(), t_rc.elapsed().as_secs_f64());
+                        }
+                    }
+                    let t1 = std::time::Instant::now();
+                    crate::bam::reader::apply_hmm_baq_to_reads_masked(&mut r.records_buf, &ref_names, fa, Some(&pre.needs_baq), &args.nm_weight);
+                    if timing { eprintln!("[KIRA_BT] BAQ: {:.1}s", t1.elapsed().as_secs_f64()); }
+                    combined = Some(match combined.take() {
+                        None => pre.pos_filter,
+                        Some(mut m) => {
+                            m.merge(pre.pos_filter);
+                            m
+                        }
+                    });
+                }
+                // No reference: no BAQ, as in bcftools.
+                None => {}
+            }
+        }
+    }
+    combined
+}
+
 pub fn cmd_mpileup(args: MpileupArgs) -> Result<()> {
     if args.inputs.is_empty() { bail!("mpileup: need at least one BAM input"); }
 
     let preset = args.config.as_deref().map(PresetConfig::parse).transpose()?;
     let min_mq = preset.as_ref().and_then(|p| p.min_mq).unwrap_or(args.min_mq) as u8;
     let min_bq = preset.as_ref().and_then(|p| p.min_bq).unwrap_or(args.min_bq) as u8;
-    let max_depth = preset.as_ref().and_then(|p| p.max_depth).unwrap_or(args.max_depth);
+    let _max_depth = preset.as_ref().and_then(|p| p.max_depth).unwrap_or(args.max_depth);
     let _indel_size = preset.as_ref().and_then(|p| p.indel_size).unwrap_or(args.indel_size);
     let baq_off = preset.as_ref().and_then(|p| p.no_baq).unwrap_or(args.no_baq);
     let skip_indels = args.skip_indels;
-    let annotate = AnnotateSpec::parse(args.annotate.as_deref())?;
+    let annotate_spec = if args.annotate.is_empty() { None } else { Some(args.annotate.join(",")) };
+    let annotate = AnnotateSpec::parse(annotate_spec.as_deref())?;
     let flag_filters = FlagFilters::from_full(args.ef, args.df, args.if_, args.nf,
-        args.rf.as_deref(), args.ff.as_deref())?;
+        args.rf.as_deref(), args.ff.as_deref())?
+        .with_skip_all(args.skip_all_set.as_deref(), args.skip_all_unset.as_deref())?;
     let gap_frac = preset.as_ref().and_then(|p| p.gap_frac).unwrap_or(args.gap_frac);
     let min_ireads = args.min_ireads;
     let sample_filter = parse_samples_filter(args.samples.as_deref(), args.samples_file.as_deref())?;
+    if args.read_groups.is_some() {
+        eprintln!("[mpileup] warning: -G/--read-groups is accepted but read-group selection is not applied");
+    }
+    if args.recal && args.stream {
+        bail!("mpileup: --recal needs two passes over the reads and cannot be combined with --stream");
+    }
+    if args.recal && args.fasta_ref.is_none() {
+        bail!("mpileup: --recal needs the reference (-f)");
+    }
+    if !matches!(args.indel_realign.as_str(), "off" | "ins" | "all") {
+        bail!("mpileup: --indel-realign expects off, ins or all (got {:?})", args.indel_realign);
+    }
+    let regions = collect_regions(&args)?;
 
     let fasta = args.fasta_ref.as_ref().map(load_fasta).transpose()?;
     let out_path = args.output.clone().unwrap_or_else(|| PathBuf::from("out.mpileup.vcf"));
     let mut out = BufWriter::with_capacity(1 << 20, File::create(&out_path).context("create output")?);
 
     let timing = std::env::var("KIRA_BT_TIMING").is_ok();
+    if args.stream {
+        run_streaming(&args, &flag_filters, baq_off, fasta, &annotate, min_mq, min_bq, skip_indels, min_ireads, gap_frac, &sample_filter, regions.as_ref(), timing, &mut out)?;
+        out.flush()?;
+        return Ok(());
+    }
+    let region_list: Option<Vec<(String, u32, u32)>> =
+        regions.as_ref().map(|rs| rs.iter().map(|(c, b, e)| (c.to_string(), b, e)).collect());
     let mut bams: Vec<BamReader> = Vec::with_capacity(args.inputs.len());
-    // Single combined skip-list across all samples — pre-scan once per BAM, merged later.
-    let mut combined_filter: Option<crate::bam::pos_filter::InterestingMap> = None;
     for p in &args.inputs {
         let t0 = std::time::Instant::now();
-        let mut r = if let Some(reg) = &args.regions {
-            BamReader::open_with_region(p, reg)?
-        } else {
-            BamReader::open(p)?
+        let r = match &region_list {
+            Some(regs) => BamReader::open_with_regions_and_reference(p, regs, args.fasta_ref.as_deref())?,
+            None => BamReader::open_with_reference(p, args.fasta_ref.as_deref())?,
         };
         if timing { eprintln!("[KIRA_BT] BAM load: {:.1}s, {} records", t0.elapsed().as_secs_f64(), r.records_buf.len()); }
-        if flag_filters.exclude_flags != 0 || flag_filters.require_flags != 0 {
-            r.records_buf.retain(|lr| flag_filters.passes(lr.flags));
-        }
-        let _ = max_depth;
-        if !baq_off {
-            if let Some(fa) = &fasta {
-                let ref_names = r.ref_names.clone();
-                let t_pre = std::time::Instant::now();
-                let pre_arc = std::sync::Arc::new(std::mem::take(&mut r.records_buf));
-                let pre = crate::bam::pos_filter::pre_scan(
-                    std::slice::from_ref(&pre_arc),
-                    fa,
-                    &ref_names,
-                    args.min_alt_reads.max(2),
-                );
-                r.records_buf = std::sync::Arc::try_unwrap(pre_arc)
-                    .unwrap_or_else(|arc| (*arc).clone());
-                if timing {
-                    eprintln!(
-                        "[KIRA_BT] pre-scan: {:.1}s, skip-list={}, baq-skip={}/{}",
-                        t_pre.elapsed().as_secs_f64(),
-                        pre.pos_filter.total(),
-                        pre.skipped_baq,
-                        pre.needs_baq.len(),
-                    );
-                }
-                let t1 = std::time::Instant::now();
-                crate::bam::reader::apply_hmm_baq_to_reads_masked(
-                    &mut r.records_buf,
-                    &ref_names,
-                    fa,
-                    Some(&pre.needs_baq),
-                );
-                if timing { eprintln!("[KIRA_BT] BAQ: {:.1}s", t1.elapsed().as_secs_f64()); }
-                // First sample wins; subsequent samples would need merging — out of scope here.
-                if combined_filter.is_none() {
-                    combined_filter = Some(pre.pos_filter);
-                }
-            }
-        }
         bams.push(r);
     }
+    let combined_filter = prepare_bams(&mut bams, &args, &flag_filters, baq_off, fasta.as_ref(), timing);
 
-    let mut samples: Vec<String> = Vec::with_capacity(bams.len());
-    let mut sample_keep: Vec<bool> = Vec::with_capacity(bams.len());
-    for (i, b) in bams.iter().enumerate() {
-        let s = b.samples.first().cloned().unwrap_or_else(|| {
-            args.inputs[i].file_stem().and_then(|s| s.to_str()).unwrap_or("sample").to_string()
+    run_prepared(bams, &args, combined_filter, fasta.as_ref(), &annotate, min_mq, min_bq, skip_indels, min_ireads, gap_frac, &sample_filter, regions.as_ref(), timing, &mut out)?;
+    out.flush()?;
+    Ok(())
+}
+
+/// `-r/-R/-t/-T`: comma lists and region files (BED or `chr:beg-end`),
+/// merged per contig so overlapping regions fetch every read once.
+fn collect_regions(args: &MpileupArgs) -> Result<Option<RegionSet>> {
+    let mut set = RegionSet::default();
+    let mut any = false;
+    for s in [&args.regions, &args.targets].into_iter().flatten() {
+        for (c, b, e) in RegionSet::from_cli(s)?.iter() {
+            set.add(c, b, e);
+        }
+        any = true;
+    }
+    for f in [&args.regions_file, &args.targets_file].into_iter().flatten() {
+        for (c, b, e) in RegionSet::from_file(f)?.iter() {
+            set.add(c, b, e);
+        }
+        any = true;
+    }
+    if !any {
+        return Ok(None);
+    }
+    set.finalize();
+    Ok(Some(set))
+}
+
+/// `--stream`: decode each BAM on its own thread and pile up straight from
+/// the channels, so no BAM is held in memory. Flag filters and BAQ run per
+/// read on the decoder threads; without the reference pre-scan every
+/// covered site is visited.
+#[allow(clippy::too_many_arguments)]
+fn run_streaming<W: Write>(
+    args: &MpileupArgs,
+    flag_filters: &FlagFilters,
+    baq_off: bool,
+    fasta: Option<Fasta>,
+    annotate: &AnnotateSpec,
+    min_mq: u8,
+    min_bq: u8,
+    skip_indels: bool,
+    min_ireads: u32,
+    gap_frac: f64,
+    sample_filter: &Option<Vec<String>>,
+    regions: Option<&RegionSet>,
+    timing: bool,
+    out: &mut W,
+) -> Result<()> {
+    use crate::bam::{ReadHook, StreamingBam, mpileup_engine_streaming};
+    let fasta = fasta.map(std::sync::Arc::new);
+    let workers = (crate::threads::bam_workers() / args.inputs.len().max(1)).max(1);
+    let mut streams = Vec::with_capacity(args.inputs.len());
+    for (i, p) in args.inputs.iter().enumerate() {
+        let flags = flag_filters.clone();
+        let fa = fasta.clone();
+        let nm_weight = args.nm_weight.clone();
+        let mut nm_ready = false;
+        let hook: ReadHook = Box::new(move |lr: &mut LiveRead, ref_names: &[String]| -> bool {
+            if flags.is_active() && !flags.passes(lr.flags) {
+                return false;
+            }
+            if baq_off {
+                return true;
+            }
+            // Without a reference there is no BAQ, as in bcftools.
+            if let Some(fa) = fa.as_deref() {
+                if !nm_ready {
+                    crate::bam::baq::init_nm_profile(&nm_weight, lr.seq().len());
+                    nm_ready = true;
+                }
+                crate::bam::reader::baq_read(lr, ref_names, fa);
+            }
+            true
         });
-        let keep = sample_filter.as_ref().map_or(true, |list| list.iter().any(|n| n == &s));
-        sample_keep.push(keep);
-        samples.push(s);
+        let s = StreamingBam::open_with(p, i, workers, Some(hook)).with_context(|| format!("open {}", p.display()))?;
+        streams.push(s);
+    }
+
+    let mut samples: Vec<String> = Vec::with_capacity(streams.len());
+    let mut sample_keep: Vec<bool> = Vec::with_capacity(streams.len());
+    for (i, s) in streams.iter().enumerate() {
+        let name = s.samples.first().cloned().unwrap_or_else(|| {
+            args.inputs
+                .get(i)
+                .and_then(|p| p.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
+                .unwrap_or_else(|| format!("sample{i}"))
+        });
+        sample_keep.push(sample_filter.as_ref().is_none_or(|list| list.iter().any(|n| n == &name)));
+        samples.push(name);
     }
     let any_filter = sample_filter.is_some();
-
-    let ref_names: Vec<String> = bams[0].ref_names.clone();
-
-    write_vcf_header(&mut out, &annotate, &ref_names, &samples, &sample_keep, any_filter)?;
+    let ref_names = streams[0].ref_names.clone();
+    let ref_lengths = streams[0].ref_lengths.clone();
+    write_vcf_header(out, annotate, &ref_names, &ref_lengths, &samples, &sample_keep, any_filter)?;
 
     let em = ErrorModel::new();
-    let gvcf_opts: Option<Vec<u32>> = args.gvcf.as_ref().map(|s| {
-        s.split(',').filter_map(|t| t.parse::<u32>().ok()).collect()
-    });
-    let mut gvcf_blocker: Option<GvcfBlocker> = gvcf_opts.map(GvcfBlocker::new);
-
-    let n_chunks = args.threads.max(1);
-    // Chunk-parallel walk: applies when threads > 1 AND no gvcf state to maintain across positions.
-    let parallel_eligible = n_chunks > 1 && gvcf_blocker.is_none();
-
-    let hp_indel = std::env::var("KIRA_HP_INDEL").map(|v| v != "0").unwrap_or(true);
+    let mut gvcf_blocker: Option<GvcfBlocker> = args
+        .gvcf
+        .as_ref()
+        .map(|s| GvcfBlocker::new(s.split(',').filter_map(|t| t.parse::<u32>().ok()).collect()));
+    let caller = site_caller(args, &sample_keep, any_filter);
     let ctx = EmitCtx {
-        args: &args,
+        args,
         em: &em,
-        annotate: &annotate,
-        fasta: fasta.as_ref(),
+        caller: &caller,
+        annotate,
+        fasta: fasta.as_deref(),
         ref_names: &ref_names,
         sample_keep: &sample_keep,
         any_filter,
         skip_indels,
         min_ireads,
         gap_frac,
-        hp_indel,
+        hp_indel: args.hp_indel,
+        realign: realign_level(args),
+        assemble: args.assemble,
+        regions,
     };
 
-    let t_engine = std::time::Instant::now();
-    if parallel_eligible {
-        if timing { eprintln!("[KIRA_BT] engine: parallel, {} chunks", n_chunks); }
-        run_parallel(bams, n_chunks, &ctx, min_mq, min_bq, skip_indels, combined_filter, &mut out)?;
-    } else {
-        if timing { eprintln!("[KIRA_BT] engine: sequential"); }
-        run_sequential(bams, &ctx, min_mq, min_bq, skip_indels, &mut gvcf_blocker, &mut out)?;
-        if let Some(mut g) = gvcf_blocker { g.flush(&mut out)?; }
+    if timing { eprintln!("[KIRA_BT] engine: streaming, {} decoder thread(s)", streams.len()); }
+    let mut err: Option<anyhow::Error> = None;
+    let mut buf: Vec<u8> = Vec::with_capacity(256);
+    mpileup_engine_streaming(streams, min_mq, min_bq, skip_indels, !args.ignore_overlaps, &mut |site, reads| {
+        if err.is_none() {
+            if let Err(e) = write_site(site, reads, &ctx, &mut gvcf_blocker, &mut buf, out) {
+                err = Some(e);
+            }
+        }
+    })?;
+    if let Some(e) = err {
+        return Err(e);
     }
-    if timing { eprintln!("[KIRA_BT] engine done in {:.1}s", t_engine.elapsed().as_secs_f64()); }
-
-    out.flush()?;
+    if let Some(mut g) = gvcf_blocker {
+        g.flush(out)?;
+    }
     Ok(())
+}
+
+/// Render one site (or fold it into the open gVCF block) and write it.
+fn write_site<W: Write>(
+    site: &PileupSite,
+    reads: &[LiveRead],
+    ctx: &EmitCtx,
+    gvcf: &mut Option<GvcfBlocker>,
+    buf: &mut Vec<u8>,
+    out: &mut W,
+) -> Result<()> {
+    buf.clear();
+    if let Some(g) = gvcf.as_mut() {
+        if !emit_site_or_gvcf(site, reads, ctx, buf, Some(g), out)? {
+            return Ok(());
+        }
+    } else {
+        emit_site(site, reads, ctx, buf);
+    }
+    out.write_all(buf).context("write mpileup output")
 }
 
 /// Run mpileup over already-built [`BamReader`]s (records in memory) and write
@@ -169,10 +331,10 @@ pub fn run_mpileup_from_bams<W: Write>(
     let preset = args.config.as_deref().map(PresetConfig::parse).transpose()?;
     let min_mq = preset.as_ref().and_then(|p| p.min_mq).unwrap_or(args.min_mq) as u8;
     let min_bq = preset.as_ref().and_then(|p| p.min_bq).unwrap_or(args.min_bq) as u8;
-    let max_depth = preset.as_ref().and_then(|p| p.max_depth).unwrap_or(args.max_depth);
     let baq_off = preset.as_ref().and_then(|p| p.no_baq).unwrap_or(args.no_baq);
     let skip_indels = args.skip_indels;
-    let annotate = AnnotateSpec::parse(args.annotate.as_deref())?;
+    let annotate_spec = if args.annotate.is_empty() { None } else { Some(args.annotate.join(",")) };
+    let annotate = AnnotateSpec::parse(annotate_spec.as_deref())?;
     let flag_filters = FlagFilters::from_full(
         args.ef, args.df, args.if_, args.nf, args.rf.as_deref(), args.ff.as_deref(),
     )?;
@@ -182,81 +344,91 @@ pub fn run_mpileup_from_bams<W: Write>(
     let fasta = args.fasta_ref.as_ref().map(load_fasta).transpose()?;
     let timing = std::env::var("KIRA_BT_TIMING").is_ok();
 
-    let mut combined_filter: Option<crate::bam::pos_filter::InterestingMap> = None;
-    for r in bams.iter_mut() {
-        if flag_filters.exclude_flags != 0 || flag_filters.require_flags != 0 {
-            r.records_buf.retain(|lr| flag_filters.passes(lr.flags));
-        }
-        let _ = max_depth;
-        if !baq_off {
-            if let Some(fa) = &fasta {
-                let ref_names = r.ref_names.clone();
-                let t_pre = std::time::Instant::now();
-                let pre_arc = std::sync::Arc::new(std::mem::take(&mut r.records_buf));
-                let pre = crate::bam::pos_filter::pre_scan(
-                    std::slice::from_ref(&pre_arc), fa, &ref_names, args.min_alt_reads.max(2),
-                );
-                r.records_buf = std::sync::Arc::try_unwrap(pre_arc).unwrap_or_else(|arc| (*arc).clone());
-                if timing {
-                    eprintln!("[KIRA_BT] pre-scan: {:.1}s, skip-list={}", t_pre.elapsed().as_secs_f64(), pre.pos_filter.total());
-                }
-                let t1 = std::time::Instant::now();
-                crate::bam::reader::apply_hmm_baq_to_reads_masked(&mut r.records_buf, &ref_names, fa, Some(&pre.needs_baq));
-                if timing { eprintln!("[KIRA_BT] BAQ: {:.1}s", t1.elapsed().as_secs_f64()); }
-                if combined_filter.is_none() {
-                    combined_filter = Some(pre.pos_filter);
-                }
-            }
-        }
-    }
+    let combined_filter = prepare_bams(&mut bams, args, &flag_filters, baq_off, fasta.as_ref(), timing);
+    run_prepared(bams, args, combined_filter, fasta.as_ref(), &annotate, min_mq, min_bq, skip_indels, min_ireads, gap_frac, &sample_filter, None, timing, out)?;
+    out.flush()?;
+    Ok(())
+}
 
+#[allow(clippy::too_many_arguments)]
+fn run_prepared<W: Write>(
+    bams: Vec<BamReader>,
+    args: &MpileupArgs,
+    combined_filter: Option<InterestingMap>,
+    fasta: Option<&Fasta>,
+    annotate: &AnnotateSpec,
+    min_mq: u8,
+    min_bq: u8,
+    skip_indels: bool,
+    min_ireads: u32,
+    gap_frac: f64,
+    sample_filter: &Option<Vec<String>>,
+    regions: Option<&RegionSet>,
+    timing: bool,
+    out: &mut W,
+) -> Result<()> {
     let mut samples: Vec<String> = Vec::with_capacity(bams.len());
     let mut sample_keep: Vec<bool> = Vec::with_capacity(bams.len());
     for (i, b) in bams.iter().enumerate() {
-        let s = b.samples.first().cloned().unwrap_or_else(|| format!("sample{i}"));
-        let keep = sample_filter.as_ref().map_or(true, |list| list.iter().any(|n| n == &s));
+        let s = b.samples.first().cloned().unwrap_or_else(|| {
+            args.inputs
+                .get(i)
+                .and_then(|p| p.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
+                .unwrap_or_else(|| format!("sample{i}"))
+        });
+        let keep = sample_filter.as_ref().is_none_or(|list| list.iter().any(|n| n == &s));
         sample_keep.push(keep);
         samples.push(s);
     }
     let any_filter = sample_filter.is_some();
-    let ref_names: Vec<String> = bams[0].ref_names.clone();
 
-    write_vcf_header(out, &annotate, &ref_names, &samples, &sample_keep, any_filter)?;
+    let ref_names: Vec<String> = bams[0].ref_names.clone();
+    let ref_lengths: Vec<u64> = bams[0].ref_lengths.clone();
+
+    write_vcf_header(out, annotate, &ref_names, &ref_lengths, &samples, &sample_keep, any_filter)?;
 
     let em = ErrorModel::new();
-    let gvcf_opts: Option<Vec<u32>> = args
-        .gvcf
-        .as_ref()
-        .map(|s| s.split(',').filter_map(|t| t.parse::<u32>().ok()).collect());
+    let gvcf_opts: Option<Vec<u32>> = args.gvcf.as_ref().map(|s| {
+        s.split(',').filter_map(|t| t.parse::<u32>().ok()).collect()
+    });
     let mut gvcf_blocker: Option<GvcfBlocker> = gvcf_opts.map(GvcfBlocker::new);
 
     let n_chunks = args.threads.max(1);
     let parallel_eligible = n_chunks > 1 && gvcf_blocker.is_none();
+    // The skip-list drops reference-only sites; that is only valid when such
+    // sites are never emitted. It is then applied on every path so the output
+    // does not depend on the thread count.
+    let pos_filter = if args.variants_only && gvcf_blocker.is_none() { combined_filter } else { None };
 
-    let hp_indel = std::env::var("KIRA_HP_INDEL").map(|v| v != "0").unwrap_or(true);
+    let caller = site_caller(args, &sample_keep, any_filter);
     let ctx = EmitCtx {
         args,
         em: &em,
-        annotate: &annotate,
-        fasta: fasta.as_ref(),
+        caller: &caller,
+        annotate,
+        fasta,
         ref_names: &ref_names,
         sample_keep: &sample_keep,
         any_filter,
         skip_indels,
         min_ireads,
         gap_frac,
-        hp_indel,
+        hp_indel: args.hp_indel,
+        realign: realign_level(args),
+        assemble: args.assemble,
+        regions,
     };
 
+    let t_engine = std::time::Instant::now();
     if parallel_eligible {
-        run_parallel(bams, n_chunks, &ctx, min_mq, min_bq, skip_indels, combined_filter, out)?;
+        if timing { eprintln!("[KIRA_BT] engine: parallel, {} chunks", n_chunks); }
+        run_parallel(bams, n_chunks, &ctx, min_mq, min_bq, skip_indels, pos_filter, out)?;
     } else {
-        run_sequential(bams, &ctx, min_mq, min_bq, skip_indels, &mut gvcf_blocker, out)?;
-        if let Some(mut g) = gvcf_blocker {
-            g.flush(out)?;
-        }
+        if timing { eprintln!("[KIRA_BT] engine: sequential"); }
+        run_sequential(bams, &ctx, min_mq, min_bq, skip_indels, pos_filter.as_ref(), &mut gvcf_blocker, out)?;
+        if let Some(mut g) = gvcf_blocker { g.flush(out)?; }
     }
-    out.flush()?;
+    if timing { eprintln!("[KIRA_BT] engine done in {:.1}s", t_engine.elapsed().as_secs_f64()); }
     Ok(())
 }
 
@@ -264,31 +436,40 @@ fn write_vcf_header<W: Write>(
     out: &mut W,
     annotate: &AnnotateSpec,
     ref_names: &[String],
+    ref_lengths: &[u64],
     samples: &[String],
     sample_keep: &[bool],
     any_filter: bool,
 ) -> Result<()> {
     writeln!(out, "##fileformat=VCFv4.2")?;
+    writeln!(out, "##FILTER=<ID=PASS,Description=\"All filters passed\">")?;
     writeln!(out, "##source=kira_bt_mpileup")?;
     writeln!(out, "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Raw read depth\">")?;
-    if annotate.info_ad { writeln!(out, "##INFO=<ID=AD,Number=R,Type=Integer,Description=\"Total allelic depths\">")?; }
-    if annotate.info_adf { writeln!(out, "##INFO=<ID=ADF,Number=R,Type=Integer,Description=\"Forward strand allelic depths\">")?; }
-    if annotate.info_adr { writeln!(out, "##INFO=<ID=ADR,Number=R,Type=Integer,Description=\"Reverse strand allelic depths\">")?; }
     writeln!(out, "##INFO=<ID=MQ,Number=1,Type=Float,Description=\"Mean MAPQ at site\">")?;
-    writeln!(out, "##INFO=<ID=AC,Number=A,Type=Integer,Description=\"Alt allele counts\">")?;
-    writeln!(out, "##INFO=<ID=AN,Number=1,Type=Integer,Description=\"Total alleles\">")?;
-    writeln!(out, "##INFO=<ID=INDEL,Number=0,Type=Flag,Description=\"Variant is an indel\">")?;
+    writeln!(out, "##INFO=<ID=INDEL,Number=0,Type=Flag,Description=\"Indicates that the variant is an INDEL.\">")?;
+    if annotate.info_ad { writeln!(out, "##INFO=<ID=AD,Number=R,Type=Integer,Description=\"Total allelic depths (high-quality bases)\">")?; }
+    if annotate.info_adf { writeln!(out, "##INFO=<ID=ADF,Number=R,Type=Integer,Description=\"Total allelic depths on the forward strand (high-quality bases)\">")?; }
+    if annotate.info_adr { writeln!(out, "##INFO=<ID=ADR,Number=R,Type=Integer,Description=\"Total allelic depths on the reverse strand (high-quality bases)\">")?; }
+    if annotate.info_scr { writeln!(out, "##INFO=<ID=SCR,Number=1,Type=Integer,Description=\"Number of soft-clipped reads (at high-quality bases)\">")?; }
+    if annotate.info_dp4 { writeln!(out, "##INFO=<ID=DP4,Number=4,Type=Integer,Description=\"Number of high-quality ref-forward, ref-reverse, alt-forward and alt-reverse bases\">")?; }
     writeln!(out, "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">")?;
-    if annotate.fmt_dp { writeln!(out, "##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Sample depth\">")?; }
-    if annotate.fmt_ad { writeln!(out, "##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"Allelic depths\">")?; }
-    if annotate.fmt_adf { writeln!(out, "##FORMAT=<ID=ADF,Number=R,Type=Integer,Description=\"Forward-strand allelic depths\">")?; }
-    if annotate.fmt_adr { writeln!(out, "##FORMAT=<ID=ADR,Number=R,Type=Integer,Description=\"Reverse-strand allelic depths\">")?; }
+    if annotate.fmt_pl { writeln!(out, "##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"List of Phred-scaled genotype likelihoods\">")?; }
+    if annotate.fmt_dp { writeln!(out, "##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Number of high-quality bases\">")?; }
+    if annotate.fmt_ad { writeln!(out, "##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"Allelic depths (high-quality bases)\">")?; }
+    if annotate.fmt_adf { writeln!(out, "##FORMAT=<ID=ADF,Number=R,Type=Integer,Description=\"Allelic depths on the forward strand (high-quality bases)\">")?; }
+    if annotate.fmt_adr { writeln!(out, "##FORMAT=<ID=ADR,Number=R,Type=Integer,Description=\"Allelic depths on the reverse strand (high-quality bases)\">")?; }
+    if annotate.fmt_dv { writeln!(out, "##FORMAT=<ID=DV,Number=1,Type=Integer,Description=\"Number of high-quality non-reference bases\">")?; }
+    if annotate.fmt_dp4 { writeln!(out, "##FORMAT=<ID=DP4,Number=4,Type=Integer,Description=\"Number of high-quality ref-forward, ref-reverse, alt-forward and alt-reverse bases\">")?; }
     if annotate.fmt_qs { writeln!(out, "##FORMAT=<ID=QS,Number=R,Type=Integer,Description=\"Quality sum per allele\">")?; }
-    if annotate.fmt_sp { writeln!(out, "##FORMAT=<ID=SP,Number=1,Type=Integer,Description=\"Strand-bias P-value (Phred)\">")?; }
-    if annotate.fmt_scr { writeln!(out, "##FORMAT=<ID=SCR,Number=1,Type=Integer,Description=\"Soft-clip read count\">")?; }
-    if annotate.fmt_pl { writeln!(out, "##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"Phred-scaled likelihoods\">")?; }
+    if annotate.fmt_sp { writeln!(out, "##FORMAT=<ID=SP,Number=1,Type=Integer,Description=\"Phred-scaled strand bias P-value\">")?; }
+    if annotate.fmt_scr { writeln!(out, "##FORMAT=<ID=SCR,Number=1,Type=Integer,Description=\"Number of soft-clipped reads (at high-quality bases)\">")?; }
     if annotate.fmt_gq { writeln!(out, "##FORMAT=<ID=GQ,Number=1,Type=Integer,Description=\"Genotype quality\">")?; }
-    for rn in ref_names { writeln!(out, "##contig=<ID={}>", rn)?; }
+    for (i, rn) in ref_names.iter().enumerate() {
+        match ref_lengths.get(i) {
+            Some(len) if *len > 0 => writeln!(out, "##contig=<ID={},length={}>", rn, len)?,
+            _ => writeln!(out, "##contig=<ID={}>", rn)?,
+        }
+    }
     write!(out, "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT")?;
     for (i, s) in samples.iter().enumerate() {
         if !any_filter || sample_keep[i] { write!(out, "\t{}", s)?; }
@@ -299,7 +480,10 @@ fn write_vcf_header<W: Write>(
 
 struct EmitCtx<'a> {
     args: &'a MpileupArgs,
+    /// Dependent-error genotype likelihoods (htslib errmod).
     em: &'a ErrorModel,
+    /// Multiallelic caller (bcftools `call -m`) applied to every site.
+    caller: &'a Caller,
     annotate: &'a AnnotateSpec,
     fasta: Option<&'a Fasta>,
     ref_names: &'a [String],
@@ -308,33 +492,76 @@ struct EmitCtx<'a> {
     skip_indels: bool,
     min_ireads: u32,
     gap_frac: f64,
-    /// Homopolymer/STR-aware stringency for short indels (default on; KIRA_HP_INDEL=0 disables).
+    /// `--hp-indel`: homopolymer/STR-aware stringency and quality for short indels.
     hp_indel: bool,
+    /// `--indel-realign`: 0 off, 1 insertions, 2 insertions and deletions.
+    realign: u8,
+    /// `--assemble`: local indel recovery in active regions.
+    assemble: bool,
+    /// Requested regions: only sites inside them are emitted.
+    regions: Option<&'a RegionSet>,
 }
 
+fn realign_level(args: &MpileupArgs) -> u8 {
+    match args.indel_realign.as_str() {
+        "ins" => 1,
+        "all" => 2,
+        _ => 0,
+    }
+}
+
+/// The caller shared by every site: θ from `--prior`, Watterson-scaled over
+/// the samples in the output.
+fn site_caller(args: &MpileupArgs, sample_keep: &[bool], any_filter: bool) -> Caller {
+    let n = if any_filter { sample_keep.iter().filter(|k| **k).count() } else { sample_keep.len() };
+    Caller::new(CallerOpts { theta: args.prior, ploidy: 2, ..CallerOpts::default() }, n.max(1))
+}
+
+impl EmitCtx<'_> {
+    fn in_regions(&self, chr: &str, pos1: u64) -> bool {
+        match self.regions {
+            None => true,
+            Some(rs) => rs.contains(chr, pos1.min(u32::MAX as u64) as u32),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_sequential<W: Write>(
     mut bams: Vec<BamReader>,
     ctx: &EmitCtx,
     min_mq: u8,
     min_bq: u8,
     skip_indels: bool,
+    pos_filter: Option<&InterestingMap>,
     gvcf_blocker: &mut Option<GvcfBlocker>,
     out: &mut W,
 ) -> Result<()> {
-    mpileup_engine_multi(&mut bams, min_mq, min_bq, skip_indels, &mut |site, overlapping| {
-        let mut buf: Vec<u8> = Vec::with_capacity(256);
-        if let Some(g) = gvcf_blocker.as_mut() {
-            if !emit_site_or_gvcf(site, overlapping, ctx, &mut buf, Some(g), out) {
-                return;
+    let records_per_sample: Vec<Vec<LiveRead>> = bams
+        .iter_mut()
+        .enumerate()
+        .map(|(i, b)| {
+            let mut v = std::mem::take(&mut b.records_buf);
+            for lr in v.iter_mut() { lr.sample_idx = i; }
+            v
+        })
+        .collect();
+    let mut err: Option<anyhow::Error> = None;
+    let mut buf: Vec<u8> = Vec::with_capacity(256);
+    mpileup_engine_from_records(records_per_sample, min_mq, min_bq, skip_indels, !ctx.args.ignore_overlaps, pos_filter, &mut |site, overlapping| {
+        if err.is_none() {
+            if let Err(e) = write_site(site, overlapping, ctx, gvcf_blocker, &mut buf, out) {
+                err = Some(e);
             }
-        } else {
-            emit_site(site, overlapping, ctx, &mut buf);
         }
-        let _ = out.write_all(&buf);
     })?;
-    Ok(())
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_parallel<W: Write>(
     mut bams: Vec<BamReader>,
     n_chunks: usize,
@@ -342,12 +569,11 @@ fn run_parallel<W: Write>(
     min_mq: u8,
     min_bq: u8,
     skip_indels: bool,
-    pos_filter: Option<crate::bam::pos_filter::InterestingMap>,
+    pos_filter: Option<InterestingMap>,
     out: &mut W,
 ) -> Result<()> {
     use rayon::prelude::*;
 
-    let n_samples = bams.len();
     let records_per_sample: Vec<std::sync::Arc<Vec<LiveRead>>> = bams
         .iter_mut()
         .enumerate()
@@ -363,12 +589,13 @@ fn run_parallel<W: Write>(
         return Ok(());
     }
 
-    // pos_filter was built during pre-scan in cmd_mpileup — reuse it (no duplicate work).
-    // Fallback: build now if it wasn't (e.g. BAQ-off mode).
+    // The skip-list normally comes from the pre-scan; build it here only when
+    // BAQ was off and reference-only sites are dropped anyway.
     let pos_filter = pos_filter.or_else(|| {
+        if !ctx.args.variants_only { return None; }
         ctx.fasta.map(|fa| {
             let t = std::time::Instant::now();
-            let m = crate::bam::pos_filter::build(&records_per_sample, fa, ctx.ref_names);
+            let m = crate::bam::pos_filter::pre_scan(&records_per_sample, fa, ctx.ref_names, ctx.args.min_alt_reads.max(1)).pos_filter;
             if std::env::var("KIRA_BT_TIMING").is_ok() {
                 eprintln!("[KIRA_BT] late skip-list: {} in {:.1}s", m.total(), t.elapsed().as_secs_f64());
             }
@@ -376,25 +603,30 @@ fn run_parallel<W: Write>(
         })
     });
 
+    // Reads that start before a chunk but reach into it must be included, so
+    // the left boundary backs up by the longest reference span seen in the data.
+    let max_span: u32 = records_per_sample
+        .iter()
+        .flat_map(|v| v.iter())
+        .map(|lr| lr.ref_end_cached.saturating_sub(lr.ref_start))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+
     use indicatif::{ProgressBar, ProgressStyle};
     let pb = ProgressBar::new(chunks.len() as u64);
     pb.set_style(
         ProgressStyle::with_template("[ENGINE] {bar:40.magenta/blue} {pos}/{len} chunks ({per_sec}, ETA {eta})")
             .unwrap_or_else(|_| ProgressStyle::default_bar()),
     );
-    pb.set_draw_target(indicatif::ProgressDrawTarget::stderr_with_hz(2));
+    let no_pb = std::env::var("KIRA_BT_NO_PROGRESS").is_ok();
+    pb.set_draw_target(if no_pb { indicatif::ProgressDrawTarget::hidden() } else { indicatif::ProgressDrawTarget::stderr_with_hz(2) });
 
-    // BAM records are sorted by (ref_id, ref_start). For each chunk's [start, end) window we
-    // need records whose ref_id matches AND that overlap the window. Using partition_point we
-    // get a tight slice in O(log N) instead of scanning all 12M reads N times. The left
-    // boundary backs up by MAX_READ_LEN so we don't miss reads that started just before the
-    // chunk but extend into it.
-    const MAX_READ_LEN_FLANK: u32 = 1024;
     let buffers: Vec<Vec<u8>> = chunks
         .par_iter()
         .map(|chunk| {
             let mut buf: Vec<u8> = Vec::with_capacity(1 << 20);
-            let lo_pos = chunk.start.saturating_sub(MAX_READ_LEN_FLANK);
+            let lo_pos = chunk.start.saturating_sub(max_span);
             let per_sample: Vec<Vec<LiveRead>> = records_per_sample
                 .iter()
                 .map(|all| {
@@ -411,12 +643,12 @@ fn run_parallel<W: Write>(
                         .collect()
                 })
                 .collect();
-            // Engine skips ref-only positions via pos_filter, and we still bound emit to the chunk window.
             let _ = mpileup_engine_from_records(
                 per_sample,
                 min_mq,
                 min_bq,
                 skip_indels,
+                !ctx.args.ignore_overlaps,
                 pos_filter.as_ref(),
                 &mut |site, overlapping| {
                     if site.ref_id != chunk.ref_id { return; }
@@ -424,7 +656,6 @@ fn run_parallel<W: Write>(
                     emit_site(site, overlapping, ctx, &mut buf);
                 },
             );
-            let _ = n_samples;
             pb.inc(1);
             buf
         })
@@ -445,7 +676,6 @@ struct ChunkSpec {
 }
 
 fn compute_chunks(records_per_sample: &[std::sync::Arc<Vec<LiveRead>>], n_chunks: usize) -> Vec<ChunkSpec> {
-    // Group positions per ref_id across all samples.
     let mut per_ref: FxHashMap<usize, (u32, u32)> = FxHashMap::default();
     for sample in records_per_sample {
         for lr in sample.iter() {
@@ -460,7 +690,6 @@ fn compute_chunks(records_per_sample: &[std::sync::Arc<Vec<LiveRead>>], n_chunks
     let mut ref_ids: Vec<usize> = per_ref.keys().copied().collect();
     ref_ids.sort_unstable();
 
-    // Distribute chunk budget proportionally to each ref's position span.
     let total_span: u64 = per_ref.values().map(|(a, b)| (*b as u64).saturating_sub(*a as u64).max(1)).sum();
     let mut chunks: Vec<ChunkSpec> = Vec::new();
     for rid in ref_ids {
@@ -481,11 +710,95 @@ fn compute_chunks(records_per_sample: &[std::sync::Arc<Vec<LiveRead>>], n_chunks
     chunks
 }
 
+/// FORMAT keys in output order for the requested annotations.
+fn format_keys(annotate: &AnnotateSpec) -> Vec<&'static str> {
+    let mut keys = vec!["GT"];
+    if annotate.fmt_dp { keys.push("DP"); }
+    if annotate.fmt_ad { keys.push("AD"); }
+    if annotate.fmt_adf { keys.push("ADF"); }
+    if annotate.fmt_adr { keys.push("ADR"); }
+    if annotate.fmt_dv { keys.push("DV"); }
+    if annotate.fmt_dp4 { keys.push("DP4"); }
+    if annotate.fmt_qs { keys.push("QS"); }
+    if annotate.fmt_sp { keys.push("SP"); }
+    if annotate.fmt_scr { keys.push("SCR"); }
+    if annotate.fmt_pl { keys.push("PL"); }
+    if annotate.fmt_gq { keys.push("GQ"); }
+    keys
+}
+
+/// Sample column for a sample with no reads at the site.
+fn empty_sample_col(annotate: &AnnotateSpec, n_alleles: usize) -> String {
+    let zeros = vec!["0"; n_alleles].join(",");
+    let mut parts: Vec<String> = vec!["./.".into()];
+    if annotate.fmt_dp { parts.push("0".into()); }
+    if annotate.fmt_ad { parts.push(zeros.clone()); }
+    if annotate.fmt_adf { parts.push(zeros.clone()); }
+    if annotate.fmt_adr { parts.push(zeros.clone()); }
+    if annotate.fmt_dv { parts.push("0".into()); }
+    if annotate.fmt_dp4 { parts.push("0,0,0,0".into()); }
+    if annotate.fmt_qs { parts.push(zeros); }
+    if annotate.fmt_sp { parts.push("0".into()); }
+    if annotate.fmt_scr { parts.push("0".into()); }
+    if annotate.fmt_pl { parts.push("0".into()); }
+    if annotate.fmt_gq { parts.push("0".into()); }
+    parts.join(":")
+}
+
+fn join_u32(v: &[u32]) -> String {
+    v.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+}
+
+/// ref-fwd, ref-rev, alt-fwd, alt-rev from per-allele counts and forward counts.
+fn dp4_of(counts: &[u32], fwd: &[u32]) -> String {
+    let rf = fwd.first().copied().unwrap_or(0);
+    let rr = counts.first().copied().unwrap_or(0).saturating_sub(rf);
+    let af: u32 = fwd.iter().skip(1).sum();
+    let ar: u32 = counts.iter().skip(1).zip(fwd.iter().skip(1)).map(|(c, f)| c.saturating_sub(*f)).sum();
+    format!("{rf},{rr},{af},{ar}")
+}
+
+/// Per-sample FORMAT values shared by SNV and indel records.
+#[allow(clippy::too_many_arguments)]
+fn sample_parts(annotate: &AnnotateSpec, gt: String, depth: u32, counts: &[u32], fwd: &[u32], quals: &[u32], n_softclip: u32, pl: &str, gq: u32) -> Vec<String> {
+    let rev: Vec<u32> = counts.iter().zip(fwd.iter()).map(|(c, f)| c.saturating_sub(*f)).collect();
+    let alt_fwd: u32 = fwd.iter().skip(1).sum();
+    let alt_rev: u32 = rev.iter().skip(1).sum();
+    let mut parts: Vec<String> = vec![gt];
+    if annotate.fmt_dp { parts.push(depth.to_string()); }
+    if annotate.fmt_ad { parts.push(join_u32(counts)); }
+    if annotate.fmt_adf { parts.push(join_u32(fwd)); }
+    if annotate.fmt_adr { parts.push(join_u32(&rev)); }
+    if annotate.fmt_dv { parts.push(counts.iter().skip(1).sum::<u32>().to_string()); }
+    if annotate.fmt_dp4 { parts.push(dp4_of(counts, fwd)); }
+    if annotate.fmt_qs { parts.push(join_u32(quals)); }
+    if annotate.fmt_sp { parts.push(strand_bias_phred(fwd.first().copied().unwrap_or(0), rev.first().copied().unwrap_or(0), alt_fwd, alt_rev).to_string()); }
+    if annotate.fmt_scr { parts.push(n_softclip.to_string()); }
+    if annotate.fmt_pl { parts.push(pl.to_string()); }
+    if annotate.fmt_gq { parts.push(gq.to_string()); }
+    parts
+}
+
+/// Site-level INFO: depth, mean MAPQ, optional allelic depths by strand and soft-clip count.
+fn site_info(total: u32, mean_mq: f64, ad: &[u32], adf: &[u32], scr: u32, annotate: &AnnotateSpec, indel: bool) -> String {
+    let mut info = format!("DP={};MQ={:.1}", total, mean_mq);
+    if indel { info.push_str(";INDEL"); }
+    if annotate.info_ad { info.push_str(&format!(";AD={}", join_u32(ad))); }
+    if annotate.info_adf { info.push_str(&format!(";ADF={}", join_u32(adf))); }
+    if annotate.info_adr {
+        let adr: Vec<u32> = ad.iter().zip(adf.iter()).map(|(a, f)| a.saturating_sub(*f)).collect();
+        info.push_str(&format!(";ADR={}", join_u32(&adr)));
+    }
+    if annotate.info_dp4 { info.push_str(&format!(";DP4={}", dp4_of(ad, adf))); }
+    if annotate.info_scr { info.push_str(&format!(";SCR={}", scr)); }
+    info
+}
+
 /// Per-site emit, writing the formatted VCF line into `out` (a Vec<u8> buffer
 /// in the parallel runner; a BufWriter slice in the sequential one).
 fn emit_site(
     site: &PileupSite,
-    overlapping_reads: &[&LiveRead],
+    overlapping_reads: &[LiveRead],
     ctx: &EmitCtx,
     out: &mut Vec<u8>,
 ) {
@@ -493,9 +806,10 @@ fn emit_site(
     let annotate = ctx.annotate;
     let chr = ctx.ref_names.get(site.ref_id).map(|s| s.as_str()).unwrap_or(".");
     let pos1 = site.pos as u64 + 1;
+    if !ctx.in_regions(chr, pos1) { return; }
     let ref_base = ctx.fasta.and_then(|fa| fa.base(chr, pos1 as u32)).unwrap_or(b'N');
     if ref_base == b'N' || ref_base == b'n' { return; }
-    let ref_idx = match ref_base { b'A' | b'a' => 0, b'C' | b'c' => 1, b'G' | b'g' => 2, b'T' | b't' => 3, _ => 4 };
+    let ref_idx = match ref_base { b'A' | b'a' => 0, b'C' | b'c' => 1, b'G' | b'g' => 2, b'T' | b't' => 3, _ => return };
     let agg = site.aggregated();
     let total: u32 = agg.base_counts.iter().sum();
     if total == 0 { return; }
@@ -506,114 +820,107 @@ fn emit_site(
         (1u32, 0.0f64)
     };
     let total_f = total.max(1) as f64;
-    let mut snv_alts: Vec<(u8, u32, u32)> = Vec::new();
+    // Candidate ALT bases as (ACGT index, count), most frequent first.
+    let mut snv_alts: Vec<(usize, u32)> = Vec::new();
     for i in 0..4 {
         if i == ref_idx { continue; }
         let c = agg.base_counts[i];
-        let af = (c as f64) / total_f;
-        if c >= alt_min_reads && af >= alt_min_af {
-            snv_alts.push((b"ACGT"[i], c, agg.base_quals[i]));
+        if c >= alt_min_reads && (c as f64) / total_f >= alt_min_af {
+            snv_alts.push((i, c));
         }
     }
     snv_alts.sort_by(|a, b| b.1.cmp(&a.1));
+    // Candidate alleles in REF-first order, as ACGT indices, plus the least
+    // supported other base standing in for bcftools' unseen `<*>` allele:
+    // it is never emitted, but weighs the reference hypothesis against
+    // "anything else" so reference sites get a real QUAL.
+    let mut cand: Vec<usize> = std::iter::once(ref_idx).chain(snv_alts.iter().map(|a| a.0)).collect();
+    let unseen = (0..4usize).filter(|i| !cand.contains(i)).min_by_key(|&i| agg.base_counts[i]).map(|i| {
+        cand.push(i);
+        cand.len() - 1
+    });
+    let n_cand = cand.len();
+    let n_gt = n_cand * (n_cand + 1) / 2;
+    let codes: Vec<u8> = cand.iter().map(|&c| c as u8).collect();
+    let mean_mq = (agg.mq_sum as f64) / (total as f64);
 
-    let all_alts: Vec<String> = snv_alts.iter().map(|(b, _, _)| (*b as char).to_string()).collect();
-
-    let alt_str = if all_alts.is_empty() { ".".into() } else { all_alts.join(",") };
-    let ref_for_record = if ref_base == b'N' && !snv_alts.is_empty() { snv_alts[0].0 } else { ref_base };
-    let n_alleles = all_alts.len() + 1;
-    let mean_mq = if total > 0 { (agg.mq_sum as f64) / (total as f64) } else { 0.0 };
-
-    // Map each ACGT base index to its position in REF-first allele order so a
-    // sample's per-read observations feed the genotype-likelihood model.
-    let mut acgt_to_gl = [usize::MAX; 4];
-    if ref_idx < 4 {
-        acgt_to_gl[ref_idx] = 0;
-    }
-    for (i, (b, _, _)) in snv_alts.iter().enumerate() {
-        let bi = match *b { b'A' => 0, b'C' => 1, b'G' => 2, b'T' => 3, _ => continue };
-        acgt_to_gl[bi] = i + 1;
-    }
-
-    let mut per_sample_cols: Vec<String> = Vec::new();
-    let mut site_qual: f64 = 0.0;
-    let mut any_variant = false;
+    // Per-sample PLs from the dependent-error model, then the multiallelic caller.
+    let mut kept_samples: Vec<usize> = Vec::new();
+    let mut pls_all: Vec<i32> = Vec::new();
+    let mut bases: Vec<u16> = Vec::new();
+    // INFO/QS as `bcf_call_combine` builds it: per-sample quality sums per
+    // allele, normalised within the sample, summed over samples.
+    let mut qs = vec![0.0f64; n_cand];
     for (si, s) in site.per_sample.iter().enumerate() {
         if ctx.any_filter && !ctx.sample_keep.get(si).copied().unwrap_or(false) { continue; }
+        kept_samples.push(si);
         if s.depth == 0 {
-            let mut parts: Vec<String> = vec!["./.".into()];
-            if annotate.fmt_dp { parts.push("0".into()); }
-            if annotate.fmt_ad { parts.push(vec!["0"; n_alleles].join(",")); }
-            if annotate.fmt_pl { parts.push("0".into()); }
-            if annotate.fmt_gq { parts.push("0".into()); }
-            per_sample_cols.push(parts.join(":"));
+            pls_all.extend(std::iter::repeat_n(PL_MISSING, n_gt));
             continue;
         }
-        let mut counts: Vec<u32> = vec![0; n_alleles];
-        let mut quals: Vec<u32> = vec![0; n_alleles];
-        if ref_idx < 4 { counts[0] = s.base_counts[ref_idx]; quals[0] = s.base_quals[ref_idx]; }
-        for (i, (b, _, _)) in snv_alts.iter().enumerate() {
-            let bi = match *b { b'A' => 0, b'C' => 1, b'G' => 2, b'T' => 3, _ => continue };
-            counts[i + 1] = s.base_counts[bi];
-            quals[i + 1] = s.base_quals[bi];
+        bases.clear();
+        let mut qsum = [0u64; 16];
+        for &(code, q) in &s.obs {
+            qsum[(code & 0xf) as usize] += q as u64;
+            bases.push(pack_base(q, code & 0x10 != 0, code & 0xf));
         }
-        // Exact per-read GLs from MAPQ-capped base observations (samtools-style),
-        // not a single averaged quality per allele.
-        let mut reads: Vec<(usize, u8)> = Vec::with_capacity(s.obs.len());
-        for &(ai, q) in &s.obs {
-            let g = acgt_to_gl[ai as usize];
-            if g != usize::MAX {
-                reads.push((g, q));
+        let qtotal: u64 = qsum.iter().sum();
+        if qtotal > 0 {
+            for (k, &c) in codes.iter().enumerate() {
+                qs[k] += qsum[c as usize] as f64 / qtotal as f64;
             }
         }
-        let gl_raw = ctx.em.likelihoods_per_read(n_alleles, &reads);
-        let gl = gl_raw.with_prior(n_alleles, args.prior);
-        let (gi, gj) = gl.most_likely_gt(n_alleles);
-        if gi != 0 || gj != 0 { any_variant = true; }
-        site_qual = site_qual.max(gl.qual());
-        let gt = format!("{}/{}", gi, gj);
-        let mut parts: Vec<String> = vec![gt];
-        if annotate.fmt_dp { parts.push(s.depth.to_string()); }
-        if annotate.fmt_ad { parts.push(counts.iter().map(u32::to_string).collect::<Vec<_>>().join(",")); }
-        if annotate.fmt_qs { parts.push(quals.iter().map(u32::to_string).collect::<Vec<_>>().join(",")); }
-        if annotate.fmt_pl { parts.push(gl.to_pl_string()); }
-        if annotate.fmt_gq {
-            let mut sorted = gl.pl.clone(); sorted.sort();
-            let gq = sorted.get(1).copied().unwrap_or(0);
-            parts.push(gq.to_string());
-        }
-        per_sample_cols.push(parts.join(":"));
+        let pl = ctx.em.pls(&mut bases, &codes);
+        pls_all.extend(pl.iter().map(|&v| v as i32));
     }
+    if let Some(u) = unseen {
+        qs[u] = 0.0;
+    }
+    let mut call_site = CallSite { n_samples: kept_samples.len(), n_alleles: n_cand, pls: pls_all, is_indel: false, depths: None, qs: Some(qs), unseen, sample_af: None, prior_an_ac: None };
+    let CallResult::Called { alleles_kept, qual: site_qual, gts, gqs, pls: pls_sub, .. } = ctx.caller.call_site(&mut call_site) else { return };
+    let site_qual = site_qual.unwrap_or(0.0);
+    let any_variant = alleles_kept.len() > 1;
+
     let have_indel = !ctx.skip_indels && {
         let m = if args.variants_only { args.min_alt_reads.max(ctx.min_ireads) } else { ctx.min_ireads };
-        agg.ins_alleles.iter().any(|(_, c)| *c >= m) || agg.del_alleles.iter().any(|(_, c)| *c >= m)
+        agg.ins_alleles.iter().any(|(_, c, _)| *c >= m) || agg.del_alleles.iter().any(|(_, c, _)| *c >= m)
     };
     if args.variants_only && (!any_variant || site_qual < args.min_qual as f64) && !have_indel {
         return;
     }
 
-    let ac: u32 = snv_alts.iter().map(|(_, c, _)| *c).sum();
-    let an = total + ac;
-    let mut info = format!("DP={};MQ={:.1};AC={};AN={}", total, mean_mq, ac, an);
-    if annotate.info_ad {
-        let mut ad = vec![0u32; n_alleles];
-        if ref_idx < 4 { ad[0] = agg.base_counts[ref_idx]; }
-        for (i, (_, c, _)) in snv_alts.iter().enumerate() { ad[i + 1] = *c; }
-        info.push_str(&format!(";AD={}", ad.iter().map(u32::to_string).collect::<Vec<_>>().join(",")));
+    let n_alleles = alleles_kept.len();
+    let alt_str = if n_alleles == 1 {
+        ".".to_string()
+    } else {
+        alleles_kept[1..].iter().map(|&a| (b"ACGT"[cand[a as usize]] as char).to_string()).collect::<Vec<_>>().join(",")
+    };
+    let mut per_sample_cols: Vec<String> = Vec::with_capacity(kept_samples.len());
+    for (k, &si) in kept_samples.iter().enumerate() {
+        let s = &site.per_sample[si];
+        if s.depth == 0 {
+            per_sample_cols.push(empty_sample_col(annotate, n_alleles));
+            continue;
+        }
+        let counts: Vec<u32> = alleles_kept.iter().map(|&a| s.base_counts[cand[a as usize]]).collect();
+        let fwd: Vec<u32> = alleles_kept.iter().map(|&a| s.fwd_counts[cand[a as usize]]).collect();
+        let quals: Vec<u32> = alleles_kept.iter().map(|&a| s.base_quals[cand[a as usize]]).collect();
+        let gt = gt_string(&alleles_kept, gts[k]);
+        let pl = pl_string_or_ref(&pls_sub[k], &call_site.pls[k * n_gt..(k + 1) * n_gt]);
+        let parts = sample_parts(annotate, gt, s.depth, &counts, &fwd, &quals, s.n_softclip, &pl, gqs[k]);
+        per_sample_cols.push(parts.join(":"));
     }
 
-    let mut fmt_keys = vec!["GT"];
-    if annotate.fmt_dp { fmt_keys.push("DP"); }
-    if annotate.fmt_ad { fmt_keys.push("AD"); }
-    if annotate.fmt_qs { fmt_keys.push("QS"); }
-    if annotate.fmt_pl { fmt_keys.push("PL"); }
-    if annotate.fmt_gq { fmt_keys.push("GQ"); }
+    let ad: Vec<u32> = alleles_kept.iter().map(|&a| agg.base_counts[cand[a as usize]]).collect();
+    let adf: Vec<u32> = alleles_kept.iter().map(|&a| agg.fwd_counts[cand[a as usize]]).collect();
+    let info = site_info(total, mean_mq, &ad, &adf, agg.n_softclip, annotate, false);
+    let fmt_keys = format_keys(annotate);
 
-    let snv_emit = !snv_alts.is_empty() || !args.variants_only;
-    if snv_emit && !(args.variants_only && (!any_variant || site_qual < args.min_qual as f64)) {
+    let snv_emit = any_variant || !args.variants_only;
+    if snv_emit && !(args.variants_only && site_qual < args.min_qual as f64) {
         let qual_str = fmt_qual(site_qual);
         let _ = write!(out, "{}\t{}\t.\t{}\t{}\t{}\t.\t{}\t{}",
-            chr, pos1, ref_for_record as char, alt_str, qual_str, info, fmt_keys.join(":"));
+            chr, pos1, ref_base as char, alt_str, qual_str, info, fmt_keys.join(":"));
         for col in &per_sample_cols { let _ = write!(out, "\t{}", col); }
         let _ = writeln!(out);
     }
@@ -622,28 +929,18 @@ fn emit_site(
         emit_indels(site, &agg, chr, pos1, ref_base, total, mean_mq, ctx, out, overlapping_reads);
     }
 
-    // Local indel recovery: at non-reference sites, re-assemble the reads to find
-    // indels the aligner hid as mismatches. Gated by KIRA_ASSEMBLE; sorts downstream.
-    // Only where the pileup found NO indel of its own (`!have_indel`) — the
-    // mismatch-modeled FN — so we add new recall, not duplicates of CIGAR indels.
-    if assemble_mode() && !ctx.skip_indels && !have_indel {
+    // `--assemble`: at non-reference sites without a CIGAR indel, realign the
+    // reads to find indels the aligner modelled as mismatches. Records may
+    // land out of position order; sort downstream.
+    if ctx.assemble && !ctx.skip_indels && !have_indel {
         let cfg = asm_cfg();
-        let nonref = total.saturating_sub(if ref_idx < 4 { agg.base_counts[ref_idx] } else { 0 });
+        let nonref = total.saturating_sub(agg.base_counts[ref_idx]);
         if nonref >= cfg.nonref {
             if let Some(fa) = ctx.fasta {
-                let pos0 = site.pos as u32;
-                let w_lo = pos0.saturating_sub(cfg.up);
+                let w_lo = site.pos.saturating_sub(cfg.up);
                 if let Some(refw) = fa.slice_bytes(chr, w_lo + 1, cfg.len) {
-                    if let Some(call) =
-                        crate::call::haplotype::assemble_indel(overlapping_reads, w_lo, refw, cfg.min_sup, cfg.max_mm)
-                    {
-                        let n_cols = site
-                            .per_sample
-                            .iter()
-                            .enumerate()
-                            .filter(|(si, _)| !ctx.any_filter || ctx.sample_keep.get(*si).copied().unwrap_or(false))
-                            .count();
-                        emit_assembled(call, n_cols, chr, ctx, out, annotate);
+                    if let Some(call) = crate::call::haplotype::assemble_indel(overlapping_reads, w_lo, refw, cfg.min_sup, cfg.max_mm) {
+                        emit_assembled(call, site, overlapping_reads, chr, ctx, out, annotate);
                     }
                 }
             }
@@ -651,73 +948,56 @@ fn emit_site(
     }
 }
 
-/// `KIRA_INDEL_REALIGN`: 0/off, 1/ins/on = insertions only, 2/all = insertions+deletions (default off).
-fn realign_mode() -> u8 {
-    static V: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-    *V.get_or_init(|| match std::env::var("KIRA_INDEL_REALIGN") {
-        Ok(v) if v == "2" || v.eq_ignore_ascii_case("all") => 2,
-        Ok(v)
-            if v == "1"
-                || v.eq_ignore_ascii_case("ins")
-                || v.eq_ignore_ascii_case("on")
-                || v.eq_ignore_ascii_case("true") =>
-        {
-            1
-        }
-        _ => 0,
-    })
+/// `a/b` over the kept-allele indices; `./.` for a missing genotype.
+fn gt_string(alleles_kept: &[u32], gt: Option<(u32, u32)>) -> String {
+    let Some(gt) = gt else { return "./.".to_string() };
+    let gi = alleles_kept.iter().position(|&x| x == gt.0).unwrap_or(0);
+    let gj = alleles_kept.iter().position(|&x| x == gt.1).unwrap_or(0);
+    format!("{}/{}", gi.min(gj), gi.max(gj))
 }
 
-/// Realignment flank window (bp each side). `KIRA_REALIGN_W`, default 20.
-fn realign_window() -> u32 {
-    static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
-        std::env::var("KIRA_REALIGN_W").ok().and_then(|s| s.parse().ok()).filter(|&w: &u32| w >= 4).unwrap_or(20)
-    })
+fn pl_string(pl: &[i32]) -> String {
+    pl.iter().map(|&v| if v == PL_MISSING { ".".to_string() } else { v.to_string() }).collect::<Vec<_>>().join(",")
 }
 
-/// `KIRA_REALIGN_MARGIN` — a read supports the indel iff `d_alt + margin <= d_ref` (default 1).
-fn realign_margin() -> i32 {
-    static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
-        std::env::var("KIRA_REALIGN_MARGIN").ok().and_then(|s| s.parse().ok()).unwrap_or(1)
-    })
+/// The caller drops PL at reference-only sites; mpileup output keeps the
+/// homozygous-reference value so FORMAT/PL is always present.
+fn pl_string_or_ref(pl: &[i32], raw: &[i32]) -> String {
+    if pl.is_empty() { pl_string(&raw[..1.min(raw.len())]) } else { pl_string(pl) }
 }
 
-/// Capped Levenshtein (edit) distance, case-insensitive. Returns `cap+1` once it provably exceeds `cap`.
-fn edit_dist_capped(a: &[u8], b: &[u8], cap: u32) -> u32 {
-    let (n, m) = (a.len(), b.len());
-    if n == 0 {
-        return (m as u32).min(cap + 1);
-    }
-    if m == 0 {
-        return (n as u32).min(cap + 1);
-    }
-    if (n as i64 - m as i64).unsigned_abs() as u32 > cap {
-        return cap + 1;
-    }
-    let mut prev: Vec<u32> = (0..=m as u32).collect();
-    let mut cur = vec![0u32; m + 1];
-    for i in 1..=n {
-        cur[0] = i as u32;
-        let mut row_min = cur[0];
-        for j in 1..=m {
-            let cost = if a[i - 1].eq_ignore_ascii_case(&b[j - 1]) { 0 } else { 1 };
-            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
-            row_min = row_min.min(cur[j]);
+/// Like [`pl_string_or_ref`], but a record that prints its ALT anyway (an
+/// indel candidate called 0/0) keeps the full likelihood vector.
+fn pl_string_or_raw(pl: &[i32], raw: &[i32]) -> String {
+    if pl.is_empty() { pl_string(raw) } else { pl_string(pl) }
+}
+
+/// Realignment flank (bp each side of the anchor).
+const REALIGN_WINDOW: u32 = 20;
+/// A read supports the indel when the alt haplotype is this many nats more
+/// likely than the reference window (one decade).
+const REALIGN_MARGIN: f64 = 2.3;
+
+/// Reads whose window fits `halt` at least [`REALIGN_MARGIN`] better than `href`.
+fn glocal_support(reads: &[LiveRead], lo: u32, hi: u32, href: &[u8], halt: &[u8]) -> u32 {
+    let mut genuine = 0u32;
+    for lr in reads {
+        let Some((bases, quals)) = lr.query_window_qual(lo, hi) else { continue };
+        if bases.is_empty() {
+            continue;
         }
-        if row_min > cap {
-            return cap + 1;
+        let ll_ref = crate::call::pairhmm::read_vs_hap_loglik(&bases, &quals, href);
+        let ll_alt = crate::call::pairhmm::read_vs_hap_loglik(&bases, &quals, halt);
+        if ll_alt - ll_ref >= REALIGN_MARGIN {
+            genuine += 1;
         }
-        std::mem::swap(&mut prev, &mut cur);
     }
-    prev[m]
+    genuine
 }
 
 /// Count reads whose window realigns better to ref+ins than ref; `u32::MAX` if realignment impossible.
-fn realign_ins_support(reads: &[&LiveRead], chr: &str, pos1: u64, ins: &[u8], ctx: &EmitCtx) -> u32 {
-    let w = realign_window();
-    let margin = realign_margin();
+fn realign_ins_support(reads: &[LiveRead], chr: &str, pos1: u64, ins: &[u8], ctx: &EmitCtx) -> u32 {
+    let w = REALIGN_WINDOW;
     let Some(fa) = ctx.fasta else { return u32::MAX };
     let Some(anchor0) = (pos1 as u32).checked_sub(1) else { return u32::MAX };
     let lo = anchor0.saturating_sub(w);
@@ -736,26 +1016,12 @@ fn realign_ins_support(reads: &[&LiveRead], chr: &str, pos1: u64, ins: &[u8], ct
     halt.extend_from_slice(&refbytes[..anchor_off]);
     halt.extend_from_slice(ins);
     halt.extend_from_slice(&refbytes[anchor_off..wlen]);
-    let cap = 40u32;
-    let mut genuine = 0u32;
-    for lr in reads {
-        let Some(sub) = lr.query_window(lo, hi) else { continue };
-        if sub.is_empty() {
-            continue;
-        }
-        let d_ref = edit_dist_capped(&sub, href, cap) as i32;
-        let d_alt = edit_dist_capped(&sub, &halt, cap) as i32;
-        if d_alt + margin <= d_ref {
-            genuine += 1;
-        }
-    }
-    genuine
+    glocal_support(reads, lo, hi, href, &halt)
 }
 
 /// Count reads whose window realigns better to ref-with-deletion than ref; `u32::MAX` if impossible.
-fn realign_del_support(reads: &[&LiveRead], chr: &str, pos1: u64, del_len: u32, ctx: &EmitCtx) -> u32 {
-    let w = realign_window();
-    let margin = realign_margin();
+fn realign_del_support(reads: &[LiveRead], chr: &str, pos1: u64, del_len: u32, ctx: &EmitCtx) -> u32 {
+    let w = REALIGN_WINDOW;
     let Some(fa) = ctx.fasta else { return u32::MAX };
     let Some(anchor0) = (pos1 as u32).checked_sub(1) else { return u32::MAX };
     let lo = anchor0.saturating_sub(w);
@@ -775,25 +1041,13 @@ fn realign_del_support(reads: &[&LiveRead], chr: &str, pos1: u64, del_len: u32, 
     let mut halt: Vec<u8> = Vec::with_capacity(wlen - dl);
     halt.extend_from_slice(&refbytes[..anchor_off]);
     halt.extend_from_slice(&refbytes[anchor_off + dl..wlen]);
-    let cap = 40u32;
-    let mut genuine = 0u32;
-    for lr in reads {
-        let Some(sub) = lr.query_window(lo, ext_hi) else { continue };
-        if sub.is_empty() {
-            continue;
-        }
-        let d_ref = edit_dist_capped(&sub, href, cap) as i32;
-        let d_alt = edit_dist_capped(&sub, &halt, cap) as i32;
-        if d_alt + margin <= d_ref {
-            genuine += 1;
-        }
-    }
-    genuine
+    glocal_support(reads, lo, ext_hi, href, &halt)
 }
 
 /// Emit one VCF record per indel allele (insertion or deletion). Each record
 /// is fully normalized: REF includes the deleted bases (read from FASTA) for
 /// deletions, REF is single-base for insertions.
+#[allow(clippy::too_many_arguments)]
 fn emit_indels(
     site: &PileupSite,
     agg: &crate::bam::SampleSiteCounts,
@@ -804,7 +1058,7 @@ fn emit_indels(
     mean_mq: f64,
     ctx: &EmitCtx,
     out: &mut Vec<u8>,
-    overlapping_reads: &[&LiveRead],
+    overlapping_reads: &[LiveRead],
 ) {
     let args = ctx.args;
     let annotate = ctx.annotate;
@@ -816,7 +1070,7 @@ fn emit_indels(
     let denom = total.max(1) as f64;
 
     // For each indel allele, emit a biallelic record (REF + this one ALT).
-    for (seq, c) in &agg.ins_alleles {
+    for (seq, c, f) in &agg.ins_alleles {
         let (mn, af) = if ctx.hp_indel {
             indel_repeat_stringency(ctx.fasta, chr, pos1, seq.as_bytes(), ind_min, ind_af)
         } else { (ind_min, ind_af) };
@@ -824,7 +1078,7 @@ fn emit_indels(
         let frac = (*c as f64) / denom;
         if frac < af { continue; }
         // Re-apply count/fraction thresholds to realignment-confirmed support.
-        if realign_mode() >= 1 {
+        if ctx.realign >= 1 {
             let genuine = realign_ins_support(overlapping_reads, chr, pos1, seq.as_bytes(), ctx);
             if genuine != u32::MAX && (genuine < mn || (genuine as f64) / denom < af) {
                 continue;
@@ -832,9 +1086,9 @@ fn emit_indels(
         }
         let ref_str = (ref_base as char).to_string();
         let alt_str = format!("{}{}", ref_base as char, seq);
-        emit_one_indel(site, agg, chr, pos1, &ref_str, &alt_str, *c, total, mean_mq, ctx, out, annotate);
+        emit_one_indel(site, agg, chr, pos1, &ref_str, &alt_str, *c, *f, total, mean_mq, ctx, out, annotate);
     }
-    for (l, c) in &agg.del_alleles {
+    for (l, c, f) in &agg.del_alleles {
         // REF = anchor + deleted bases from FASTA; ALT = anchor.
         let Some(fa) = ctx.fasta else { continue };
         let Some(deleted) = fa.slice_bytes(chr, pos1 as u32 + 1, *l as usize) else { continue };
@@ -845,7 +1099,7 @@ fn emit_indels(
         if *c < mn { continue; }
         let frac = (*c as f64) / denom;
         if frac < af { continue; }
-        if realign_mode() >= 2 {
+        if ctx.realign >= 2 {
             let genuine = realign_del_support(overlapping_reads, chr, pos1, *l, ctx);
             if genuine != u32::MAX && (genuine < mn || (genuine as f64) / denom < af) {
                 continue;
@@ -855,18 +1109,20 @@ fn emit_indels(
         ref_str.push(ref_base as char);
         for &b in deleted { ref_str.push(b as char); }
         let alt_str = (ref_base as char).to_string();
-        emit_one_indel(site, agg, chr, pos1, &ref_str, &alt_str, *c, total, mean_mq, ctx, out, annotate);
+        emit_one_indel(site, agg, chr, pos1, &ref_str, &alt_str, *c, *f, total, mean_mq, ctx, out, annotate);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_one_indel(
     site: &PileupSite,
-    _agg: &crate::bam::SampleSiteCounts,
+    agg: &crate::bam::SampleSiteCounts,
     chr: &str,
     pos1: u64,
     ref_str: &str,
     alt_str: &str,
     indel_count: u32,
+    indel_fwd: u32,
     total: u32,
     mean_mq: f64,
     ctx: &EmitCtx,
@@ -874,120 +1130,78 @@ fn emit_one_indel(
     annotate: &AnnotateSpec,
 ) {
     let args = ctx.args;
-    // Aggregate per-sample for this specific indel allele. For each sample, build
-    // a synthetic biallelic [ref, indel] counts/quals pair: ref = depth - indel,
-    // indel = matched_count, qual proxy = 30 per supporting read.
+    // Per sample, a synthetic biallelic pileup: reference reads at quality 30,
+    // indel reads at `indel_qual`, strands from the forward counts; the
+    // dependent-error model then gives PLs and the caller the site.
     let n_alleles = 2usize;
-    let mut per_sample_cols: Vec<String> = Vec::new();
-    let mut site_qual: f64 = 0.0;
-    let mut any_variant = false;
-
-    // KIRA_INDEL_HPQUAL: off/0 = qual 30; "F,S" = floor F, slope S; 1/auto = 8,5 (default off).
-    let indel_qual: u32 = {
-        static CFG: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
-        let cfg = *CFG.get_or_init(|| match std::env::var("KIRA_INDEL_HPQUAL") {
-            Ok(v) if v == "0" || v.eq_ignore_ascii_case("off") => None,
-            Ok(v) if v == "1" || v.eq_ignore_ascii_case("auto") => Some((8, 5)),
-            Ok(v) => {
-                let mut it = v.split(',').filter_map(|x| x.trim().parse::<u32>().ok());
-                match (it.next(), it.next()) {
-                    (Some(f), Some(s)) => Some((f, s)),
-                    _ => None,
-                }
-            }
-            Err(_) => None,
-        });
-        match cfg {
-            None => 30,
-            Some((floor, slope)) => {
-                let unit: &[u8] = if alt_str.len() > ref_str.len() {
-                    &alt_str.as_bytes()[1..]
-                } else {
-                    &ref_str.as_bytes()[1..]
-                };
-                let u = unit.len();
-                let run_units = ctx
-                    .fasta
-                    .and_then(|fa| {
-                        if u == 0 || u > 6 {
-                            return None;
-                        }
-                        let c = fa.slice_bytes(chr, pos1 as u32 + 1, 64)?;
-                        let mut units = 0u32;
-                        let mut i = 0usize;
-                        while i + u <= c.len() && c[i..i + u].eq_ignore_ascii_case(unit) {
-                            units += 1;
-                            i += u;
-                        }
-                        Some(units)
-                    })
-                    .unwrap_or(0);
-                let penalty = slope.saturating_mul(run_units.saturating_sub(2));
-                30u32.saturating_sub(penalty).max(floor)
-            }
-        }
-    };
-
+    let indel_qual: u8 = if ctx.hp_indel { hp_indel_qual(ctx, chr, pos1, ref_str, alt_str) } else { 30 };
+    let is_ins = alt_str.len() > ref_str.len();
+    let mut kept_samples: Vec<usize> = Vec::new();
+    let mut per_counts: Vec<(u32, u32, u32, u32)> = Vec::new();
+    let mut pls_all: Vec<i32> = Vec::new();
+    let mut bases: Vec<u16> = Vec::new();
+    let mut qs = [0.0f64; 2];
     for (si, s) in site.per_sample.iter().enumerate() {
         if ctx.any_filter && !ctx.sample_keep.get(si).copied().unwrap_or(false) { continue; }
+        kept_samples.push(si);
         if s.depth == 0 {
-            let mut parts: Vec<String> = vec!["./.".into()];
-            if annotate.fmt_dp { parts.push("0".into()); }
-            if annotate.fmt_ad { parts.push("0,0".into()); }
-            if annotate.fmt_pl { parts.push("0".into()); }
-            if annotate.fmt_gq { parts.push("0".into()); }
-            per_sample_cols.push(parts.join(":"));
+            per_counts.push((0, 0, 0, 0));
+            pls_all.extend([PL_MISSING; 3]);
             continue;
         }
-        // Indel count for THIS allele in THIS sample.
-        let indel_c = if alt_str.len() > ref_str.len() {
-            // insertion: seq = alt_str[1..]
+        // Indel count (and forward-strand count) for THIS allele in THIS sample.
+        let (indel_c, indel_f) = if is_ins {
             let seq = &alt_str[1..];
-            s.ins_alleles.iter().find(|(k, _)| k == seq).map(|(_, c)| *c).unwrap_or(0)
+            s.ins_alleles.iter().find(|(k, _, _)| k == seq).map(|(_, c, f)| (*c, *f)).unwrap_or((0, 0))
         } else {
-            // deletion: length = ref_str.len() - 1
             let dl = (ref_str.len() - 1) as u32;
-            s.del_alleles.iter().find(|(l, _)| *l == dl).map(|(_, c)| *c).unwrap_or(0)
+            s.del_alleles.iter().find(|(l, _, _)| *l == dl).map(|(_, c, f)| (*c, *f)).unwrap_or((0, 0))
         };
         let ref_c = s.depth.saturating_sub(indel_c);
-        let counts = vec![ref_c, indel_c];
-        let quals = vec![ref_c * 30, indel_c * indel_qual];
-
-        let gl_raw = ctx.em.likelihoods(n_alleles, &counts, &quals);
-        let gl = gl_raw.with_prior(n_alleles, args.prior);
-        let (gi, gj) = gl.most_likely_gt(n_alleles);
-        if gi != 0 || gj != 0 { any_variant = true; }
-        site_qual = site_qual.max(gl.qual());
-        let gt = format!("{}/{}", gi, gj);
-        let mut parts: Vec<String> = vec![gt];
-        if annotate.fmt_dp { parts.push(s.depth.to_string()); }
-        if annotate.fmt_ad { parts.push(format!("{},{}", ref_c, indel_c)); }
-        if annotate.fmt_qs { parts.push(format!("{},{}", ref_c * 30, indel_c * 30)); }
-        if annotate.fmt_pl { parts.push(gl.to_pl_string()); }
-        if annotate.fmt_gq {
-            let mut sorted = gl.pl.clone(); sorted.sort();
-            let gq = sorted.get(1).copied().unwrap_or(0);
-            parts.push(gq.to_string());
+        let ref_f_total: u32 = s.fwd_counts.iter().sum();
+        let ref_f = ref_f_total.saturating_sub(indel_f).min(ref_c);
+        bases.clear();
+        bases.extend((0..ref_c).map(|i| pack_base(30, i >= ref_f, 0)));
+        bases.extend((0..indel_c).map(|i| pack_base(indel_qual, i >= indel_f, 1)));
+        let pl = ctx.em.pls(&mut bases, &[0, 1]);
+        pls_all.extend(pl.iter().map(|&v| v as i32));
+        per_counts.push((ref_c, indel_c, ref_f, indel_f));
+        let (qr, qa) = (ref_c as f64 * 30.0, indel_c as f64 * indel_qual as f64);
+        if qr + qa > 0.0 {
+            qs[0] += qr / (qr + qa);
+            qs[1] += qa / (qr + qa);
         }
-        per_sample_cols.push(parts.join(":"));
     }
+    let mut call_site = CallSite { n_samples: kept_samples.len(), n_alleles, pls: pls_all, is_indel: true, depths: None, qs: Some(qs.to_vec()), unseen: None, sample_af: None, prior_an_ac: None };
+    let CallResult::Called { alleles_kept, qual: site_qual, gts, gqs, pls: pls_sub, .. } = ctx.caller.call_site(&mut call_site) else { return };
+    let site_qual = site_qual.unwrap_or(0.0);
+    let any_variant = alleles_kept.len() > 1;
     if args.variants_only && (!any_variant || site_qual < args.min_qual as f64) {
         return;
     }
-
-    let an = total + indel_count;
-    let mut info = format!("DP={};MQ={:.1};AC={};AN={};INDEL", total, mean_mq, indel_count, an);
-    if annotate.info_ad {
-        let ref_total = total.saturating_sub(indel_count);
-        info.push_str(&format!(";AD={},{}", ref_total, indel_count));
+    let mut per_sample_cols: Vec<String> = Vec::with_capacity(kept_samples.len());
+    for (k, &si) in kept_samples.iter().enumerate() {
+        let s = &site.per_sample[si];
+        if s.depth == 0 {
+            per_sample_cols.push(empty_sample_col(annotate, n_alleles));
+            continue;
+        }
+        let (ref_c, indel_c, ref_f, indel_f) = per_counts[k];
+        let counts = vec![ref_c, indel_c];
+        let fwd = vec![ref_f, indel_f];
+        let quals = vec![ref_c * 30, indel_c * indel_qual as u32];
+        let gt = gt_string(&alleles_kept, gts[k]);
+        let pl = pl_string_or_raw(&pls_sub[k], &call_site.pls[k * 3..(k + 1) * 3]);
+        let parts = sample_parts(annotate, gt, s.depth, &counts, &fwd, &quals, s.n_softclip, &pl, gqs[k]);
+        per_sample_cols.push(parts.join(":"));
     }
 
-    let mut fmt_keys = vec!["GT"];
-    if annotate.fmt_dp { fmt_keys.push("DP"); }
-    if annotate.fmt_ad { fmt_keys.push("AD"); }
-    if annotate.fmt_qs { fmt_keys.push("QS"); }
-    if annotate.fmt_pl { fmt_keys.push("PL"); }
-    if annotate.fmt_gq { fmt_keys.push("GQ"); }
+    let ref_total = total.saturating_sub(indel_count);
+    let ref_fwd_total: u32 = agg.fwd_counts.iter().sum::<u32>().saturating_sub(indel_fwd).min(ref_total);
+    let ad = vec![ref_total, indel_count];
+    let adf = vec![ref_fwd_total, indel_fwd];
+    let info = site_info(total, mean_mq, &ad, &adf, agg.n_softclip, annotate, true);
+    let fmt_keys = format_keys(annotate);
 
     let qual_str = fmt_qual(site_qual);
     let _ = write!(out, "{}\t{}\t.\t{}\t{}\t{}\t.\t{}\t{}",
@@ -996,14 +1210,30 @@ fn emit_one_indel(
     let _ = writeln!(out);
 }
 
-/// `KIRA_ASSEMBLE=1` enables local indel recovery (mm-filter assembler) at
-/// non-reference sites — recovers indels the aligner modelled as mismatches and
-/// never placed in a CIGAR. Records may land slightly out of position order, so
-/// the output must be sorted downstream.
-fn assemble_mode() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| matches!(std::env::var("KIRA_ASSEMBLE"),
-        Ok(v) if v == "1" || v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("yes")))
+/// `--hp-indel` quality for an indel allele: 30, minus 5 per repeat unit of
+/// the indel sequence beyond two in the reference downstream of the anchor,
+/// floored at 8 (polymerase slippage makes long tracts unreliable).
+fn hp_indel_qual(ctx: &EmitCtx, chr: &str, pos1: u64, ref_str: &str, alt_str: &str) -> u8 {
+    let unit: &[u8] = if alt_str.len() > ref_str.len() { &alt_str.as_bytes()[1..] } else { &ref_str.as_bytes()[1..] };
+    let u = unit.len();
+    let run_units = ctx
+        .fasta
+        .and_then(|fa| {
+            if u == 0 || u > 6 {
+                return None;
+            }
+            let c = fa.slice_bytes(chr, pos1 as u32 + 1, 64)?;
+            let mut units = 0u32;
+            let mut i = 0usize;
+            while i + u <= c.len() && c[i..i + u].eq_ignore_ascii_case(unit) {
+                units += 1;
+                i += u;
+            }
+            Some(units)
+        })
+        .unwrap_or(0);
+    let penalty = 5u32.saturating_mul(run_units.saturating_sub(2));
+    30u32.saturating_sub(penalty).max(8) as u8
 }
 
 struct AsmCfg { up: u32, len: usize, nonref: u32, min_sup: u32, max_mm: u32 }
@@ -1028,21 +1258,40 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
+/// Emit an assembled indel: per-sample PLs come from read-vs-haplotype
+/// likelihoods on the pair-HMM, the site from the multiallelic caller.
 fn emit_assembled(
     call: crate::call::haplotype::AssembledCall,
-    n_cols: usize,
+    site: &PileupSite,
+    reads: &[LiveRead],
     chr: &str,
     ctx: &EmitCtx,
     out: &mut Vec<u8>,
     annotate: &AnnotateSpec,
 ) {
     let args = ctx.args;
-    let ref_c = call.total.saturating_sub(call.support);
-    let alt_c = call.support;
-    let gl = ctx.em.likelihoods(2, &[ref_c, alt_c], &[ref_c * 30, alt_c * 30]).with_prior(2, args.prior);
-    let (gi, gj) = gl.most_likely_gt(2);
-    let qual = gl.qual();
-    if args.variants_only && ((gi == 0 && gj == 0) || qual < args.min_qual as f64) { return; }
+    let hs = haplotype_pls(reads, site.per_sample.len(), &call);
+    let mut kept_samples: Vec<usize> = Vec::new();
+    let mut pls_all: Vec<i32> = Vec::new();
+    let mut qs = [0.0f64; 2];
+    for si in 0..site.per_sample.len() {
+        if ctx.any_filter && !ctx.sample_keep.get(si).copied().unwrap_or(false) { continue; }
+        kept_samples.push(si);
+        let h = hs[si];
+        let depth = h.n_ref + h.n_alt;
+        if depth == 0 {
+            pls_all.extend([PL_MISSING; 3]);
+        } else {
+            pls_all.extend(h.pl.iter().map(|&v| v as i32));
+            qs[0] += h.n_ref as f64 / depth as f64;
+            qs[1] += h.n_alt as f64 / depth as f64;
+        }
+    }
+    let mut call_site = CallSite { n_samples: kept_samples.len(), n_alleles: 2, pls: pls_all, is_indel: true, depths: None, qs: Some(qs.to_vec()), unseen: None, sample_af: None, prior_an_ac: None };
+    let CallResult::Called { alleles_kept, qual, gts, gqs, pls: pls_sub, .. } = ctx.caller.call_site(&mut call_site) else { return };
+    let qual = qual.unwrap_or(0.0);
+    // Assembly only reports variant calls.
+    if alleles_kept.len() < 2 || (args.variants_only && qual < args.min_qual as f64) { return; }
     let key = (call.pos1, call.ref_str.clone(), call.alt_str.clone());
     let dup = ASM_EMITTED.with(|e| {
         let mut s = e.borrow_mut();
@@ -1052,34 +1301,28 @@ fn emit_assembled(
         false
     });
     if dup { return; }
-    let mut info = format!("DP={};AC={};AN={};INDEL;ASSEMBLED",
-        call.total, if gi == 0 && gj == 0 { 0 } else { alt_c }, call.total);
+    let ref_c = call.total.saturating_sub(call.support);
+    let alt_c = call.support;
+    let mut info = format!("DP={};INDEL;ASSEMBLED", call.total);
     if annotate.info_ad { info.push_str(&format!(";AD={},{}", ref_c, alt_c)); }
-    let mut fmt_keys = vec!["GT"];
-    if annotate.fmt_dp { fmt_keys.push("DP"); }
-    if annotate.fmt_ad { fmt_keys.push("AD"); }
-    if annotate.fmt_qs { fmt_keys.push("QS"); }
-    if annotate.fmt_pl { fmt_keys.push("PL"); }
-    if annotate.fmt_gq { fmt_keys.push("GQ"); }
-    let mut p0: Vec<String> = vec![format!("{}/{}", gi, gj)];
-    if annotate.fmt_dp { p0.push(call.total.to_string()); }
-    if annotate.fmt_ad { p0.push(format!("{},{}", ref_c, alt_c)); }
-    if annotate.fmt_qs { p0.push(format!("{},{}", ref_c * 30, alt_c * 30)); }
-    if annotate.fmt_pl { p0.push(gl.to_pl_string()); }
-    if annotate.fmt_gq { let mut s = gl.pl.clone(); s.sort(); p0.push(s.get(1).copied().unwrap_or(0).to_string()); }
-    let col0 = p0.join(":");
-    let mut pe: Vec<String> = vec!["./.".into()];
-    if annotate.fmt_dp { pe.push("0".into()); }
-    if annotate.fmt_ad { pe.push("0,0".into()); }
-    if annotate.fmt_qs { pe.push("0,0".into()); }
-    if annotate.fmt_pl { pe.push("0".into()); }
-    if annotate.fmt_gq { pe.push("0".into()); }
-    let cole = pe.join(":");
+    let fmt_keys = format_keys(annotate);
     let qual_str = fmt_qual(qual);
     let _ = write!(out, "{}\t{}\t.\t{}\t{}\t{}\t.\t{}\t{}",
         chr, call.pos1, call.ref_str, call.alt_str, qual_str, info, fmt_keys.join(":"));
-    for si in 0..n_cols.max(1) {
-        let _ = write!(out, "\t{}", if si == 0 { &col0 } else { &cole });
+    for (k, &si) in kept_samples.iter().enumerate() {
+        let h = hs[si];
+        let depth = h.n_ref + h.n_alt;
+        if depth == 0 {
+            let _ = write!(out, "\t{}", empty_sample_col(annotate, 2));
+            continue;
+        }
+        // Strand counts are not tracked per haplotype; ADF/ADR/DP4/SP read as 0.
+        let counts = vec![h.n_ref, h.n_alt];
+        let fwd = vec![0u32, 0u32];
+        let quals = vec![h.n_ref * 30, h.n_alt * 30];
+        let gt = gt_string(&alleles_kept, gts[k]);
+        let parts = sample_parts(annotate, gt, depth, &counts, &fwd, &quals, 0, &pl_string(&pls_sub[k]), gqs[k]);
+        let _ = write!(out, "\t{}", parts.join(":"));
     }
     let _ = writeln!(out);
 }
@@ -1089,19 +1332,20 @@ fn emit_assembled(
 /// SNV record).
 fn emit_site_or_gvcf<W: Write>(
     site: &PileupSite,
-    overlapping_reads: &[&LiveRead],
+    overlapping_reads: &[LiveRead],
     ctx: &EmitCtx,
     buf: &mut Vec<u8>,
     gvcf: Option<&mut GvcfBlocker>,
     direct_out: &mut W,
-) -> bool {
+) -> Result<bool> {
     let chr = ctx.ref_names.get(site.ref_id).map(|s| s.as_str()).unwrap_or(".");
     let pos1 = site.pos as u64 + 1;
+    if !ctx.in_regions(chr, pos1) { return Ok(false); }
     let ref_base = ctx.fasta.and_then(|fa| fa.base(chr, pos1 as u32)).unwrap_or(b'N');
-    if ref_base == b'N' { return false; }
+    if ref_base == b'N' { return Ok(false); }
     let agg = site.aggregated();
     let total: u32 = agg.base_counts.iter().sum();
-    if total == 0 { return false; }
+    if total == 0 { return Ok(false); }
     // For gVCF, branch on whether any alts were observed at all.
     let any_nonref = (0..4).filter(|&i| {
         let rb = match ref_base { b'A' => 0, b'C' => 1, b'G' => 2, b'T' => 3, _ => 4 };
@@ -1109,45 +1353,20 @@ fn emit_site_or_gvcf<W: Write>(
     }).count() > 0;
     if let Some(g) = gvcf {
         if !any_nonref {
-            let _ = g.add_ref_site(chr, pos1, &(ref_base as char).to_string(), total, 0.0, direct_out);
-            return false;
+            g.add_ref_site(chr, pos1, &(ref_base as char).to_string(), total, 0.0, direct_out)?;
+            return Ok(false);
         }
-        let _ = g.flush(direct_out);
+        g.flush(direct_out)?;
     }
     emit_site(site, overlapping_reads, ctx, buf);
-    true
-}
-
-fn cap_depth(reads: &mut Vec<crate::bam::pileup::LiveRead>, max_depth: u32) {
-    if max_depth == 0 || reads.len() <= max_depth as usize { return; }
-    let stride = reads.len() / max_depth as usize;
-    let kept: Vec<_> = reads.iter().step_by(stride.max(1)).cloned().collect();
-    *reads = kept;
-}
-
-struct Fasta { seqs: FxHashMap<String, Vec<u8>> }
-impl Fasta {
-    fn base(&self, chr: &str, pos: u32) -> Option<u8> {
-        self.seqs.get(chr).and_then(|s| s.get((pos as usize).saturating_sub(1)).copied())
-    }
-    fn slice_bytes(&self, chr: &str, pos: u32, len: usize) -> Option<&[u8]> {
-        let s = self.seqs.get(chr)?;
-        let start = (pos as usize).saturating_sub(1);
-        let end = (start + len).min(s.len());
-        if end <= start { return None; }
-        Some(&s[start..end])
-    }
-}
-impl crate::bam::reader::FastaLike for Fasta {
-    fn slice(&self, chr: &str, pos: u32, len: usize) -> Option<&[u8]> { self.slice_bytes(chr, pos, len) }
+    Ok(true)
 }
 
 /// Repeat-context stringency for short indels. Homopolymer/STR tracts are the dominant source
 /// of false-positive indels (polymerase slippage), so for a short inserted/deleted `unit` that
 /// tiles a long repeat run immediately 3' of the anchor `pos1`, require more supporting reads and
 /// a higher alt fraction. Returns the (possibly tightened) (min_count, min_frac). No-op for
-/// non-repeat or long indels. This is what a mature caller (bcftools) does via HMM realignment;
-/// here we approximate it at emit time using the reference context.
+/// non-repeat or long indels.
 fn indel_repeat_stringency(
     fa: Option<&Fasta>, chr: &str, pos1: u64, unit: &[u8], base_min: u32, base_af: f64,
 ) -> (u32, f64) {
@@ -1161,24 +1380,4 @@ fn indel_repeat_stringency(
     let copies = bases / (u as u32);
     let strict = (u == 1 && bases >= 5) || (u >= 2 && copies >= 4);
     if strict { (base_min.max(4), base_af + 0.12) } else { (base_min, base_af) }
-}
-
-fn load_fasta(p: &PathBuf) -> Result<Fasta> {
-    let mut seqs: FxHashMap<String, Vec<u8>> = FxHashMap::default();
-    let data = std::fs::read(p).with_context(|| format!("open fasta {:?}", p))?;
-    let mut name: Option<String> = None;
-    let mut cur: Vec<u8> = Vec::new();
-    for line in data.split(|&b| b == b'\n') {
-        if line.is_empty() { continue; }
-        if line[0] == b'>' {
-            if let Some(n) = name.take() { seqs.insert(n, std::mem::take(&mut cur)); }
-            let rest = &line[1..];
-            let end = rest.iter().position(|&b| b == b' ' || b == b'\t' || b == b'\r').unwrap_or(rest.len());
-            name = Some(std::str::from_utf8(&rest[..end])?.to_string());
-        } else {
-            for &b in line { if b != b'\r' { cur.push(b.to_ascii_uppercase()); } }
-        }
-    }
-    if let Some(n) = name { seqs.insert(n, cur); }
-    Ok(Fasta { seqs })
 }

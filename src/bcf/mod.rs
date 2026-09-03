@@ -7,7 +7,7 @@ pub mod reader;
 pub mod writer;
 
 pub use header::{BcfHeaderDict, HdrField, parse_header_to_dict};
-pub use reader::BcfReader;
+pub use reader::{BcfInput, BcfReader};
 pub use writer::BcfWriter;
 
 pub const BCF_MAGIC: &[u8] = b"BCF\x02\x02";

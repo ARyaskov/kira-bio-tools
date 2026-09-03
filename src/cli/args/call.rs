@@ -38,8 +38,13 @@ pub struct CallArgs {
     #[arg(short = 'P', long = "prior", default_value_t = 1.1e-3)]
     pub prior: f64,
 
-    #[arg(long = "prior-freqs")]
+    #[arg(short = 'F', long = "prior-freqs")]
     pub prior_freqs: Option<String>,
+
+    /// Site-specific allele-frequency prior from an INFO tag (e.g. `INFO/AF`
+    /// after annotating from gnomAD); shorthand for `-F` with a single tag.
+    #[arg(long = "prior-af")]
+    pub prior_af: Option<String>,
 
     #[arg(short = 'X', long = "novel-rate")]
     pub novel_rate: Option<String>,
@@ -47,8 +52,9 @@ pub struct CallArgs {
     #[arg(short = 'C', long = "constrain")]
     pub constrain: Option<String>,
 
-    #[arg(short = 'g', long = "gvcf", default_value_t = 0)]
-    pub gvcf: u32,
+    /// gVCF output: `INT[,INT...]` minimum per-sample depths of the blocks.
+    #[arg(short = 'g', long = "gvcf")]
+    pub gvcf: Option<String>,
 
     #[arg(short = 'a', long = "annotate")]
     pub annotate: Option<String>,

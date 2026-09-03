@@ -22,6 +22,7 @@ pub fn build_kbi_index<P: AsRef<Path>>(vcf_path: P, output_path: P) -> Result<Kb
             eprintln!("Processed {} records...", count);
         }
     }
+    builder.set_contigs(reader.contigs().clone());
 
     eprintln!("Building index for {} entries...", builder.len());
     let index = builder.build()?;

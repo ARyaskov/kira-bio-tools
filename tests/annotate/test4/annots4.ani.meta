@@ -1,0 +1,3 @@
+source=\\?\C:\Users\user\Desktop\projects\kira_bio_tools\tests\annotate\test4\annots4.tab
+source_len=159
+columns=CHROM,POS,REF,ALT,+FA,+FR,+IA,+IR,+SA,+SR

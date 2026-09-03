@@ -5,14 +5,14 @@ use crate::kbi::index::KbiIndex;
 use crate::kbi::structs::{KbiError, Result};
 use crate::util::GenomicKey;
 use crate::vcf::VcfRecord;
+use crate::vcf::header::ContigDict;
 
 pub struct KbiBuilder {
     entries: Vec<(u64, u64)>,
     gamma: f64,
-    // Renamed in kira_kv_engine 0.6.0: BuildConfig::rehash_limit -> max_rehash.
-    // Kept locally as max_rehash so we map 1:1 to the underlying field.
     max_rehash: u32,
     salt: u64,
+    contigs: ContigDict,
 }
 
 impl KbiBuilder {
@@ -22,6 +22,7 @@ impl KbiBuilder {
             gamma: 1.27,
             max_rehash: 16,
             salt: 0xC0FF_EE00_D15E_A5E,
+            contigs: ContigDict::new(),
         }
     }
 
@@ -35,6 +36,12 @@ impl KbiBuilder {
     pub fn gamma(mut self, gamma: f64) -> Self {
         self.gamma = gamma;
         self
+    }
+
+    /// Contig dictionary the keys' chr ids refer to; stored in the index so
+    /// queries can be made by name.
+    pub fn set_contigs(&mut self, contigs: ContigDict) {
+        self.contigs = contigs;
     }
 
     #[inline]
@@ -62,6 +69,7 @@ impl KbiBuilder {
 
         self.entries.par_sort_unstable_by_key(|(k, _)| *k);
 
+        // Keep the first record at each (contig, pos); later ones share the key.
         let mut deduped = Vec::with_capacity(self.entries.len());
         let mut last_key: Option<u64> = None;
         let mut dup_count = 0usize;
@@ -76,7 +84,7 @@ impl KbiBuilder {
         }
 
         if dup_count > 0 {
-            eprintln!("Deduplicated {} entries", dup_count);
+            eprintln!("KBI: {} records share a position with an earlier record and are not point-addressable", dup_count);
         }
 
         let keys: Vec<u64> = deduped.iter().map(|(k, _)| *k).collect();
@@ -86,32 +94,32 @@ impl KbiBuilder {
 
         let mut config = IndexConfig::default();
         config.mph_config.gamma = self.gamma;
-        // kira_kv_engine 0.6.0: BuildConfig field renamed rehash_limit -> max_rehash.
         config.mph_config.max_rehash = self.max_rehash;
         config.mph_config.seed = self.salt;
         config.auto_detect_numeric = true;
 
         let index = IndexBuilder::new()
             .with_config(config)
-            .build_index(key_bytes.clone())?;
+            .build_index(key_bytes)?;
 
+        // Keys stay sorted; the MPH slot of each key is recorded so point
+        // lookups can jump straight to the sorted position.
         let n = keys.len();
-        let sorted_keys = vec![0u64; n];
-        let sorted_offsets = vec![0u64; n];
+        let slots: Vec<usize> = keys
+            .par_iter()
+            .map(|&key| index.lookup_u64(key).unwrap_or(usize::MAX))
+            .collect();
+        let n_slots = slots.iter().copied().filter(|&s| s != usize::MAX).max().map(|m| m + 1).unwrap_or(0);
+        let mut slot_to_idx = vec![u32::MAX; n_slots];
+        for (i, &slot) in slots.iter().enumerate() {
+            if slot == usize::MAX || slot >= n_slots {
+                return Err(KbiError::InvalidFormat("MPH lookup failed during build".into()));
+            }
+            slot_to_idx[slot] = i as u32;
+        }
+        let _ = n;
 
-        keys.par_iter()
-            .zip(offsets.par_iter())
-            .for_each(|(&key, &offset)| {
-                let idx = index.lookup_u64(key).unwrap();
-                unsafe {
-                    let keys_ptr = sorted_keys.as_ptr() as *mut u64;
-                    let offsets_ptr = sorted_offsets.as_ptr() as *mut u64;
-                    *keys_ptr.add(idx) = key;
-                    *offsets_ptr.add(idx) = offset;
-                }
-            });
-
-        Ok(KbiIndex::from_parts(index, sorted_keys, sorted_offsets))
+        Ok(KbiIndex::from_parts(index, keys, offsets, slot_to_idx, self.contigs))
     }
 }
 

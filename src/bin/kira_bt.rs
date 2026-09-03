@@ -125,8 +125,26 @@ enum Commands {
     Solid(SolidArgs),
 }
 
+/// Subcommands that parse the tokens after `--` themselves (bcftools-style
+/// option passthrough). Everywhere else a bare `--` is dropped so bcftools
+/// command lines written as `kira-bt cmd ... -- <bcftools options>` still work.
+const PASSTHROUGH_COMMANDS: &[&str] = &["convert", "idx", "index", "polysomy", "reheader", "roh", "sort"];
+
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let sub = argv.get(1).and_then(|s| s.to_str()).map(str::to_string);
+    if let Some(sub) = sub {
+        if !PASSTHROUGH_COMMANDS.contains(&sub.as_str()) {
+            argv.retain(|a| a != "--");
+        }
+    }
+    // One thread budget for every pool in the process (BGZF, rayon, BAM decoding).
+    let argv_utf8: Vec<String> = argv.iter().filter_map(|a| a.to_str().map(str::to_string)).collect();
+    if let Some(n) = kira_bio_tools::threads::budget_from_argv(&argv_utf8) {
+        kira_bio_tools::threads::set_budget(n);
+        kira_bio_tools::threads::init_rayon();
+    }
+    let cli = Cli::parse_from(argv);
     let start = Instant::now();
 
     let result = match cli.command {

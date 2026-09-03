@@ -5,8 +5,8 @@ use bytemuck::{Pod, Zeroable};
 use kira_kv_engine::IndexError;
 use thiserror::Error;
 
-pub const KBI_MAGIC: [u8; 8] = *b"KBIV0003";
-pub const KBI_VERSION: u32 = 3;
+pub const KBI_MAGIC: [u8; 8] = *b"KBIV0004";
+pub const KBI_VERSION: u32 = 4;
 pub const ENDIAN_TAG: u32 = 0x01020304;
 
 #[derive(Debug, Error)]
@@ -27,6 +27,7 @@ pub enum KbiError {
 
 pub type Result<T> = std::result::Result<T, KbiError>;
 
+/// On-disk layout: header, kv index, sorted keys, offsets, slot table, contig names.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct KbiHeader {
@@ -38,16 +39,24 @@ pub struct KbiHeader {
     pub off_index: u64,
     pub off_keys: u64,
     pub off_offsets: u64,
-    _reserved: [u8; 8],
+    pub off_slots: u64,
+    pub n_slots: u64,
+    pub off_names: u64,
 }
 
-const _: () = assert!(mem::size_of::<KbiHeader>() == 64);
+const _: () = assert!(mem::size_of::<KbiHeader>() == 80);
 
 impl KbiHeader {
-    pub fn new(n_entries: usize, index_len: usize) -> Self {
+    pub fn new(n_entries: usize, index_len: usize, n_slots: usize) -> Self {
         let header_size = mem::size_of::<Self>() as u64;
         let keys_size = (n_entries * mem::size_of::<u64>()) as u64;
+        let slots_size = (n_slots * mem::size_of::<u32>()) as u64;
         let index_size = index_len as u64;
+        let off_index = header_size;
+        let off_keys = off_index + index_size;
+        let off_offsets = off_keys + keys_size;
+        let off_slots = off_offsets + keys_size;
+        let off_names = off_slots + slots_size;
 
         Self {
             magic: KBI_MAGIC,
@@ -55,16 +64,20 @@ impl KbiHeader {
             endian: ENDIAN_TAG,
             n_entries: n_entries as u64,
             index_len: index_size,
-            off_index: header_size,
-            off_keys: header_size + index_size,
-            off_offsets: header_size + index_size + keys_size,
-            _reserved: [0; 8],
+            off_index,
+            off_keys,
+            off_offsets,
+            off_slots,
+            n_slots: n_slots as u64,
+            off_names,
         }
     }
 
     pub fn validate(&self) -> Result<()> {
         if self.magic != KBI_MAGIC {
-            return Err(KbiError::InvalidFormat("Invalid magic bytes".into()));
+            return Err(KbiError::InvalidFormat(
+                "Invalid magic bytes (rebuild the .kbi index with this version)".into(),
+            ));
         }
         if self.version != KBI_VERSION {
             return Err(KbiError::VersionMismatch {

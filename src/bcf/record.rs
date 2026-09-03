@@ -3,6 +3,9 @@ use super::typed::*;
 use anyhow::{Context, Result, bail};
 use std::io::{Cursor, Read, Write};
 
+/// Sanity cap for one record's payload (`l_shared + l_indiv`).
+pub const MAX_RECORD_BYTES: u32 = 1 << 30;
+
 #[derive(Default, Clone)]
 pub struct BcfRecord {
     pub rid: i32,
@@ -24,6 +27,30 @@ pub enum BcfFmtValues {
     Floats { n_per_sample: usize, vals: Vec<f32> },
     Strings { lens: Vec<usize>, data: Vec<u8> },
     Gt { ploidy: usize, vals: Vec<i32> },
+}
+
+/// `(rid, pos0, rlen)` of a record from its shared block.
+#[derive(Clone, Copy, Debug)]
+pub struct BcfRecordMeta {
+    pub rid: i32,
+    pub pos: i32,
+    pub rlen: i32,
+}
+
+pub fn record_meta(shared: &[u8]) -> Option<BcfRecordMeta> {
+    if shared.len() < 12 {
+        return None;
+    }
+    let rid = i32::from_le_bytes([shared[0], shared[1], shared[2], shared[3]]);
+    let pos = i32::from_le_bytes([shared[4], shared[5], shared[6], shared[7]]);
+    let rlen = i32::from_le_bytes([shared[8], shared[9], shared[10], shared[11]]);
+    Some(BcfRecordMeta { rid, pos, rlen })
+}
+
+/// INFO/END for a record, or `pos + max(rlen, 1)` when absent, as the 0-based
+/// exclusive end used for indexing (htslib `rlen`).
+pub fn record_end0(meta: &BcfRecordMeta) -> u64 {
+    meta.pos as u64 + (meta.rlen.max(1)) as u64
 }
 
 pub fn encode_record<W: Write>(w: &mut W, line: &str, dict: &BcfHeaderDict) -> Result<()> {
@@ -48,12 +75,14 @@ pub fn encode_record<W: Write>(w: &mut W, line: &str, dict: &BcfHeaderDict) -> R
     };
     let info_str = cols[7];
 
-    let rlen = ref_a.len() as i32;
-    let n_allele = (alts.len() + 1) as u32;
     let mut info_entries: Vec<(u32, &str, Option<&str>)> = Vec::new();
+    let mut info_end: Option<i64> = None;
     if info_str != "." && !info_str.is_empty() {
         for kv in info_str.split(';') {
             if let Some((k, v)) = kv.split_once('=') {
+                if k == "END" {
+                    info_end = v.parse::<i64>().ok();
+                }
                 if let Some(idx) = dict.info_idx.get(k).copied() {
                     info_entries.push((idx, k, Some(v)));
                 }
@@ -62,6 +91,15 @@ pub fn encode_record<W: Write>(w: &mut W, line: &str, dict: &BcfHeaderDict) -> R
             }
         }
     }
+    // htslib: rlen = max(len(REF), END - POS + 1) for symbolic alleles.
+    let mut rlen = ref_a.len() as i32;
+    if let Some(end) = info_end {
+        let span = end - (pos as i64 + 1) + 1;
+        if span > rlen as i64 && alts.iter().any(|a| a.starts_with('<')) {
+            rlen = span.min(i32::MAX as i64) as i32;
+        }
+    }
+    let n_allele = (alts.len() + 1) as u32;
     let n_info = info_entries.len() as u32;
 
     let (format_str, samples) = if cols.len() > 8 {
@@ -76,9 +114,10 @@ pub fn encode_record<W: Write>(w: &mut W, line: &str, dict: &BcfHeaderDict) -> R
     shared.extend_from_slice(&pos.to_le_bytes());
     shared.extend_from_slice(&rlen.to_le_bytes());
     shared.extend_from_slice(&qual.to_le_bytes());
-    let n_info_allele = ((n_info as u32) << 16) | (n_allele as u32);
+    // BCF spec: `n_allele<<16 | n_info`.
+    let n_info_allele = (n_allele << 16) | n_info;
     shared.extend_from_slice(&n_info_allele.to_le_bytes());
-    let n_fmt_sample = ((n_fmt as u32) << 24) | (n_sample as u32 & 0x00FFFFFF);
+    let n_fmt_sample = (n_fmt << 24) | (n_sample & 0x00FFFFFF);
     shared.extend_from_slice(&n_fmt_sample.to_le_bytes());
 
     write_typed_string(&mut shared, id.as_bytes())?;
@@ -93,27 +132,29 @@ pub fn encode_record<W: Write>(w: &mut W, line: &str, dict: &BcfHeaderDict) -> R
 
     for (idx, k, v) in &info_entries {
         write_typed_int_one(&mut shared, *idx as i64)?;
-        let typ = dict.info.iter().find(|f| f.idx == *idx).map(|f| f.typ.as_str()).unwrap_or("String");
+        let typ = dict.info_field(*idx).map(|f| f.typ.as_str()).unwrap_or("String");
         encode_info_value(&mut shared, typ, *v, k)?;
     }
 
     let mut indiv: Vec<u8> = Vec::new();
-    for key in &fmt_keys {
-        let key_idx = match dict.format_idx.get(*key) {
-            Some(i) => *i,
-            None => continue,
-        };
-        let key_typ = dict.format.iter().find(|f| f.idx == key_idx).map(|f| f.typ.as_str()).unwrap_or("String");
-        let per_sample_vals: Vec<&str> = samples.iter().map(|s| {
-            let parts: Vec<&str> = s.split(':').collect();
-            let i = fmt_keys.iter().position(|k| k == key).unwrap();
-            parts.get(i).copied().unwrap_or(".")
-        }).collect();
-        write_typed_int_one(&mut indiv, key_idx as i64)?;
-        if *key == "GT" {
-            encode_fmt_gt(&mut indiv, &per_sample_vals, n_allele)?;
-        } else {
-            encode_fmt_value(&mut indiv, key_typ, &per_sample_vals)?;
+    if n_fmt > 0 {
+        let sample_parts: Vec<Vec<&str>> = samples.iter().map(|s| s.split(':').collect()).collect();
+        for (ki, key) in fmt_keys.iter().enumerate() {
+            let key_idx = match dict.format_idx.get(*key) {
+                Some(i) => *i,
+                None => continue,
+            };
+            let key_typ = dict.format_field(key_idx).map(|f| f.typ.as_str()).unwrap_or("String");
+            let per_sample_vals: Vec<&str> = sample_parts
+                .iter()
+                .map(|p| p.get(ki).copied().unwrap_or("."))
+                .collect();
+            write_typed_int_one(&mut indiv, key_idx as i64)?;
+            if *key == "GT" {
+                encode_fmt_gt(&mut indiv, &per_sample_vals)?;
+            } else {
+                encode_fmt_value(&mut indiv, key_typ, &per_sample_vals)?;
+            }
         }
     }
 
@@ -143,31 +184,27 @@ fn encode_info_value<W: Write>(w: &mut W, typ: &str, v: Option<&str>, _key: &str
     Ok(())
 }
 
-fn encode_fmt_gt<W: Write>(w: &mut W, samples: &[&str], _n_allele: u32) -> Result<()> {
+fn encode_fmt_gt<W: Write>(w: &mut W, samples: &[&str]) -> Result<()> {
     let mut max_ploidy = 1usize;
     for s in samples {
-        let p = s.split(|c| c == '/' || c == '|').count();
+        let p = s.split(['/', '|']).count();
         if p > max_ploidy { max_ploidy = p; }
     }
     let mut vals: Vec<i32> = Vec::with_capacity(samples.len() * max_ploidy);
     for s in samples {
-        let iter = s.chars().peekable();
         let mut cur = String::new();
         let mut alleles: Vec<(Option<u32>, bool)> = Vec::new();
         let mut next_phased = false;
         for c in s.chars() {
             if c == '/' || c == '|' {
-                let val = parse_gt_allele(&cur);
-                alleles.push((val, next_phased));
+                alleles.push((parse_gt_allele(&cur), next_phased));
                 cur.clear();
                 next_phased = c == '|';
             } else {
                 cur.push(c);
             }
         }
-        let val = parse_gt_allele(&cur);
-        alleles.push((val, next_phased));
-        let _ = iter;
+        alleles.push((parse_gt_allele(&cur), next_phased));
         for i in 0..max_ploidy {
             if let Some(&(a, p)) = alleles.get(i) {
                 vals.push(encode_gt(a, p));
@@ -178,18 +215,7 @@ fn encode_fmt_gt<W: Write>(w: &mut W, samples: &[&str], _n_allele: u32) -> Resul
     }
     let typ = min_int_type(&vals);
     write_type_desc(w, max_ploidy, typ)?;
-    match typ {
-        BT_INT8 => for &v in &vals {
-            let b = if v == INT32_VECTOR_END { INT8_VECTOR_END as u8 } else { (v as i8) as u8 };
-            w.write_all(&[b])?;
-        },
-        BT_INT16 => for &v in &vals {
-            let s: i16 = if v == INT32_VECTOR_END { INT16_VECTOR_END } else { v as i16 };
-            w.write_all(&s.to_le_bytes())?;
-        },
-        BT_INT32 => for &v in &vals { w.write_all(&v.to_le_bytes())?; },
-        _ => unreachable!(),
-    }
+    for &v in &vals { write_int_as(w, v, typ)?; }
     Ok(())
 }
 
@@ -206,35 +232,34 @@ fn encode_fmt_value<W: Write>(w: &mut W, typ: &str, samples: &[&str]) -> Result<
             for s in samples {
                 let parts: Vec<&str> = if *s == "." { vec!["."] } else { s.split(',').collect() };
                 for i in 0..max_n {
-                    let v = parts.get(i).copied().unwrap_or(".");
-                    vals.push(if v == "." { INT32_MISSING } else { v.parse().unwrap_or(INT32_MISSING) });
+                    if i < parts.len() {
+                        let v = parts[i];
+                        vals.push(if v == "." { INT32_MISSING } else { v.parse().unwrap_or(INT32_MISSING) });
+                    } else {
+                        vals.push(INT32_VECTOR_END);
+                    }
                 }
-                let n = parts.len();
-                let base = vals.len() - max_n;
-                for j in n..max_n { vals[base + j] = INT32_VECTOR_END; }
             }
             let t = min_int_type(&vals);
             write_type_desc(w, max_n, t)?;
-            match t {
-                BT_INT8 => for &v in &vals { let b = if v == INT32_MISSING { INT8_MISSING as u8 } else if v == INT32_VECTOR_END { INT8_VECTOR_END as u8 } else { (v as i8) as u8 }; w.write_all(&[b])?; },
-                BT_INT16 => for &v in &vals { let s: i16 = if v == INT32_MISSING { INT16_MISSING } else if v == INT32_VECTOR_END { INT16_VECTOR_END } else { v as i16 }; w.write_all(&s.to_le_bytes())?; },
-                BT_INT32 => for &v in &vals { w.write_all(&v.to_le_bytes())?; },
-                _ => unreachable!(),
-            }
+            for &v in &vals { write_int_as(w, v, t)?; }
         }
         "Float" => {
             let mut max_n = 1usize;
             for s in samples { let n = if *s == "." { 1 } else { s.split(',').count() }; if n > max_n { max_n = n; } }
             write_type_desc(w, max_n, BT_FLOAT)?;
+            let missing = f32::from_bits(FLOAT_MISSING_BITS);
+            let vend = f32::from_bits(FLOAT_VECTOR_END_BITS);
             for s in samples {
                 let parts: Vec<&str> = if *s == "." { vec!["."] } else { s.split(',').collect() };
                 for i in 0..max_n {
-                    let v = parts.get(i).copied().unwrap_or(".");
-                    let f = if v == "." { f32::from_bits(FLOAT_MISSING_BITS) } else { v.parse().unwrap_or(f32::from_bits(FLOAT_MISSING_BITS)) };
+                    let f = if i < parts.len() {
+                        let v = parts[i];
+                        if v == "." { missing } else { v.parse().unwrap_or(missing) }
+                    } else {
+                        vend
+                    };
                     w.write_all(&f.to_le_bytes())?;
-                    if i >= parts.len() {
-                        let _vend = f32::from_bits(FLOAT_VECTOR_END_BITS);
-                    }
                 }
             }
         }
@@ -252,7 +277,8 @@ fn encode_fmt_value<W: Write>(w: &mut W, typ: &str, samples: &[&str]) -> Result<
     Ok(())
 }
 
-pub fn decode_record_to_vcf<R: Read>(r: &mut R, dict: &BcfHeaderDict) -> Result<Option<String>> {
+/// Read the raw `(shared, indiv)` blocks of the next record, `None` at EOF.
+pub fn read_record_raw<R: Read>(r: &mut R) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
     let mut buf = [0u8; 8];
     match r.read_exact(&mut buf) {
         Ok(()) => {}
@@ -261,11 +287,30 @@ pub fn decode_record_to_vcf<R: Read>(r: &mut R, dict: &BcfHeaderDict) -> Result<
     }
     let l_shared = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
     let l_indiv = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    if l_shared < 24 || l_shared.saturating_add(l_indiv) > MAX_RECORD_BYTES {
+        bail!("corrupt BCF record: l_shared={l_shared} l_indiv={l_indiv}");
+    }
     let mut shared = vec![0u8; l_shared as usize];
     r.read_exact(&mut shared).context("read shared")?;
     let mut indiv = vec![0u8; l_indiv as usize];
     r.read_exact(&mut indiv).context("read indiv")?;
-    let mut sc = Cursor::new(&shared[..]);
+    Ok(Some((shared, indiv)))
+}
+
+pub fn decode_record_to_vcf<R: Read>(r: &mut R, dict: &BcfHeaderDict) -> Result<Option<String>> {
+    match read_record_raw(r)? {
+        Some((shared, indiv)) => decode_blocks_to_vcf(&shared, &indiv, dict).map(Some),
+        None => Ok(None),
+    }
+}
+
+#[inline]
+fn remaining(c: &Cursor<&[u8]>) -> usize {
+    c.get_ref().len().saturating_sub(c.position() as usize)
+}
+
+pub fn decode_blocks_to_vcf(shared: &[u8], indiv: &[u8], dict: &BcfHeaderDict) -> Result<String> {
+    let mut sc = Cursor::new(shared);
     let mut buf4 = [0u8; 4];
     sc.read_exact(&mut buf4)?; let rid = i32::from_le_bytes(buf4);
     sc.read_exact(&mut buf4)?; let pos = i32::from_le_bytes(buf4);
@@ -273,8 +318,8 @@ pub fn decode_record_to_vcf<R: Read>(r: &mut R, dict: &BcfHeaderDict) -> Result<
     sc.read_exact(&mut buf4)?; let qual = f32::from_le_bytes(buf4);
     sc.read_exact(&mut buf4)?; let n_info_allele = u32::from_le_bytes(buf4);
     sc.read_exact(&mut buf4)?; let n_fmt_sample = u32::from_le_bytes(buf4);
-    let n_info = (n_info_allele >> 16) & 0xFFFF;
-    let n_allele = n_info_allele & 0xFFFF;
+    let n_allele = (n_info_allele >> 16) & 0xFFFF;
+    let n_info = n_info_allele & 0xFFFF;
     let n_fmt = (n_fmt_sample >> 24) & 0xFF;
     let n_sample = n_fmt_sample & 0x00FFFFFF;
 
@@ -283,13 +328,14 @@ pub fn decode_record_to_vcf<R: Read>(r: &mut R, dict: &BcfHeaderDict) -> Result<
     let mut alts: Vec<String> = Vec::with_capacity((n_allele as usize).saturating_sub(1));
     for _ in 1..n_allele { alts.push(read_typed_string(&mut sc)?); }
 
-    let filt_val = read_typed(&mut sc)?;
+    let lim = remaining(&sc);
+    let filt_val = read_typed_limited(&mut sc, lim)?;
     let filter = match filt_val {
         BcfValue::Null => ".".to_string(),
         BcfValue::Ints(vs) => {
-            let names: Vec<String> = vs.iter().filter_map(|&v| {
+            let names: Vec<&str> = vs.iter().filter_map(|&v| {
                 if v < 0 { return None; }
-                dict.filter.iter().find(|f| f.idx == v as u32).map(|f| f.id.clone())
+                dict.filter_field(v as u32).map(|f| f.id.as_str())
             }).collect();
             if names.is_empty() { ".".into() } else { names.join(";") }
         }
@@ -300,15 +346,21 @@ pub fn decode_record_to_vcf<R: Read>(r: &mut R, dict: &BcfHeaderDict) -> Result<
     let mut first = true;
     for _ in 0..n_info {
         let key_idx = read_typed_int_one(&mut sc)? as u32;
-        let key_name = dict.info.iter().find(|f| f.idx == key_idx).map(|f| (f.id.clone(), f.typ.clone()))
-            .unwrap_or_else(|| (format!("UNK{}", key_idx), "String".into()));
-        let val = read_typed(&mut sc)?;
+        let (key_name, key_typ): (&str, &str) = match dict.info_field(key_idx) {
+            Some(f) => (f.id.as_str(), f.typ.as_str()),
+            None => ("", "String"),
+        };
+        let unk;
+        let key_name = if key_name.is_empty() { unk = format!("UNK{}", key_idx); unk.as_str() } else { key_name };
+        let lim = remaining(&sc);
+        let val = read_typed_limited(&mut sc, lim)?;
         if !first { info_str.push(';'); }
         first = false;
-        info_str.push_str(&key_name.0);
+        info_str.push_str(key_name);
         match val {
             BcfValue::Null => {}
             BcfValue::Ints(vs) => {
+                if key_typ == "Flag" { continue; }
                 info_str.push('=');
                 let strs: Vec<String> = vs.iter().take_while(|&&v| v != INT32_VECTOR_END).map(|&v| if v == INT32_MISSING { ".".into() } else { v.to_string() }).collect();
                 info_str.push_str(&strs.join(","));
@@ -319,7 +371,7 @@ pub fn decode_record_to_vcf<R: Read>(r: &mut R, dict: &BcfHeaderDict) -> Result<
                 info_str.push_str(&strs.join(","));
             }
             BcfValue::Str(bs) => {
-                if key_name.1 != "Flag" {
+                if key_typ != "Flag" {
                     info_str.push('=');
                     info_str.push_str(std::str::from_utf8(&bs).unwrap_or("."));
                 }
@@ -328,7 +380,7 @@ pub fn decode_record_to_vcf<R: Read>(r: &mut R, dict: &BcfHeaderDict) -> Result<
     }
     if info_str.is_empty() { info_str.push('.'); }
 
-    let chrom = dict.contigs.get(rid as usize).cloned().unwrap_or_else(|| rid.to_string());
+    let chrom = dict.contig_name(rid as u32).map(|s| s.to_string()).unwrap_or_else(|| rid.to_string());
     let id_str = if id.is_empty() { ".".to_string() } else { id };
     let qual_str = if float_is_missing(qual) { ".".to_string() } else { format_float(qual) };
     let alt_str = if alts.is_empty() { ".".to_string() } else { alts.join(",") };
@@ -337,13 +389,17 @@ pub fn decode_record_to_vcf<R: Read>(r: &mut R, dict: &BcfHeaderDict) -> Result<
         chrom, pos + 1, id_str, ref_a, alt_str, qual_str, filter, info_str);
 
     if n_fmt > 0 && n_sample > 0 {
-        let mut ic = Cursor::new(&indiv[..]);
+        let mut ic = Cursor::new(indiv);
         let mut fmt_keys: Vec<String> = Vec::with_capacity(n_fmt as usize);
         let mut per_key_vals: Vec<Vec<String>> = Vec::with_capacity(n_fmt as usize);
         for _ in 0..n_fmt {
             let key_idx = read_typed_int_one(&mut ic)? as u32;
-            let key_name = dict.format.iter().find(|f| f.idx == key_idx).map(|f| f.id.clone()).unwrap_or_else(|| format!("UNK{}", key_idx));
+            let key_name = dict.format_field(key_idx).map(|f| f.id.clone()).unwrap_or_else(|| format!("UNK{}", key_idx));
             let (n_per, typ) = read_type_desc(&mut ic)?;
+            let need = n_per.saturating_mul(type_size(typ)).saturating_mul(n_sample as usize);
+            if need > remaining(&ic) {
+                bail!("corrupt BCF record: FORMAT {key_name} needs {need} bytes");
+            }
             let mut col_vals: Vec<String> = Vec::with_capacity(n_sample as usize);
             for _ in 0..n_sample {
                 let s = decode_format_cell(&mut ic, &key_name, n_per, typ)?;
@@ -356,15 +412,16 @@ pub fn decode_record_to_vcf<R: Read>(r: &mut R, dict: &BcfHeaderDict) -> Result<
         line.push_str(&fmt_keys.join(":"));
         for si in 0..n_sample as usize {
             line.push('\t');
-            let parts: Vec<String> = per_key_vals.iter().map(|v| v[si].clone()).collect();
+            let parts: Vec<&str> = per_key_vals.iter().map(|v| v[si].as_str()).collect();
             line.push_str(&parts.join(":"));
         }
     }
-    Ok(Some(line))
+    Ok(line)
 }
 
-fn read_typed_string<R: Read>(r: &mut R) -> Result<String> {
-    match read_typed(r)? {
+fn read_typed_string(r: &mut Cursor<&[u8]>) -> Result<String> {
+    let lim = remaining(r);
+    match read_typed_limited(r, lim)? {
         BcfValue::Null => Ok(String::new()),
         BcfValue::Str(b) => Ok(String::from_utf8_lossy(&b).into_owned()),
         _ => bail!("expected typed string"),
@@ -375,8 +432,7 @@ fn decode_format_cell<R: Read>(r: &mut R, key: &str, n_per: usize, typ: u8) -> R
     let mut buf = vec![0u8; n_per * type_size(typ)];
     r.read_exact(&mut buf)?;
     if key == "GT" {
-        let mut vals: Vec<String> = Vec::with_capacity(n_per);
-        let mut sep = String::new();
+        let mut out = String::with_capacity(n_per * 2);
         for i in 0..n_per {
             let v: i32 = match typ {
                 BT_INT8 => buf[i] as i8 as i32,
@@ -388,13 +444,18 @@ fn decode_format_cell<R: Read>(r: &mut R, key: &str, n_per: usize, typ: u8) -> R
                 || (typ == BT_INT16 && v == INT16_VECTOR_END as i32)
                 || (typ == BT_INT32 && v == INT32_VECTOR_END);
             if is_end { break; }
-            let (allele, phased) = decode_gt(v);
-            let s = allele.map(|a| a.to_string()).unwrap_or_else(|| ".".into());
-            if i > 0 { vals.push(sep.clone()); }
-            sep = if phased { "|".into() } else { "/".into() };
-            vals.push(s);
+            let is_missing = (typ == BT_INT8 && v == INT8_MISSING as i32)
+                || (typ == BT_INT16 && v == INT16_MISSING as i32)
+                || (typ == BT_INT32 && v == INT32_MISSING);
+            let (allele, phased) = if is_missing { (None, false) } else { decode_gt(v) };
+            if i > 0 { out.push(if phased { '|' } else { '/' }); }
+            match allele {
+                Some(a) => out.push_str(&a.to_string()),
+                None => out.push('.'),
+            }
         }
-        return Ok(vals.join(""));
+        if out.is_empty() { out.push('.'); }
+        return Ok(out);
     }
     let vs: Vec<String> = match typ {
         BT_INT8 => (0..n_per).map(|i| {
@@ -422,11 +483,9 @@ fn decode_format_cell<R: Read>(r: &mut R, key: &str, n_per: usize, typ: u8) -> R
     Ok(if vs.is_empty() { ".".into() } else { vs.join(",") })
 }
 
-fn type_size(t: u8) -> usize {
-    match t { BT_INT8 | BT_CHAR => 1, BT_INT16 => 2, BT_INT32 | BT_FLOAT => 4, _ => 1 }
-}
-
-fn format_float(f: f32) -> String {
+/// htslib prints floats with `%g`; integers-valued floats print without a
+/// fraction.
+pub fn format_float(f: f32) -> String {
     if f.fract() == 0.0 && f.abs() < 1e10 { format!("{}", f as i64) } else { format!("{}", f) }
 }
 

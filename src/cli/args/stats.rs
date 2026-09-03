@@ -45,10 +45,13 @@ pub struct StatsArgs {
     #[arg(long = "af-bins", default_value = "0.01,0.05,0.1,1")]
     pub af_bins: String,
 
-    #[arg(long = "af-tag", default_value = "AF")]
-    pub af_tag: String,
+    #[arg(long = "af-tag")]
+    pub af_tag: Option<String>,
 
-    #[arg(short = '1', long = "split-by-ID")]
+    #[arg(short = '1', long = "1st-allele-only")]
+    pub first_allele_only: bool,
+
+    #[arg(short = 'I', long = "split-by-ID")]
     pub split_by_id: bool,
 
     #[arg(short = 'c', long = "collapse")]
@@ -63,6 +66,6 @@ pub struct StatsArgs {
     #[arg(long = "threads", default_value_t = 0)]
     pub threads: usize,
 
-    #[arg(short = 'v', long = "verbosity", default_value_t = 1)]
-    pub verbosity: u8,
+    #[arg(short = 'v', long = "verbose")]
+    pub verbose: bool,
 }

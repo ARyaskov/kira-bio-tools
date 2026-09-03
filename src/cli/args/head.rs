@@ -2,8 +2,13 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct HeadArgs {
-    pub input: PathBuf,
+    #[arg(long = "help", action = clap::ArgAction::Help, help = "Print help")]
+    pub help: Option<bool>,
+
+    /// Input file; stdin when omitted or `-`.
+    pub input: Option<PathBuf>,
 
     #[arg(short = 'h', long = "headers", default_value_t = -1)]
     pub headers: i64,
@@ -17,6 +22,6 @@ pub struct HeadArgs {
     #[arg(short = 'v', long = "verbosity", default_value_t = 1)]
     pub verbosity: u8,
 
-    #[arg(last = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    #[arg(last = true, allow_hyphen_values = true)]
     pub passthrough: Vec<String>,
 }
