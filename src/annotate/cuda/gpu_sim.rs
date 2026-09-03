@@ -3,10 +3,15 @@
 //! Replicates [`kira_kv_engine::Index::lookup_u64`] starting from a
 //! `GpuExport` POD snapshot. The CUDA and OpenCL kernels mirror this same
 //! arithmetic — any divergence is a kernel bug.
+//!
+//! kira_kv_engine 0.6.3 splits an index into parts of ~32 768 keys, so every
+//! real index is multi-part: the part is picked first, and its own salt and
+//! bucket/slot ranges drive the rest. A single-part export takes the same
+//! path with the identity offsets, which is the pre-0.6.3 formula.
 
 #![cfg(feature = "gpu")]
 
-use kira_kv_engine::{BloomExport, GpuExport};
+use kira_kv_engine::{BloomExport, GpuExport, GpuPart};
 
 // ---------- canonical hash (engine `prehash_seed` step) --------------------
 
@@ -33,11 +38,13 @@ pub const fn canonical_u64(key: u64, prehash_seed: u64) -> u64 {
 const BLOOM_BLOCK_WORDS: usize = 8;
 
 /// Per-block bit pattern derived from a hash (Impala/Pibiri split-block layout).
-/// Must match `block_bloom::block_and_mask` exactly.
+/// Must match `block_bloom::block_and_mask` exactly. `bit_shift` is the
+/// export's own lane shift: 26 (6-bit index) for filters built by 0.6.3,
+/// 27 (5-bit) for ones deserialized from a 0.6 file.
 #[inline]
-fn bloom_block_and_mask(hash: u64, blocks: usize) -> (usize, [u64; BLOOM_BLOCK_WORDS]) {
+fn bloom_block_and_mask(hash: u64, blocks: usize, bit_shift: u32) -> (usize, [u64; BLOOM_BLOCK_WORDS]) {
     let block = (((hash >> 32) as u128 * blocks as u128) >> 32) as usize;
-    let seed = hash & 0xFFFF_FFFF;
+    let seed = hash as u32;
     const SALT: [u32; BLOOM_BLOCK_WORDS] = [
         0x47b6_137b, 0x4476_8924, 0x1820_5237, 0x2384_8965, 0x8e6e_2354, 0x0f7c_c9b6, 0xe43d_5fa5,
         0xa4d5_2dc1,
@@ -45,7 +52,7 @@ fn bloom_block_and_mask(hash: u64, blocks: usize) -> (usize, [u64; BLOOM_BLOCK_W
     let mut mask = [0u64; BLOOM_BLOCK_WORDS];
     let mut i = 0;
     while i < BLOOM_BLOCK_WORDS {
-        let bit = ((seed as u32).wrapping_mul(SALT[i]) >> 27) & 0x3F;
+        let bit = (seed.wrapping_mul(SALT[i]) >> bit_shift) & 0x3F;
         mask[i] = 1u64 << bit;
         i += 1;
     }
@@ -55,7 +62,7 @@ fn bloom_block_and_mask(hash: u64, blocks: usize) -> (usize, [u64; BLOOM_BLOCK_W
 /// Returns `true` if all 8 lane bits for `canonical` are set in the
 /// corresponding block of the exported bloom filter.
 pub fn bloom_contains(bloom: &BloomExport, canonical: u64) -> bool {
-    let (block, mask) = bloom_block_and_mask(canonical, bloom.blocks);
+    let (block, mask) = bloom_block_and_mask(canonical, bloom.blocks, bloom.bit_shift);
     let base = block * BLOOM_BLOCK_WORDS;
     for w in 0..BLOOM_BLOCK_WORDS {
         if bloom.words[base + w] & mask[w] != mask[w] {
@@ -70,6 +77,12 @@ pub fn bloom_contains(bloom: &BloomExport, canonical: u64) -> bool {
 /// Same constants the engine uses for the 2-zone bucket skew.
 const ALPHA_BUCKETS: f64 = 0.30;
 const BETA_KEYS: f64 = 0.60;
+/// `ptrhash25::PART_MUL`: Fibonacci multiplier of the part selector.
+const PART_MUL: u64 = 0x9E37_79B9_7F4A_7C15;
+/// `ptrhash25::REMIX_MUL`: per-part rehash of the base hash.
+const REMIX_MUL: u64 = 0xBF58_476D_1CE4_E5B9;
+/// `ptrhash25::H2_XOR`.
+const H2_XOR: u64 = 0xA24B_1F6F_DA39_2B31;
 
 /// Multiply-high reduction for hash → [0, n). 64-bit mulhi.
 #[inline]
@@ -77,44 +90,75 @@ const fn fast_reduce(hash: u64, n: usize) -> usize {
     ((hash as u128 * n as u128) >> 64) as usize
 }
 
-/// Bucket-for: 2-level skewed mapping from h1 → bucket id. Mirrors
-/// `ptrhash25::bucket_for` byte-for-byte.
+/// `ptrhash25::large_buckets_of`, for exports that carry no part table.
 #[inline]
-fn ptrhash_bucket_for(h1: u64, num_buckets: u32) -> usize {
-    let num_buckets = num_buckets as usize;
+fn large_buckets_of(num_buckets: usize) -> usize {
+    ((num_buckets as f64) * ALPHA_BUCKETS) as usize
+}
+
+/// Bucket within one part: 2-level skewed mapping from h1 → bucket id.
+/// Mirrors `ptrhash25::bucket_in_part` byte-for-byte.
+#[inline]
+fn ptrhash_bucket_in_part(h1: u64, large_buckets: usize, small_buckets: usize) -> usize {
     let zone_decider = (h1 >> 48) as u32;
     let beta_threshold = (BETA_KEYS * 65536.0) as u32;
-    let large_buckets = ((num_buckets as f64) * ALPHA_BUCKETS) as usize;
-    let small_buckets = num_buckets - large_buckets;
-    let h_low = h1 & 0x0000_FFFF_FFFF_FFFF;
+    let h_low = (h1 & 0x0000_FFFF_FFFF_FFFF) << 16;
     if zone_decider < beta_threshold {
-        fast_reduce(h_low << 16, large_buckets.max(1))
+        fast_reduce(h_low, large_buckets.max(1))
     } else {
-        large_buckets + fast_reduce(h_low << 16, small_buckets.max(1))
+        large_buckets + fast_reduce(h_low, small_buckets.max(1))
     }
 }
 
 /// Slot-for: combine h2 with the bucket's pilot byte and reduce into [0, n).
 /// Mirrors `ptrhash25::slot_for`.
 #[inline]
-fn ptrhash_slot_for(h2: u64, pilot: u8, n: u64) -> usize {
+fn ptrhash_slot_for(h2: u64, pilot: u8, n: usize) -> usize {
     let pilot_mix = (pilot as u64).wrapping_mul(0xA24B_1F6F_DA39_2B31);
     let mixed = (h2 ^ pilot_mix)
         .rotate_left(31)
         .wrapping_mul(0xD6E8_FEB8_6659_FD93);
-    fast_reduce(mixed, n as usize)
+    fast_reduce(mixed, n)
 }
 
-/// PtrHash25 keyed hash: pre-rotate the key, mix with `mph_salt`, derive two
-/// independent halves h1/h2. Mirrors `ptrhash25::hash_key` for the non-AES
-/// path (the AES branch isn't exported via `GpuExport`).
+/// `ptrhash25::part_of`: which part owns an already-rotated key.
 #[inline]
-fn ptrhash_hash_key(canonical: u64, mph_salt: u64, prerotate: u8) -> (u64, u64) {
-    let rotated = canonical.rotate_left(prerotate as u32);
-    let base = mix64(rotated ^ mph_salt);
-    let h1 = base;
-    let h2 = base.rotate_left(23) ^ 0xA24B_1F6F_DA39_2B31;
-    (h1, h2)
+fn ptrhash_part_of(rotated: u64, part_salt: u64, parts: usize) -> usize {
+    fast_reduce((rotated ^ part_salt).wrapping_mul(PART_MUL), parts)
+}
+
+/// Part geometry, falling back to the whole index when the export carries no
+/// part table (single-partition builds from kira_kv_engine 0.6).
+#[inline]
+fn part_geometry(export: &GpuExport, part: usize) -> GpuPart {
+    match export.parts.get(part) {
+        Some(p) => *p,
+        None => GpuPart {
+            slot_off: 0,
+            salt: export.mph_salt,
+            bucket_off: 0,
+            num_slots: export.num_slots as u32,
+            num_buckets: export.num_buckets,
+            large_buckets: large_buckets_of(export.num_buckets as usize) as u32,
+        },
+    }
+}
+
+/// PtrHash25 keyed hash: pre-rotate the key, mix with `mph_salt`, pick the
+/// part, then derive the part-local halves h1/h2. Mirrors
+/// `ptrhash25::PtrHash25Mphf::index_u64` for the non-AES path (the AES branch
+/// isn't exported via `GpuExport`).
+#[inline]
+fn ptrhash_hash_key(export: &GpuExport, canonical: u64) -> (usize, u64, u64) {
+    let rotated = canonical.rotate_left(export.prerotate as u32);
+    let base = mix64(rotated ^ export.mph_salt);
+    let (part, h1) = if export.parts.len() > 1 {
+        let p = ptrhash_part_of(rotated, export.part_salt, export.parts.len());
+        (p, (base ^ export.parts[p].salt).wrapping_mul(REMIX_MUL))
+    } else {
+        (0, base)
+    };
+    (part, h1, h1.rotate_left(23) ^ H2_XOR)
 }
 
 /// u16 fingerprint check (low 16 bits of canonical hash) — matches
@@ -159,14 +203,17 @@ pub fn lookup_u64(export: &GpuExport, key: u64) -> GpuLookup {
         return GpuLookup::BloomMiss;
     }
 
-    let (h1, h2) = ptrhash_hash_key(canonical, export.mph_salt, export.prerotate);
-    let bucket = ptrhash_bucket_for(h1, export.num_buckets);
+    let (part, h1, h2) = ptrhash_hash_key(export, canonical);
+    let geom = part_geometry(export, part);
+    let large = geom.large_buckets as usize;
+    let small = (geom.num_buckets as usize).saturating_sub(large);
+    let bucket = geom.bucket_off as usize + ptrhash_bucket_in_part(h1, large, small);
     let pilot = export.pilots[bucket];
-    let slot = ptrhash_slot_for(h2, pilot, export.num_slots);
+    let slot = geom.slot_off + ptrhash_slot_for(h2, pilot, geom.num_slots as usize) as u64;
 
     if let Some(fps) = &export.fingerprints {
         let expected = fingerprint16(canonical);
-        if fps.get(slot).copied() != Some(expected) {
+        if fps.get(slot as usize).copied() != Some(expected) {
             return GpuLookup::FingerprintMiss;
         }
     }

@@ -3,6 +3,6 @@
 ##reference=file:///ref.fa
 ##INFO=<ID=AC,Number=A,Type=Integer,Description="Allele count in genotypes">
 ##INFO=<ID=AN,Number=1,Type=Integer,Description="Total number of alleles in called genotypes">
-##kira_bt_annotateVersion=0.6.3+htslib-compat
+##kira_bt_annotateVersion=0.7.1+htslib-compat
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
 1	10	.	C	G,T	.	.	AC=2,1;AN=8

@@ -88,6 +88,25 @@ fn make_fixture(dir: &std::path::Path) -> (std::path::PathBuf, Vec<std::path::Pa
         writeln!(f1, "@rd{i}/1\n{}\n+\n{}", String::from_utf8_lossy(&r1), q1).unwrap();
         writeln!(f2, "@rd{i}/2\n{}\n+\n{}", String::from_utf8_lossy(&r2), q2).unwrap();
     }
+
+    // Chimeric pairs: each R1 joins two distant loci, so the aligner splits it
+    // and emits a supplementary record. kira-ls-aligner 0.4.6 hard-clips those
+    // by default, and the bridge has to do the same or SEQ and CIGAR drift.
+    for i in 0..40usize {
+        let a = 1_000 + i * 977;
+        let b = 120_000 + i * 613;
+        let mut r1 = reference[a..a + 75].to_vec();
+        r1.extend_from_slice(&reference[b..b + 75]);
+        let r2: Vec<u8> = reference[a + 250..a + 400]
+            .iter()
+            .rev()
+            .map(|&x| complement(x))
+            .collect();
+        let q1: String = (0..r1.len()).map(|j| (b'#' + ((j + i) % 40) as u8) as char).collect();
+        let q2: String = (0..r2.len()).map(|j| (b'#' + ((j * 3 + i) % 40) as u8) as char).collect();
+        writeln!(f1, "@chim{i}/1\n{}\n+\n{}", String::from_utf8_lossy(&r1), q1).unwrap();
+        writeln!(f2, "@chim{i}/2\n{}\n+\n{}", String::from_utf8_lossy(&r2), q2).unwrap();
+    }
     drop(f1);
     drop(f2);
     (ref_path, vec![r1_path, r2_path])
@@ -136,6 +155,10 @@ fn streaming_records_match_the_sam_text_path() {
     // Path 1: SAM text, then parse back.
     let aligner = build_aligner(&ref_path);
     let index = Index::build(read_reference(&ref_path).unwrap(), IndexConfig::default());
+    // Deprecated because it buffers the whole run's SAM in RAM. That is exactly
+    // what this test wants: the emitter's own text output for a small fixture,
+    // to compare the bridge against. Production code uses `align_streaming`.
+    #[allow(deprecated)]
     let sam_bytes = aligner.align_to_sam_bytes(index, &reads).unwrap();
     let mut reader = sam::io::Reader::new(std::io::Cursor::new(&sam_bytes[..]));
     let header = reader.read_header().unwrap();
@@ -162,6 +185,16 @@ fn streaming_records_match_the_sam_text_path() {
         "record counts differ: text={} records={}",
         via_text.len(),
         via_records.len()
+    );
+    // Without a split read the hard-clip branch of the bridge is never taken and
+    // this comparison proves nothing about it.
+    let supplementary = via_text
+        .iter()
+        .filter(|r| u16::from(r.flags()) & 0x800 != 0)
+        .count();
+    assert!(
+        supplementary > 0,
+        "fixture produced no supplementary records, hard-clipping is untested"
     );
 
     for (i, (t, r)) in via_text.iter().zip(via_records.iter()).enumerate() {

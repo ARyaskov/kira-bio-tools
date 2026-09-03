@@ -2,7 +2,7 @@
 ##contig=<ID=20,length=2147483647>
 ##INFO=<ID=END,Number=1,Type=Integer,Description="End position">
 ##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
-##kira_bt_annotateVersion=0.6.3+htslib-compat
+##kira_bt_annotateVersion=0.7.1+htslib-compat
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
 20	15	.	TAC	T	.	.	.
 20	15	.	T	<DEL>	.	.	END=17;SVTYPE=DEL

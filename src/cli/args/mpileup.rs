@@ -81,8 +81,9 @@ pub struct MpileupArgs {
     pub ignore_overlaps: bool,
 
     /// Down-weight qualities of reads with a high mismatch rate (paralog
-    /// suspects): `off`, `auto`, or `FULL,SLOPE`. A kira extension, off by default.
-    #[arg(long = "nm-weight", default_value = "off")]
+    /// suspects): `off`, `auto`, or `FULL,SLOPE`. A kira extension, off by
+    /// default. `KIRA_NM_WEIGHT` sets it when the flag is absent.
+    #[arg(long = "nm-weight", env = "KIRA_NM_WEIGHT", default_value = "off")]
     pub nm_weight: String,
 
     /// Require more support for short indels inside homopolymer/STR tracts and
@@ -92,7 +93,8 @@ pub struct MpileupArgs {
 
     /// Confirm indel candidates by pair-HMM realignment of the covering reads:
     /// `off`, `ins` (insertions) or `all`. A kira extension, off by default.
-    #[arg(long = "indel-realign", default_value = "off")]
+    /// `KIRA_INDEL_REALIGN` sets it when the flag is absent.
+    #[arg(long = "indel-realign", env = "KIRA_INDEL_REALIGN", default_value = "off")]
     pub indel_realign: String,
 
     /// Recover indels the aligner hid as mismatches by local assembly in active

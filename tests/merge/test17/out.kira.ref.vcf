@@ -2,7 +2,7 @@
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 ##contig=<ID=1,assembly=b37,length=249250621>
 ##reference=file:ref.fa
-##kira_bt_annotateVersion=0.6.3+htslib-compat
+##kira_bt_annotateVersion=0.7.1+htslib-compat
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	a	b
 1	3000000	.	C	CCG,CAA	.	.	.	GT	0/1	0/2
 1	3000150	.	CC	C,CTTC	.	.	.	GT	0/1	0/2

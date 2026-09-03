@@ -665,7 +665,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
- "miniz_oxide 0.8.9",
+ "miniz_oxide",
  "zlib-rs",
 ]
 
@@ -978,32 +978,9 @@ dependencies = [
 
 [[package]]
 name = "kira-bam"
-version = "0.2.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ac51aa6f61bd3ae46885b70a9ba17274601906086dd1c1f7389960ec9c17cf9"
-dependencies = [
- "anyhow",
- "bstr",
- "clap",
- "memmap2",
- "noodles-bam",
- "noodles-bgzf",
- "noodles-core",
- "noodles-cram",
- "noodles-csi",
- "noodles-fasta",
- "noodles-sam",
- "rayon",
- "rustc-hash",
- "sysinfo",
- "tempfile",
-]
-
-[[package]]
-name = "kira-bam"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f28bf8465d2e6ca41c485563565ac68fd23d0aad4e30f2b37ba2351302cf9e21"
+checksum = "55c9bb88999785eed5f654d5b12746803d4660599de7d8f6483cde383e266ed6"
 dependencies = [
  "anyhow",
  "bstr",
@@ -1024,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "kira-bio-tools"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1040,7 +1017,7 @@ dependencies = [
  "indexmap",
  "indicatif",
  "itoa",
- "kira-bam 0.3.1",
+ "kira-bam",
  "kira-ls-aligner",
  "kira_kv_engine",
  "lazy_static",
@@ -1072,35 +1049,36 @@ dependencies = [
 
 [[package]]
 name = "kira-fastq"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5defe874d1dd086d1fb746a61c7b70b0bdaf84d40fa276eb67c997d689c62ab3"
+checksum = "136c3b3bad334671c1cfa71b648104c792df30fbcfa7cc14e5a7155bcbb4caa1"
 dependencies = [
  "crc32fast",
  "flate2",
  "memchr",
  "memmap2",
- "miniz_oxide 0.9.1",
 ]
 
 [[package]]
 name = "kira-ls-aligner"
-version = "0.4.3"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1e458324bb6b9a7ea91c691dd5bbfb652c2d33e5d36a8753d91aae22e4bfed3"
+checksum = "fca230c39fd3012417ff8f7b8ba6f5c32747f17423c25eb12479c6f233833f8a"
 dependencies = [
  "aho-corasick",
  "anyhow",
  "clap",
  "core_affinity",
+ "flate2",
  "indicatif",
- "kira-bam 0.2.0",
+ "kira-bam",
  "kira-fastq",
  "kira-simd",
  "kira_kv_engine",
  "memmap2",
  "mimalloc",
  "needletail",
+ "noodles-sam",
  "rayon",
  "rustc-hash",
  "sysinfo",
@@ -1117,9 +1095,9 @@ checksum = "02a7de5f0cf02d66f73b1b1289df74ad96b465546fe5a184d78e57fa6df608d3"
 
 [[package]]
 name = "kira_kv_engine"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9b57415f77269b4f54d9b974e8eef9e36dbe4d05477f4fa035a7ddbe7765e2b"
+checksum = "0d5eb186502f90aefb595bd2381281db38633ee6c527d8c666b9157fb0d4c948"
 dependencies = [
  "core_affinity",
  "hashbrown 0.16.1",
@@ -1322,15 +1300,6 @@ checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
  "simd-adler32",
-]
-
-[[package]]
-name = "miniz_oxide"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
-dependencies = [
- "adler2",
 ]
 
 [[package]]

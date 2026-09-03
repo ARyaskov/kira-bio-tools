@@ -10,6 +10,10 @@
 //! for mpileup; `NM` for the NM-aware quality weighting. `MD`, `AS`, `XS` and
 //! `RG` are emitted by the text path but read by nothing here, and `MD` is a
 //! per-record `String` — skipping them is most of this module's memory win.
+//!
+//! Indel left-normalization is not repeated here: kira-ls-aligner 0.4.6 applies
+//! it inside the pipeline, before pairing, so the scored batches already carry
+//! canonical CIGARs.
 
 use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::record::cigar::Op;
@@ -105,6 +109,20 @@ fn cigar_kind(k: CigarKind) -> Kind {
     }
 }
 
+/// Lengths of the leading and trailing soft clips, mirroring the emitter's
+/// `terminal_softclips`.
+fn terminal_softclips(ops: &[kira_ls_aligner::types::CigarOp]) -> (u32, u32) {
+    let lead = match ops.first() {
+        Some(op) if op.op == CigarKind::SoftClip => op.len,
+        _ => 0,
+    };
+    let trail = match ops.last() {
+        Some(op) if op.op == CigarKind::SoftClip && ops.len() > 1 => op.len,
+        _ => 0,
+    };
+    (lead, trail)
+}
+
 /// Query bases consumed by a CIGAR — the emitter's `cigar_query_consumed`.
 fn cigar_query_consumed(ops: &[kira_ls_aligner::types::CigarOp]) -> u32 {
     ops.iter()
@@ -123,16 +141,33 @@ fn cigar_query_consumed(ops: &[kira_ls_aligner::types::CigarOp]) -> u32 {
 /// carried through in a shape that silently misplaces bases.
 fn mapped_record(read: &ReadRecord, aln: &Alignment) -> Option<RecordBuf> {
     let seq_len = read.seq.len() as u32;
+    // The consumed-length check runs against the soft-clipped form, since that
+    // is what the aligner produced.
     if cigar_query_consumed(&aln.cigar) != seq_len {
         return None;
     }
 
-    // SAM stores the sequence as it aligns to the forward strand.
+    // bwa-mem hard-clips supplementary segments unless `-Y`, which the fused
+    // aligner leaves at its default: the terminal clips become `H` and their
+    // bases leave SEQ/QUAL, so a chimeric read's sequence is stored once, on
+    // its primary record.
+    let hard_clip = aln.is_supplementary;
+    let (clip_lead, clip_trail) = if hard_clip {
+        terminal_softclips(&aln.cigar)
+    } else {
+        (0, 0)
+    };
+    let keep_end = (seq_len as usize).saturating_sub(clip_trail as usize);
+    let keep_start = (clip_lead as usize).min(keep_end);
+
+    // SAM stores the sequence as it aligns to the forward strand; the clip
+    // range indexes that oriented sequence, so it is applied after flipping.
     let seq: Vec<u8> = if aln.is_rev {
         read.seq.iter().rev().map(|&b| complement(b)).collect()
     } else {
         read.seq.clone()
     };
+    let seq = seq[keep_start..keep_end].to_vec();
     // FASTQ carries Phred+33 ASCII; `RecordBuf` stores raw Phred values. Passing
     // the ASCII through unchanged silently inflates every base quality.
     let qual: Vec<u8> = match read.qual.as_ref() {
@@ -140,11 +175,18 @@ fn mapped_record(read: &ReadRecord, aln: &Alignment) -> Option<RecordBuf> {
         Some(q) => q.iter().map(|&c| phred_from_ascii(c)).collect(),
         None => Vec::new(),
     };
+    let qual = if qual.is_empty() { qual } else { qual[keep_start..keep_end].to_vec() };
 
+    let last_op = aln.cigar.len().saturating_sub(1);
     let cigar_ops: Vec<Op> = aln
         .cigar
         .iter()
-        .map(|op| Op::new(cigar_kind(op.op), op.len as usize))
+        .enumerate()
+        .map(|(i, op)| {
+            let terminal_clip = op.op == CigarKind::SoftClip && (i == 0 || i == last_op);
+            let kind = if hard_clip && terminal_clip { Kind::HardClip } else { cigar_kind(op.op) };
+            Op::new(kind, op.len as usize)
+        })
         .collect();
     let cigar = Cigar::from(cigar_ops);
 

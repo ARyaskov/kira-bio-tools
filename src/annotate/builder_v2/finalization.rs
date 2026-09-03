@@ -55,9 +55,11 @@ pub fn finalize_ani_index(
         verify_key_uniqueness(&keys_bytes, &rows);
     }
 
+    // kira_kv_engine 0.6.3 builds from a borrowed slice, so the key vector is
+    // no longer duplicated (0.8 GB on a 10^8-key build) just to be handed over.
     let index = IndexBuilder::new()
         .with_config(config)
-        .build_index(keys_bytes.clone())?;
+        .build_index_ref(&keys_bytes)?;
 
     if timing {
         eprintln!(

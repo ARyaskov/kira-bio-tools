@@ -31,6 +31,8 @@ Binary name: `kira-bt`
 - `KIRA_BT_NO_PROGRESS=1` suppresses BAM-reading progress bars.
 - `KIRA_BT_BGZF_THREADS=<n>` sets the BGZF decompression worker count.
 - `KIRA_SOLID_DUMP_BAM=<path>` writes the `solid` pipeline's post-markdup BAM.
+- `KIRA_NM_WEIGHT` / `KIRA_INDEL_REALIGN` supply the default for `mpileup`'s
+  `--nm-weight` / `--indel-realign` (and `solid`'s `--mpileup-` forms).
 
 Other `KIRA_*` variables in the source are internal tuning knobs and are not
 part of the supported interface.
@@ -110,9 +112,10 @@ Commands: `query`, `cnv`.
 
   Pileup stage: `--mpileup-annotate` (default `AD,DP,SP`; `PL` is always
   emitted), `--mpileup-max-depth`, `--mpileup-min-mq` (default 0),
-  `--mpileup-min-bq` (default 13). `--mpileup-variants-only` is on in this
-  build and cannot currently be switched off, so ref-only positions are always
-  skipped.
+  `--mpileup-min-bq` (default 13), `--mpileup-nm-weight` and
+  `--mpileup-indel-realign` (the `mpileup` extensions below, off by default).
+  `--mpileup-variants-only` is on in this build and cannot currently be
+  switched off, so ref-only positions are always skipped.
 
   Call stage: `--call` enables it (off by default, since it changes what the
   output VCF means), `--call-ploidy <0|1|2>`, `--call-ploidy-file`,
@@ -352,6 +355,10 @@ Commands: `query`, `cnv`.
   same pair-HMM kernel) and `--recal` (empirical base-quality recalibration
   by reported Q × trinucleotide × strand × cycle, learned at non-variant
   sites; needs `-f`, not available with `--stream`).
+  `--nm-weight` and `--indel-realign` also read `KIRA_NM_WEIGHT` and
+  `KIRA_INDEL_REALIGN` when the flag is absent, so scripts written against
+  the pre-0.7 environment-variable interface keep working; an explicit flag
+  always wins.
 
 - `call`  
   SNP/indel calling from genotype likelihoods.  

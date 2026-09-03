@@ -2,7 +2,7 @@
 ##reference=ref.fasta
 ##contig=<ID=1,length=51304566>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-##kira_bt_annotateVersion=0.6.3+htslib-compat
+##kira_bt_annotateVersion=0.7.1+htslib-compat
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	A	B
 1	11	.	A	C,T	.	.	.	GT	1|0	0|1
 1	22	.	A	C,T	.	.	.	GT	2|0	0|2

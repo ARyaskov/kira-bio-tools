@@ -25,7 +25,7 @@
 ##INFO=<ID=AN,Number=1,Type=Integer,Description="Total number of alleles in called genotypes">
 ##INFO=<ID=INDEL,Number=0,Type=Flag,Description="Indicates that the variant is an INDEL.">
 ##INFO=<ID=STR,Number=1,Type=String,Description="Test string type">
-##kira_bt_annotateVersion=0.6.3+htslib-compat
+##kira_bt_annotateVersion=0.7.1+htslib-compat
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	A	B	C	D
 1	3000000	id1	C	CCG,A	59.2	PASS	TR=1,2,2;TA=1,1;TG=1,2,3,2,.,3;AN=8;AC=2,2	GT:GQ:XR:XA:XG	0/1:245:0,1,.:1,.:0,1,2,.,.,.	0/1:245:1,2,.:2,.:0,1,2,.,.,.	0/2:245:4,.,5:.,5:3,.,.,4,.,5	0/2:245:6,.,7:.,7:6,.,.,7,.,8
 1	3000000	.	C	CCG,A	59.2	PASS	AN=8;AC=2,2	GT:GQ:XR:XA:XG	0/1:245:1,2,.:2,.:0,1,2,.,.,.	0/1:245:2,3,.:3,.:1,2,3,.,.,.	0/2:245:.:.:.	0/2:245:.:.:.

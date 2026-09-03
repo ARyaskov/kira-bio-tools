@@ -2,6 +2,6 @@
 ##reference=ref.fa
 ##contig=<ID=1,length=307041717>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-##kira_bt_annotateVersion=0.6.3+htslib-compat
+##kira_bt_annotateVersion=0.7.1+htslib-compat
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	a	b	c	d
 1	5695120	.	C	T	.	.	.	GT	0/.	.|0	1/.	.|1

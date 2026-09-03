@@ -247,6 +247,10 @@ fn build_mpileup_args(args: &SolidArgs) -> Result<MpileupArgs> {
     }
     argv.push("--min-BQ".to_string());
     argv.push(args.mpileup_min_bq.to_string());
+    argv.push("--nm-weight".to_string());
+    argv.push(args.mpileup_nm_weight.clone());
+    argv.push("--indel-realign".to_string());
+    argv.push(args.mpileup_indel_realign.clone());
     // run_mpileup_from_bams ignores `inputs`; satisfy the required positional.
     argv.push("<mem>".to_string());
     MpileupArgs::try_parse_from(&argv).context("assemble mpileup args")

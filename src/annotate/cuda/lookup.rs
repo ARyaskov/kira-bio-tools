@@ -45,17 +45,42 @@ pub struct GpuAni {
 struct GpuMphState {
     prehash_seed: u64,
     mph_salt: u64,
+    /// Salt of the part selector (kira_kv_engine 0.6.3 partitioned MPH).
+    part_salt: u64,
     num_buckets: u32,
     num_slots: u64,
     prerotate: u8,
+    /// Per-part geometry; one entry means the pre-0.6.3 single-part formula.
+    parts: DeviceBuffer<AniMphPart>,
+    num_parts: u32,
     /// One u8 per bucket (flat layout).
     pilots: DeviceBuffer<u8>,
     /// Optional block-Bloom filter (8 × u64 per block).
     bloom_words: Option<DeviceBuffer<u64>>,
     bloom_blocks: u32,
+    /// Lane bit shift of the filter: 26 for filters built by 0.6.3, 27 for
+    /// ones loaded from a 0.6 file.
+    bloom_bit_shift: u32,
     /// Optional u16 per slot fingerprints. `None` when built with `lean_mph`.
     fingerprints: Option<DeviceBuffer<u16>>,
 }
+
+/// Device image of [`kira_kv_engine::GpuPart`]; the field order and padding
+/// must match `AniMphPart` in `ani_kernel.cu`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AniMphPart {
+    slot_off: u64,
+    salt: u64,
+    bucket_off: u32,
+    num_slots: u32,
+    num_buckets: u32,
+    large_buckets: u32,
+}
+
+// SAFETY: a plain `#[repr(C)]` integer struct with no padding, copied to the
+// device byte for byte.
+unsafe impl cust::memory::DeviceCopy for AniMphPart {}
 
 struct GpuPosIndex {
     contigs: DeviceBuffer<AniPosContig>,
@@ -152,23 +177,41 @@ impl GpuAni {
         let t = Instant::now();
         eprintln!("[gpu] init: uploading PtrHash25 (pilots+bloom+fingerprints) to device...");
         let mph_state = match ani.index.gpu_export() {
-            Some(exp) => Some(GpuMphState {
-                prehash_seed: exp.prehash_seed,
-                mph_salt: exp.mph_salt,
-                num_buckets: exp.num_buckets,
-                num_slots: exp.num_slots,
-                prerotate: exp.prerotate,
-                pilots: DeviceBuffer::from_slice(&exp.pilots)?,
-                bloom_words: match &exp.bloom {
-                    Some(b) => Some(DeviceBuffer::from_slice(&b.words)?),
-                    None => None,
-                },
-                bloom_blocks: exp.bloom.as_ref().map(|b| b.blocks as u32).unwrap_or(0),
-                fingerprints: match &exp.fingerprints {
-                    Some(fp) => Some(DeviceBuffer::from_slice(fp)?),
-                    None => None,
-                },
-            }),
+            Some(exp) => {
+                let parts: Vec<AniMphPart> = exp
+                    .parts
+                    .iter()
+                    .map(|p| AniMphPart {
+                        slot_off: p.slot_off,
+                        salt: p.salt,
+                        bucket_off: p.bucket_off,
+                        num_slots: p.num_slots,
+                        num_buckets: p.num_buckets,
+                        large_buckets: p.large_buckets,
+                    })
+                    .collect();
+                Some(GpuMphState {
+                    prehash_seed: exp.prehash_seed,
+                    mph_salt: exp.mph_salt,
+                    part_salt: exp.part_salt,
+                    num_buckets: exp.num_buckets,
+                    num_slots: exp.num_slots,
+                    prerotate: exp.prerotate,
+                    num_parts: parts.len() as u32,
+                    parts: DeviceBuffer::from_slice(&parts)?,
+                    pilots: DeviceBuffer::from_slice(&exp.pilots)?,
+                    bloom_words: match &exp.bloom {
+                        Some(b) => Some(DeviceBuffer::from_slice(&b.words)?),
+                        None => None,
+                    },
+                    bloom_blocks: exp.bloom.as_ref().map(|b| b.blocks as u32).unwrap_or(0),
+                    bloom_bit_shift: exp.bloom.as_ref().map(|b| b.bit_shift).unwrap_or(26),
+                    fingerprints: match &exp.fingerprints {
+                        Some(fp) => Some(DeviceBuffer::from_slice(fp)?),
+                        None => None,
+                    },
+                })
+            }
             None => None,
         };
         eprintln!(
@@ -365,12 +408,16 @@ impl GpuAni {
                 d_keys.as_device_ptr(),
                 state.prehash_seed,
                 state.mph_salt,
+                state.part_salt,
                 state.num_buckets,
                 state.num_slots,
                 state.prerotate as u32,
+                state.parts.as_device_ptr(),
+                state.num_parts,
                 pilots_ptr,
                 bloom_ptr,
                 state.bloom_blocks,
+                state.bloom_bit_shift,
                 fingerprints_ptr,
                 d_out.as_device_ptr(),
                 n as i32,

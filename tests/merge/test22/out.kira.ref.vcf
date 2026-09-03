@@ -2,7 +2,7 @@
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 ##contig=<ID=chr21,length=248956422>
 ##contig=<ID=chr21>
-##kira_bt_annotateVersion=0.6.3+htslib-compat
+##kira_bt_annotateVersion=0.7.1+htslib-compat
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	smpl1	smpl2	smpl3	smpl4	smpl5	smpl6
 chr21	14483696	.	G	GT,T	.	.	.	GT	0/0	0/1	1/1	./.	./.	./.
 chr21	14483696	rs74584932	G	GT	.	.	.	GT	./.	./.	./.	0|0	0|1	1|1

@@ -1,4 +1,4 @@
-# This file was produced by kira-bt stats (0.6.3) and can be plotted using plot-vcfstats.
+# This file was produced by kira-bt stats (0.7.1) and can be plotted using plot-vcfstats.
 # The command line was:	kira-bt stats stats.counts.vcf.gz -s - -r 1
 #
 # Definition of sets:

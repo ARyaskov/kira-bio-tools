@@ -3,6 +3,6 @@
 ##INFO=<ID=END,Number=1,Type=Integer,Description="End position of structural variation">
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 ##fileformat=VCFv4.4
-##kira_bt_annotateVersion=0.6.3+htslib-compat
+##kira_bt_annotateVersion=0.7.1+htslib-compat
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample	Other
 chr1	147022730	SV1;SV2	N	<DEL>	.	.	END=147593064	GT	0/1	1/1

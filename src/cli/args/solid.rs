@@ -64,6 +64,17 @@ pub struct SolidArgs {
     #[arg(long = "mpileup-min-bq", default_value_t = 13)]
     pub mpileup_min_bq: u32,
 
+    /// NM-aware quality weighting for the mpileup stage: `off`, `auto`, or
+    /// `FULL,SLOPE`. Suppresses paralog misplacements the aligner still lets
+    /// through. `KIRA_NM_WEIGHT` sets it when the flag is absent.
+    #[arg(long = "mpileup-nm-weight", env = "KIRA_NM_WEIGHT", default_value = "off")]
+    pub mpileup_nm_weight: String,
+
+    /// Pair-HMM realignment of indel candidates in the mpileup stage: `off`,
+    /// `ins` or `all`. `KIRA_INDEL_REALIGN` sets it when the flag is absent.
+    #[arg(long = "mpileup-indel-realign", env = "KIRA_INDEL_REALIGN", default_value = "off")]
+    pub mpileup_indel_realign: String,
+
     /// Run the variant caller on the pileup, in-stream, so the pipeline emits a
     /// called VCF instead of the pileup's per-site maximum-likelihood genotypes.
     /// Off by default: it changes what the output VCF means.
