@@ -41,7 +41,9 @@ impl ReadBatch {
         self.lines.push((offset as u32, len as u32));
     }
 
-    /// Appends a line from raw bytes (zero-copy fast path). Strips trailing `\n` / `\r`.
+    /// Appends a line from raw bytes (zero-copy fast path). Strips trailing
+    /// `\n` / `\r`. Bytes that are not UTF-8 (a damaged `.ktile`) are
+    /// replaced with U+FFFD, so [`line`] can hand out `&str` without checks.
     pub fn push_line_bytes(&mut self, bytes: &[u8]) {
         let mut end = bytes.len();
         while end > 0 && (bytes[end - 1] == b'\n' || bytes[end - 1] == b'\r') {
@@ -49,7 +51,10 @@ impl ReadBatch {
         }
         let trimmed = &bytes[..end];
         let offset = self.bytes.len();
-        self.bytes.extend_from_slice(trimmed);
+        match std::str::from_utf8(trimmed) {
+            Ok(_) => self.bytes.extend_from_slice(trimmed),
+            Err(_) => self.bytes.extend_from_slice(String::from_utf8_lossy(trimmed).as_bytes()),
+        }
         let len = self.bytes.len() - offset;
         debug_assert!(offset <= u32::MAX as usize, "ReadBatch offset overflow");
         debug_assert!(len <= u32::MAX as usize, "ReadBatch line length overflow");
@@ -79,7 +84,9 @@ impl ReadBatch {
         };
         let start = offset as usize;
         let end = start + len as usize;
-        // SAFETY: bytes were pushed from a `&str` so the slice is valid UTF-8.
+        // SAFETY: `push_line` copies a `&str` and `push_line_bytes` validates
+        // (or repairs) its input, so every stored line is valid UTF-8 and
+        // `lines` records whole-line bounds.
         debug_assert!(self.bytes.get(start..end).is_some());
         unsafe { std::str::from_utf8_unchecked(&self.bytes[start..end]) }
     }

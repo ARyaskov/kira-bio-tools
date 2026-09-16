@@ -205,6 +205,8 @@ impl KtileReader {
             }
         };
         check(header.headers_off, header.headers_len, "headers")?;
+        std::str::from_utf8(&mmap[header.headers_off as usize..(header.headers_off + header.headers_len) as usize])
+            .context("ktile header block is not UTF-8")?;
         let n = header.n_records as usize;
         check(
             header.line_offsets_off,
@@ -345,8 +347,8 @@ impl KtileReader {
     pub fn headers_block(&self) -> &str {
         let start = self.header.headers_off as usize;
         let end = start + self.header.headers_len as usize;
-        // SAFETY: bytes were written from a valid UTF-8 String during build.
-        unsafe { std::str::from_utf8_unchecked(&self.mmap[start..end]) }
+        // Validated in `open`; a file changed underneath us yields "".
+        std::str::from_utf8(&self.mmap[start..end]).unwrap_or("")
     }
 
     fn line_offsets(&self) -> &[u64] {
@@ -376,8 +378,8 @@ impl KtileReader {
     /// String it needs to send through the bounded channel.
     pub fn line_owned(&self, idx: usize) -> String {
         let bytes = self.line_bytes_to_vec(idx);
-        // SAFETY: ktile builder wrote bytes from a valid UTF-8 source line.
-        unsafe { String::from_utf8_unchecked(bytes) }
+        // The builder wrote UTF-8, but the file is not trusted blindly.
+        String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
     }
 
     /// Zero-copy fast path: copy line `idx` bytes directly into

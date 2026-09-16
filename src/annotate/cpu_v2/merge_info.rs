@@ -727,14 +727,14 @@ pub(crate) fn parse_existing_info(info: &str) -> IndexMap<String, String> {
                 }
             }
             b';' => {
-                push_info_pair(&mut map, bytes, pair_start, idx, eq_pos);
+                push_info_pair(&mut map, info, pair_start, idx, eq_pos);
                 pair_start = idx + 1;
                 eq_pos = None;
             }
             _ => unreachable!(),
         }
     }
-    push_info_pair(&mut map, bytes, pair_start, bytes.len(), eq_pos);
+    push_info_pair(&mut map, info, pair_start, bytes.len(), eq_pos);
 
     map
 }
@@ -742,7 +742,7 @@ pub(crate) fn parse_existing_info(info: &str) -> IndexMap<String, String> {
 #[inline]
 fn push_info_pair(
     map: &mut IndexMap<String, String>,
-    bytes: &[u8],
+    info: &str,
     pair_start: usize,
     pair_end: usize,
     eq_pos: Option<usize>,
@@ -750,17 +750,10 @@ fn push_info_pair(
     if pair_start >= pair_end {
         return;
     }
-    // SAFETY: input `bytes` came from `&str`, so any sub-slice is valid UTF-8.
+    // The bounds sit on ASCII delimiters, so slicing the `&str` is exact.
     let (key, value) = match eq_pos {
-        Some(eq) if eq > pair_start && eq < pair_end => {
-            let key = unsafe { std::str::from_utf8_unchecked(&bytes[pair_start..eq]) };
-            let value = unsafe { std::str::from_utf8_unchecked(&bytes[eq + 1..pair_end]) };
-            (key, value)
-        }
-        _ => {
-            let key = unsafe { std::str::from_utf8_unchecked(&bytes[pair_start..pair_end]) };
-            (key, "")
-        }
+        Some(eq) if eq > pair_start && eq < pair_end => (&info[pair_start..eq], &info[eq + 1..pair_end]),
+        _ => (&info[pair_start..pair_end], ""),
     };
     map.insert(key.to_string(), value.to_string());
 }

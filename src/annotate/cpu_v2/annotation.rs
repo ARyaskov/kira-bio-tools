@@ -570,8 +570,7 @@ pub fn extract_line_keys<'a>(
     // Chrom pre-filter (single memchr, no full parse).
     let bytes = line.as_bytes();
     let tab1 = memchr::memchr(b'\t', bytes)?;
-    // SAFETY: input was &str, prefix slice of UTF-8 bytes is valid UTF-8.
-    let chrom = unsafe { std::str::from_utf8_unchecked(&bytes[..tab1]) };
+    let chrom = &line[..tab1];
     let chr_id_early = ani
         .contig_id(chrom)
         .or_else(|| chr_name_to_id(chrom).map(u32::from));

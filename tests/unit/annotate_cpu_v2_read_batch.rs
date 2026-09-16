@@ -28,3 +28,13 @@
         let lines: Vec<&str> = b.iter().collect();
         assert_eq!(lines, vec!["a", "bb", "ccc"]);
     }
+
+    /// Raw bytes that are not UTF-8 are repaired on push, never trusted.
+    #[test]
+    fn invalid_utf8_bytes_are_repaired() {
+        let mut b = ReadBatch::with_capacity(64, 4);
+        b.push_line_bytes(b"1\t100\t.\tA\tG\xff\n");
+        b.push_line_bytes(b"1\t101\t.\tA\tC\r\n");
+        assert_eq!(b.line(0), "1\t100\t.\tA\tG\u{FFFD}");
+        assert_eq!(b.line(1), "1\t101\t.\tA\tC");
+    }
