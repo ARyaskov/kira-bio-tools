@@ -421,10 +421,25 @@ Commands: `query`, `cnv`.
   ```
 
 - `csq`  
-  Haplotype-aware consequence caller.  
+  Haplotype-aware consequence caller, a port of `bcftools csq`: the same GFF3
+  model (Ensembl-style `gene`/`transcript`/`exon`/`CDS`/UTR lines, phase
+  checks, incomplete-CDS trimming), per-sample haplotype trees combining
+  phased variants that share a codon or a frameshift, `INFO/BCSQ` strings
+  (`@pos` back references, `*` upstream stop, `&`-joined effects) and the
+  `FORMAT/BCSQ` bitmask decoded by `bcftools query -f '%TBCSQ'`.  
   Args: `[input]`, `-f/--fasta-ref`, `-g/--gff-annot`, `-l/--local-csq`,
-  `-p/--phase`, `-c/--custom-tag`, `-B/--brief-predictions`, `-H/--haplotypes`,
-  `--ncsq`, `-o/--output`, `-O/--output-type`, selectors, `--threads`.
+  `-p/--phase a|m|r|R|s` (default `r`), `-c/--custom-tag`, `-B/--trim-protein-seq INT`,
+  `-n/--ncsq INT` (default 15), `--force`, `--unify-chr-names 0|1` (default 1),
+  `-s/--samples` (`-` ignores genotypes), `-S/--samples-file`, `-i/-e`,
+  `-r/-R/--regions-overlap`, `-t/-T/--targets-overlap`, `-o/--output`,
+  `-O/--output-type b|u|z|v|t` (`t` is the tab-delimited `CSQ` listing),
+  `--no-version`, `--write-index`, `--threads`, `-v/--verbose 0-2`.  
+  Output matches bcftools 1.19 byte for byte on `tests/csq`, including its
+  quirks (stale `FORMAT/BCSQ` zeros, tie order of transcripts ending at the
+  same position). One deliberate difference: with a `-s` subset bcftools
+  writes the bits of UTR/splice/intron consequences into the columns of the
+  first samples in the file; kira writes them into the selected samples'
+  own columns.
 
 - `roh`  
   Runs of homozygosity / autozygosity.  

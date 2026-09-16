@@ -8,6 +8,7 @@ pub mod call;
 pub mod cli;
 pub mod cnv;
 pub mod csi;
+pub mod csq;
 pub mod fasta;
 pub mod filter;
 pub mod filter_arch;

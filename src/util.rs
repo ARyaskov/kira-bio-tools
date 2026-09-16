@@ -481,3 +481,29 @@ impl MmapWriter {
 #[cfg(test)]
 #[path = "../tests/unit/util.rs"]
 mod tests;
+
+/// Current UTC time in `ctime` layout (`Tue Sep 16 12:00:00 2026`), for
+/// `##…Command=…; Date=` header lines.
+pub fn now_string() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (h, m, s) = (rem / 3600, rem % 3600 / 60, rem % 60);
+    // Civil-from-days (Howard Hinnant), proleptic Gregorian calendar.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    const WD: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MON: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    format!("{} {} {:2} {:02}:{:02}:{:02} {}", WD[days.rem_euclid(7) as usize], MON[(mo - 1) as usize], d, h, m, s, y)
+}
