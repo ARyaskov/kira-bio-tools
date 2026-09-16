@@ -507,3 +507,163 @@ pub fn now_string() -> String {
     const MON: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     format!("{} {} {:2} {:02}:{:02}:{:02} {}", WD[days.rem_euclid(7) as usize], MON[(mo - 1) as usize], d, h, m, s, y)
 }
+
+/// `erfc` as in fdlibm `s_erf.c` (the algorithm behind glibc and msvcrt).
+pub fn erfc(x: f64) -> f64 {
+    const TINY: f64 = 1e-300;
+    const ERX: f64 = 8.45062911510467529297e-01;
+    const PP: [f64; 5] = [
+        1.28379167095512558561e-01,
+        -3.25042107247001499370e-01,
+        -2.84817495755985104766e-02,
+        -5.77027029648944159157e-03,
+        -2.37630166566501626084e-05,
+    ];
+    const QQ: [f64; 5] = [
+        3.97917223959155352819e-01,
+        6.50222499887672944485e-02,
+        5.08130628187576562776e-03,
+        1.32494738004321644526e-04,
+        -3.96022827877536812320e-06,
+    ];
+    const PA: [f64; 7] = [
+        -2.36211856075265944077e-03,
+        4.14856118683748331666e-01,
+        -3.72207876035701323847e-01,
+        3.18346619901161753674e-01,
+        -1.10894694282396677476e-01,
+        3.54783043256182359371e-02,
+        -2.16637559486879084300e-03,
+    ];
+    const QA: [f64; 6] = [
+        1.06420880400844228286e-01,
+        5.40397917702171048937e-01,
+        7.18286544141962662868e-02,
+        1.26171219808761642112e-01,
+        1.36370839120290507362e-02,
+        1.19844998467991074170e-02,
+    ];
+    const RA: [f64; 8] = [
+        -9.86494403484714822705e-03,
+        -6.93858572707181764372e-01,
+        -1.05586262253232909814e+01,
+        -6.23753324503260060396e+01,
+        -1.62396669462573470355e+02,
+        -1.84605092906711035994e+02,
+        -8.12874355063065934246e+01,
+        -9.81432934416914548592e+00,
+    ];
+    const SA: [f64; 8] = [
+        1.96512716674392571292e+01,
+        1.37657754143519042600e+02,
+        4.34565877475229228821e+02,
+        6.45387271733267880336e+02,
+        4.29008140027567833386e+02,
+        1.08635005541779435134e+02,
+        6.57024977031928170135e+00,
+        -6.04244152148580987438e-02,
+    ];
+    const RB: [f64; 7] = [
+        -9.86494292470009928597e-03,
+        -7.99283237680523006574e-01,
+        -1.77579549177547519889e+01,
+        -1.60636384855821916062e+02,
+        -6.37566443368389627722e+02,
+        -1.02509513161107724954e+03,
+        -4.83519191608651397019e+02,
+    ];
+    const SB: [f64; 7] = [
+        3.03380607434824582924e+01,
+        3.25792512996573918826e+02,
+        1.53672958608443695994e+03,
+        3.19985821950859553908e+03,
+        2.55305040643316442583e+03,
+        4.74528541206955367215e+02,
+        -2.24409524465858183362e+01,
+    ];
+    let hx = (x.to_bits() >> 32) as i32;
+    let ix = hx & 0x7fff_ffff;
+    if ix >= 0x7ff0_0000 {
+        return (((hx as u32) >> 31) << 1) as f64 + 1.0 / x;
+    }
+    if ix < 0x3feb_0000 {
+        if ix < 0x3c70_0000 {
+            return 1.0 - x;
+        }
+        let z = x * x;
+        let r = PP[0] + z * (PP[1] + z * (PP[2] + z * (PP[3] + z * PP[4])));
+        let s = 1.0 + z * (QQ[0] + z * (QQ[1] + z * (QQ[2] + z * (QQ[3] + z * QQ[4]))));
+        let y = r / s;
+        if hx < 0x3fd0_0000 {
+            return 1.0 - (x + x * y);
+        }
+        let mut r = x * y;
+        r += x - 0.5;
+        return 0.5 - r;
+    }
+    if ix < 0x3ff4_0000 {
+        let s = x.abs() - 1.0;
+        let p = PA[0] + s * (PA[1] + s * (PA[2] + s * (PA[3] + s * (PA[4] + s * (PA[5] + s * PA[6])))));
+        let q = 1.0 + s * (QA[0] + s * (QA[1] + s * (QA[2] + s * (QA[3] + s * (QA[4] + s * QA[5])))));
+        if hx >= 0 {
+            let z = 1.0 - ERX;
+            return z - p / q;
+        }
+        let z = ERX + p / q;
+        return 1.0 + z;
+    }
+    if ix < 0x403c_0000 {
+        let ax = x.abs();
+        let s = 1.0 / (ax * ax);
+        let (r, ss);
+        if ix < 0x4006_db6d {
+            r = RA[0] + s * (RA[1] + s * (RA[2] + s * (RA[3] + s * (RA[4] + s * (RA[5] + s * (RA[6] + s * RA[7]))))));
+            ss = 1.0 + s * (SA[0] + s * (SA[1] + s * (SA[2] + s * (SA[3] + s * (SA[4] + s * (SA[5] + s * (SA[6] + s * SA[7])))))));
+        } else {
+            if hx < 0 && ix >= 0x4018_0000 {
+                return 2.0 - TINY;
+            }
+            r = RB[0] + s * (RB[1] + s * (RB[2] + s * (RB[3] + s * (RB[4] + s * (RB[5] + s * RB[6])))));
+            ss = 1.0 + s * (SB[0] + s * (SB[1] + s * (SB[2] + s * (SB[3] + s * (SB[4] + s * (SB[5] + s * SB[6]))))));
+        }
+        let z = f64::from_bits(ax.to_bits() & 0xffff_ffff_0000_0000);
+        let rr = (-z * z - 0.5625).exp() * ((z - ax) * (z + ax) + r / ss).exp();
+        return if hx > 0 { rr / ax } else { 2.0 - rr / ax };
+    }
+    if hx > 0 { TINY * TINY } else { 2.0 - TINY }
+}
+
+/// bcftools `phred_score`: `-4.3429 * ln(prob)`, capped at 99.
+pub fn phred_score(prob: f64) -> f64 {
+    if prob == 0.0 {
+        return 99.0;
+    }
+    let p = -4.3429 * prob.ln();
+    if p > 99.0 { 99.0 } else { p }
+}
+
+/// C `%.*e`: mantissa with `prec` decimals and a signed two-digit exponent.
+pub fn fmt_e(v: f64, prec: usize) -> String {
+    if !v.is_finite() {
+        return if v.is_nan() { "nan".into() } else if v > 0.0 { "inf".into() } else { "-inf".into() };
+    }
+    let s = format!("{:.*e}", prec, v);
+    let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
+    let e: i32 = exp.parse().unwrap_or(0);
+    format!("{}e{}{:02}", mant, if e < 0 { '-' } else { '+' }, e.abs())
+}
+
+/// Line reader over a plain or gzip/BGZF-compressed text file.
+pub fn open_text_maybe_gz(path: &Path) -> anyhow::Result<Box<dyn std::io::BufRead>> {
+    use anyhow::Context as _;
+    use std::io::Read as _;
+    let mut f = std::fs::File::open(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut magic = [0u8; 2];
+    let n = f.read(&mut magic)?;
+    let f = std::fs::File::open(path)?;
+    if n == 2 && magic == [0x1f, 0x8b] {
+        Ok(Box::new(std::io::BufReader::new(flate2::read::MultiGzDecoder::new(f))))
+    } else {
+        Ok(Box::new(std::io::BufReader::new(f)))
+    }
+}

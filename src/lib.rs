@@ -1,4 +1,5 @@
 
+pub mod af_file;
 pub mod align;
 pub mod annotate;
 pub mod bam;
@@ -11,6 +12,7 @@ pub mod csi;
 pub mod csq;
 pub mod fasta;
 pub mod filter;
+pub mod hmm;
 pub mod filter_arch;
 pub mod kbi;
 pub mod norm;

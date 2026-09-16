@@ -4,11 +4,10 @@
 //! operands, so out-of-range edge cases behave the same way.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::BufRead;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use fxhash::FxHashMap;
 
 pub const STRAND_REV: u8 = 0;
@@ -661,17 +660,7 @@ struct Parser<'a> {
 }
 
 fn open_text(path: &Path) -> Result<Box<dyn BufRead>> {
-    let mut f = File::open(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    let mut magic = [0u8; 2];
-    let n = f.read(&mut magic)?;
-    let f = File::open(path)?;
-    if n == 2 && magic == [0x1f, 0x8b] {
-        Ok(Box::new(BufReader::new(flate2::read::MultiGzDecoder::new(
-            f,
-        ))))
-    } else {
-        Ok(Box::new(BufReader::new(f)))
-    }
+    crate::util::open_text_maybe_gz(path)
 }
 
 fn warn_once(count: &mut u32, verbosity: u8, msg: impl FnOnce() -> String) {

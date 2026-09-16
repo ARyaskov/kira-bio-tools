@@ -442,15 +442,33 @@ Commands: `query`, `cnv`.
   own columns.
 
 - `roh`  
-  Runs of homozygosity / autozygosity.  
-  Args: `<input> [-- <passthrough>...]`, `--AF-tag`, `--AF-file`, `--AF-dflt`,
-  `-G/--GTs-only`, `-I/--ignore-homref`, `--include-noalt`, `-X/--skip-indels`,
-  `-V/--viterbi-training`, `-M/--rec-rate`, `-a/--hw-to-az`, `-H/--az-to-hw`,
-  `-b/--buffer-size`, `-m/--genetic-map`, `-E/--estimate-AF`, `-o/--output`,
-  `-O/--output-type`, selectors.
+  Runs of autozygosity, a port of `bcftools roh` on the same two-state HMM
+  (`HW`/`AZ`, precomputed transition powers, genetic-map or constant
+  recombination rate, Viterbi + forward-backward with bcftools' quality
+  bookkeeping, `-b` buffering with snapshots, `-V` Viterbi training).
+  Output is bcftools' `# RG`/`# ST` tables (`-Oz` bgzips them) and matches
+  bcftools 1.19 byte for byte on `tests/roh`.  
+  Args: `[input] [-- <bcftools options>...]`, `--AF-dflt`, `--AF-tag`,
+  `--AF-file`, `-b/--buffer-size`, `-e/--estimate-AF [GT,|PL,]FILE|-`,
+  `-G/--GTs-only`, `-i/--ignore-homref`, `-I/--skip-indels`,
+  `--include-noalt`, `-m/--genetic-map`, `-M/--rec-rate`, `-a/--hw-to-az`,
+  `-H/--az-to-hw`, `-V/--viterbi-training`, `--include/--exclude`,
+  `-o/--output`, `-O/--output-type s|r|z`, `-s/-S`, `-r/-R/--regions-overlap`,
+  `-t/-T/--targets-overlap`, `--threads`. The short letters follow bcftools
+  (`-e` estimates AF, `-i` ignores hom-ref, `-I` skips indels).
 
 - `cnv`  
-  Copy-number variation caller. Takes a bcftools `cnv` command line verbatim.
+  Copy-number variation from Illumina BAF/LRR, a port of `bcftools cnv`:
+  CN0..CN3 states (16 paired states with `-c`), per-genotype Gaussian BAF
+  mixtures, LRR smoothing, `-O` aberrant-cell-fraction estimation and the
+  `dat.*.tab`/`cn.*.tab`/`summary*.tab` outputs (plus the plotting
+  scripts). Matches bcftools 1.19 byte for byte on `tests/cnv`.  
+  Args: `[-- ]<bcftools cnv options> FILE.vcf`: `-s/--query-sample`,
+  `-c/--control-sample`, `-f/--AF-file`, `-o/--output-dir`,
+  `-p/--plot-threshold`, `-a/--aberrant`, `-b/--BAF-weight`, `-d/--BAF-dev`,
+  `-e/--err-prob`, `-k/--LRR-dev`, `-l/--LRR-weight`, `-L/--LRR-smooth-win`,
+  `-O/--optimize`, `-P/--same-prob`, `-x/--xy-prob`, `-r/-R/--regions-overlap`,
+  `-t/-T/--targets-overlap`.
 
 - `polysomy`  
   Detect contamination and whole-chromosome aberrations.  
