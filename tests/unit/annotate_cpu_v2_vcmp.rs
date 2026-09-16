@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn d<'a>(a: &'a str, b: &'a str) -> Option<RefDiff<'a>> {

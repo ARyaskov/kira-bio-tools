@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::vcf::parse_vcf_line;
 

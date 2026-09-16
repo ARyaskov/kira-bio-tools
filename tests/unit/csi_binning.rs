@@ -1,4 +1,3 @@
-
 use super::*;
 
 const B: u64 = 1 << 16; // one BGZF block in virtual-position units

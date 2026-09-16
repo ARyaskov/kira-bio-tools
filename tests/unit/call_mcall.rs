@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn site_ref_only(n_smpl: usize) -> CallSite {

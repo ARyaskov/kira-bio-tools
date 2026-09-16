@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::annotate::cpu_v2::{ParsedFormat, ParsedSample};
 use std::collections::HashMap;

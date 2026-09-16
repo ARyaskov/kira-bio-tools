@@ -1,4 +1,3 @@
-
 use super::*;
 
 const REF: &[u8] = b"TTGACCGTAGACGTACGTACGTACGTACGTACGGATCCATTG";

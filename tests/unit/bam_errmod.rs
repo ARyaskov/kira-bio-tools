@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn bases(n_ref: usize, n_alt: usize, q: u8) -> Vec<u16> {

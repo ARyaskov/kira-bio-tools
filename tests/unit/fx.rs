@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// The vendored hasher matches the `fxhash` crate bit for bit; the

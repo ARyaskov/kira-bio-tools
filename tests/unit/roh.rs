@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn rec(chrom: &str, pos: u32, alt: &str, info: &str, fmt: &str, samples: &[&str]) -> VcfRecord {

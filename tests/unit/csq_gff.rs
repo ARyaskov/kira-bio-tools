@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn write_gff(dir: &std::path::Path, text: &str) -> std::path::PathBuf {

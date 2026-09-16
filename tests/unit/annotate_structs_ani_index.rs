@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::annotate::structs::ani::make_variant_key;
 

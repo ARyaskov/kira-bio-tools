@@ -1,4 +1,3 @@
-
 use super::*;
 use noodles_sam::header::record::value::{Map, map::ReadGroup};
 

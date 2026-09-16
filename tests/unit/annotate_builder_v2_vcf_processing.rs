@@ -1,4 +1,3 @@
-
 use super::process_vcf_line_multiallelic_simd;
 use crate::annotate::builder_v2::StringPool;
 use crate::annotate::builder_v2::entry_processing::{EntryEntry, make_position_key};

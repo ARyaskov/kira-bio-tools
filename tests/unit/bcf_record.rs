@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::bcf::header::parse_header_to_dict;
 
