@@ -5,8 +5,9 @@ use std::time::Instant;
 
 use crate::cli::args::{IndexArgs, RegionIndexArgs};
 use crate::csi::{BinIndex, IndexKind, build_index, build_index_in_memory, find_index_for};
+use crate::kbi::build_kbi_index_with_bitmap;
 use crate::vcf::header::HeaderInfo;
-use crate::{VcfFormat, VcfReader, build_kbi_index, detect_format};
+use crate::{VcfFormat, VcfReader, detect_format};
 
 pub fn cmd_index(args: IndexArgs) -> Result<()> {
     let mut cfg = IndexCompatCfg {
@@ -220,10 +221,11 @@ pub fn cmd_region_index(args: RegionIndexArgs) -> Result<()> {
                 let kbi_path = args.input.with_extension("kbi");
                 eprintln!("Building KBI index: {:?}", kbi_path);
                 let kbi_start = Instant::now();
-                let index = build_kbi_index(&args.input, &kbi_path)?;
+                let (index, bitmap) = build_kbi_index_with_bitmap(&args.input, &kbi_path)?;
                 eprintln!("KBI build time: {:.3}s", kbi_start.elapsed().as_secs_f64());
                 eprintln!("Entries: {}", index.len());
                 eprintln!("Bytes/key: {:.2}", index.bytes_per_key());
+                write_bitmap(&bitmap, &kbi_path)?;
             }
         }
         VcfFormat::Plain | VcfFormat::Gzip => {
@@ -233,10 +235,11 @@ pub fn cmd_region_index(args: RegionIndexArgs) -> Result<()> {
 
             eprintln!("Building KBI index: {:?}", kbi_path);
             let kbi_start = Instant::now();
-            let index = build_kbi_index(&args.input, &kbi_path)?;
+            let (index, bitmap) = build_kbi_index_with_bitmap(&args.input, &kbi_path)?;
             eprintln!("KBI build time: {:.3}s", kbi_start.elapsed().as_secs_f64());
             eprintln!("Entries: {}", index.len());
             eprintln!("Bytes/key: {:.2}", index.bytes_per_key());
+            write_bitmap(&bitmap, &kbi_path)?;
 
             if args.csi {
                 eprintln!("Warning: CSI index requires BGZF compression. Use bgzip first.");
@@ -244,5 +247,18 @@ pub fn cmd_region_index(args: RegionIndexArgs) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// The position bitmap (`.kbm`) next to a `.kbi`.
+fn write_bitmap(bitmap: &crate::kbi::PosBitmap, kbi_path: &std::path::Path) -> Result<()> {
+    let kbm_path = kbi_path.with_extension("kbm");
+    bitmap.save(&kbm_path)?;
+    eprintln!(
+        "Position bitmap: {:?} ({} positions, {} spanned bases)",
+        kbm_path,
+        bitmap.len(),
+        bitmap.tail_len()
+    );
     Ok(())
 }

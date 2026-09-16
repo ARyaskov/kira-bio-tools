@@ -231,7 +231,13 @@ Commands: `query`, `cnv`.
 - `region-index` (alias `kindex`)  
   Extended regional index builder.  
   Args: `<input>`, `-o/--output`, `-p/--preset`, `-f/--force`, `-s/--min-shift`,
-  `-d/--depth`, `-C/--csi`, `--no-kbi`.
+  `-d/--depth`, `-C/--csi`, `--no-kbi`.  
+  Next to the `.kbi` it writes a `.kbm` position bitmap of the same pass:
+  per contig a roaring-style set (65536-position chunks stored as sorted
+  arrays or bitsets) of the record positions, plus the bases REF alleles
+  span beyond POS. Membership, "any record in a range" and set algebra
+  (and/or/and-not) run on the containers without touching the data file;
+  `filter -M`, `isec` and `gtcheck -g` use it (see Performance notes).
 
 - `region-query` (alias `rquery`)  
   Query an indexed file by region list.  
@@ -284,7 +290,11 @@ Commands: `query`, `cnv`.
   Args: `<input>`, `-i/--include`, `-e/--exclude`, `--expr`, `-s/--soft-filter`,
   `-m/--mode`, `-S/--set-GTs`, `-g/--SnpGap`, `-G/--IndelGap`, `--mask`,
   `-M/--mask-file`, `--mask-overlap`, `-o/--output`, `-O/--output-type`,
-  `--threads`, `--gpu`, `-W/--write-index`.
+  `--threads`, `--gpu`, `-W/--write-index`.  
+  `-M` takes a BED/VCF mask, a `.kbi` (record lines fetched by offset) or a
+  `.kbm` position bitmap from `region-index`: the mask records' POS and REF
+  spans are then answered by a set lookup, with the same result as the
+  VCF mask for every `--mask-overlap` mode.
 
 - `norm` (alias `N`)  
   Left-align, split/join multiallelics, check REF, remove duplicates.  
@@ -582,7 +592,13 @@ Commands: `query`, `cnv`.
   one BAQ result through a per-thread cache (`KIRA_BT_TIMING=1` reports the
   hit count).
 - `gtcheck -g` walks the panel in lock-step with the query; both inputs must
-  be position-sorted with the same chromosome order.
+  be position-sorted with the same chromosome order. With a `.kbm` next to
+  the panel, query sites the panel has no record at are counted as
+  unmatched without parsing their genotypes.
+- `isec` with `.kbm` bitmaps next to every input a record must be present in
+  (`-n=N`/`+N` equal to the number of files, or the `1`s of `-n ~MASK`)
+  intersects the bitmaps first and drops records outside the intersection
+  before parsing them.
 
 ## Tests
 

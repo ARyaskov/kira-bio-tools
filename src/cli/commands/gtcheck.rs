@@ -963,10 +963,27 @@ pub fn cmd_gtcheck(args: GtcheckArgs) -> Result<()> {
         rng: Lrand48::new(0),
     };
 
+    // With a `.kbm` next to the -g file, query sites it has no record at are
+    // counted as unmatched without parsing their genotypes.
+    let panel_sites = args
+        .genotypes
+        .as_deref()
+        .and_then(crate::kbi::PosBitmap::load_sidecar);
+
     // Walk the query; -g sites are looked up by position and paired by alleles.
     while let Some(line) = qreader.read_line()? {
         if line.is_empty() || line.as_bytes()[0] == b'#' || !keep(&line) {
             continue;
+        }
+        if let Some(bm) = &panel_sites {
+            let mut it = line.splitn(3, '\t');
+            let chrom = it.next().unwrap_or("");
+            let pos = it.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+            if !bm.contains(chrom, pos) {
+                contigs.insert(chrom);
+                gc.cnt.no_match += 1;
+                continue;
+            }
         }
         let Some(q) = Rec::parse(line) else { continue };
         if let Some(ps) = panel.as_mut() {

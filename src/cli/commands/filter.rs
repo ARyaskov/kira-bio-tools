@@ -801,9 +801,18 @@ struct KbiMask {
     has_data: bool,
 }
 
+/// A `.kbm` position bitmap: the mask records' POS and REF spans, tested
+/// without touching the mask file.
+struct BitmapMask {
+    map: crate::kbi::PosBitmap,
+    overlap: u8,
+    negate: bool,
+}
+
 enum MaskSource {
     Regions(MaskConfig),
     Kbi(KbiMask),
+    Bitmap(BitmapMask),
 }
 
 fn load_mask(args: &FilterArgs) -> Result<Option<MaskSource>> {
@@ -831,6 +840,14 @@ fn load_mask(args: &FilterArgs) -> Result<Option<MaskSource>> {
             path_str = rest.to_string();
         }
         let mask_path = PathBuf::from(&path_str);
+        if mask_path.extension().is_some_and(|e| e == "kbm") {
+            let map = crate::kbi::PosBitmap::load(&mask_path)?;
+            return Ok(Some(MaskSource::Bitmap(BitmapMask {
+                map,
+                overlap: args.mask_overlap.unwrap_or(1),
+                negate,
+            })));
+        }
         if let Some(kbi_mask) = try_load_kbi_mask(&mask_path, args.mask_overlap, negate)? {
             return Ok(Some(MaskSource::Kbi(kbi_mask)));
         }
@@ -887,7 +904,17 @@ fn mask_pass(mask: &MaskSource, rec: &VcfRecord) -> bool {
     match mask {
         MaskSource::Regions(cfg) => mask_pass_regions(cfg, rec),
         MaskSource::Kbi(cfg) => mask_pass_kbi(cfg, rec),
+        MaskSource::Bitmap(cfg) => mask_pass_bitmap(cfg, rec),
     }
+}
+
+fn mask_pass_bitmap(mask: &BitmapMask, rec: &VcfRecord) -> bool {
+    let (beg, end) = mask_bounds(rec, mask.overlap);
+    // Bitmap positions are 1-based POS values; the bounds are 0-based.
+    let hit = mask
+        .map
+        .any_span_in_range(&rec.chrom, beg.saturating_add(1), end.saturating_add(1));
+    if mask.negate { hit } else { !hit }
 }
 
 fn mask_pass_regions(mask: &MaskConfig, rec: &VcfRecord) -> bool {
@@ -909,11 +936,13 @@ fn mask_pass_kbi(mask: &KbiMask, rec: &VcfRecord) -> bool {
     let Some(chr_id) = mask.index.contigs().id(&rec.chrom) else {
         return !mask.negate;
     };
+    // Index keys are 1-based POS values; the bounds are 0-based.
+    let (beg1, end1) = (beg.saturating_add(1), end.saturating_add(1));
     let mut hit = false;
     if !mask.has_data {
-        hit = mask.index.has_range(chr_id, beg, end);
+        hit = mask.index.has_range(chr_id, beg1, end1);
     } else {
-        let hits = mask.index.range(chr_id, beg, end);
+        let hits = mask.index.range(chr_id, beg1, end1);
         let mut fetcher = match mask.fetcher.as_ref() {
             Some(f) => f.lock().unwrap_or_else(|e| e.into_inner()),
             None => return !mask.negate,

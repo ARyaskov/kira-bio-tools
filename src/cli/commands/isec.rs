@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Collapse {
@@ -115,6 +116,9 @@ struct Source {
     apply_filters: Option<Vec<String>>,
     include: Option<FilterEngine>,
     exclude: Option<FilterEngine>,
+    /// Positions that can be output at all (from the inputs' `.kbm`
+    /// bitmaps); records elsewhere are dropped before any parsing.
+    keep: Option<Arc<crate::kbi::PosBitmap>>,
 }
 
 impl Source {
@@ -126,6 +130,14 @@ impl Source {
             };
             if line.is_empty() || line.as_bytes()[0] == b'#' {
                 continue;
+            }
+            if let Some(bm) = &self.keep {
+                let mut it = line.splitn(3, '\t');
+                let chrom = it.next().unwrap_or("");
+                let pos = it.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+                if !bm.contains(chrom, pos) {
+                    continue;
+                }
             }
             if let Some(rf) = &self.region
                 && !rf.line_passes_mode(&line, self.regions_overlap)
@@ -230,6 +242,7 @@ pub fn cmd_isec(args: IsecArgs) -> Result<()> {
         .transpose()?
         .unwrap_or(OutputKind::Vcf);
 
+    let keep = shared_positions(&inputs, &nfiles_spec);
     let mut contigs = ContigDict::new();
     let mut sources: Vec<Source> = Vec::with_capacity(n_files);
     for p in &inputs {
@@ -263,6 +276,7 @@ pub fn cmd_isec(args: IsecArgs) -> Result<()> {
             apply_filters: apply_filters.clone(),
             include,
             exclude,
+            keep: keep.clone(),
         };
         s.advance(&mut contigs)?;
         sources.push(s);
@@ -413,6 +427,34 @@ enum NSpec {
     AtLeast(usize),
     AtMost(usize),
     Mask(Vec<Option<bool>>),
+}
+
+/// With a `.kbm` position bitmap next to every input a record must be
+/// present in (`-n=N`/`+N` equal to the number of files, or the `1`s of a
+/// `~MASK`), the intersection of those bitmaps: no site outside it can be
+/// output, so its records are skipped without being parsed.
+fn shared_positions(inputs: &[PathBuf], spec: &NSpec) -> Option<Arc<crate::kbi::PosBitmap>> {
+    let required: Vec<usize> = match spec {
+        NSpec::Exact(k) | NSpec::AtLeast(k) if *k == inputs.len() => (0..inputs.len()).collect(),
+        NSpec::Mask(m) => m
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| (*b == Some(true)).then_some(i))
+            .collect(),
+        _ => Vec::new(),
+    };
+    if required.len() < 2 {
+        return None;
+    }
+    let mut acc: Option<crate::kbi::PosBitmap> = None;
+    for &i in &required {
+        let bm = crate::kbi::PosBitmap::load_sidecar(&inputs[i])?;
+        acc = Some(match acc {
+            Some(a) => a.and(&bm),
+            None => bm,
+        });
+    }
+    acc.map(Arc::new)
 }
 
 fn parse_nfiles(s: Option<&str>, n: usize, complement: bool) -> Result<NSpec> {
