@@ -4,7 +4,11 @@
 
 use noodles_sam::alignment::record::cigar::op::Kind;
 
-use crate::align::{GlocalParams, encode_nt, glocal};
+use crate::align::{GlocalParams, GlocalScratch, encode_nt, glocal_with};
+
+thread_local! {
+    static SCRATCH: std::cell::RefCell<GlocalScratch> = std::cell::RefCell::new(GlocalScratch::default());
+}
 
 /// Apply BAQ in place: each aligned base keeps min(qual, extended BAQ);
 /// inserted and soft-clipped bases get 0, as in htslib. `ref_window` holds
@@ -77,7 +81,8 @@ pub fn apply_baq_hmm(seq: &[u8], qual: &mut [u8], cigar: &[(Kind, u32)], ref_win
     // `sam_prob_realn`: Illumina parameters, PacBio-CCS-like ones past 1 kb.
     let d = if l_qseq > 1000 { 1e-7 } else { 0.001 };
     let conf = GlocalParams { d, e: 0.1, bw: bw as usize };
-    let Some(res) = glocal(&r, &s, Some(qual), &conf, true) else { return false };
+    let res = SCRATCH.with(|sc| glocal_with(&mut sc.borrow_mut(), &r, &s, Some(qual), &conf, true));
+    let Some(res) = res else { return false };
 
     // Extended BAQ (`BAQ_EXTEND`): over a run of adjacent M/=/X ops a base's
     // BAQ is the smaller of the running maxima from the left and from the

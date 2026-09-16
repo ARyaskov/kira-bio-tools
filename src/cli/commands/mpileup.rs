@@ -558,6 +558,7 @@ fn run_streaming<W: Write>(
         rng: std::sync::Mutex::new(Drand48::new(args.seed as u32)),
         caller: &caller,
         annotate,
+        fmt_keys: format_keys(annotate).join(":"),
         fasta: fasta.as_deref(),
         ref_names: &ref_names,
         sample_keep: &sample_keep,
@@ -715,6 +716,7 @@ fn run_prepared<W: Write>(
         rng: std::sync::Mutex::new(Drand48::new(args.seed as u32)),
         caller: &caller,
         annotate,
+        fmt_keys: format_keys(annotate).join(":"),
         fasta,
         ref_names: &ref_names,
         sample_keep: &sample_keep,
@@ -837,6 +839,8 @@ struct EmitCtx<'a> {
     /// Multiallelic caller (bcftools `call -m`) applied to every site.
     caller: &'a Caller,
     annotate: &'a AnnotateSpec,
+    /// FORMAT column of the kira layout, built once.
+    fmt_keys: String,
     fasta: Option<&'a Fasta>,
     ref_names: &'a [String],
     sample_keep: &'a [bool],
@@ -1074,6 +1078,179 @@ fn compute_chunks(records_per_sample: &[std::sync::Arc<Vec<LiveRead>>], n_chunks
 }
 
 /// FORMAT keys in output order for the requested annotations.
+#[inline]
+fn push_u32(out: &mut Vec<u8>, v: u32) {
+    let mut b = itoa::Buffer::new();
+    out.extend_from_slice(b.format(v).as_bytes());
+}
+
+fn push_u32_list(out: &mut Vec<u8>, v: &[u32]) {
+    for (i, &x) in v.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        push_u32(out, x);
+    }
+}
+
+/// ref-fwd, ref-rev, alt-fwd, alt-rev from per-allele counts and forward counts.
+fn push_dp4(out: &mut Vec<u8>, counts: &[u32], fwd: &[u32]) {
+    let rf = fwd.first().copied().unwrap_or(0);
+    let rr = counts.first().copied().unwrap_or(0).saturating_sub(rf);
+    let af: u32 = fwd.iter().skip(1).sum();
+    let ar: u32 = counts.iter().skip(1).zip(fwd.iter().skip(1)).map(|(c, f)| c.saturating_sub(*f)).sum();
+    push_u32_list(out, &[rf, rr, af, ar]);
+}
+
+fn push_gt(out: &mut Vec<u8>, alleles_kept: &[u32], gt: Option<(u32, u32)>) {
+    let Some(gt) = gt else {
+        out.extend_from_slice(b"./.");
+        return;
+    };
+    let gi = alleles_kept.iter().position(|&x| x == gt.0).unwrap_or(0) as u32;
+    let gj = alleles_kept.iter().position(|&x| x == gt.1).unwrap_or(0) as u32;
+    push_u32(out, gi.min(gj));
+    out.push(b'/');
+    push_u32(out, gi.max(gj));
+}
+
+fn push_pl(out: &mut Vec<u8>, pl: &[i32]) {
+    let mut b = itoa::Buffer::new();
+    for (i, &v) in pl.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        if v == PL_MISSING {
+            out.push(b'.');
+        } else {
+            out.extend_from_slice(b.format(v).as_bytes());
+        }
+    }
+}
+
+/// One sample column of the kira layout in [`format_keys`] order, written
+/// straight into the record buffer.
+#[allow(clippy::too_many_arguments)]
+fn push_sample_col(
+    out: &mut Vec<u8>,
+    annotate: &AnnotateSpec,
+    alleles_kept: &[u32],
+    gt: Option<(u32, u32)>,
+    depth: u32,
+    counts: &[u32],
+    fwd: &[u32],
+    quals: &[u32],
+    n_softclip: u32,
+    pl: &[i32],
+    gq: u32,
+) {
+    let rev = |i: usize| counts[i].saturating_sub(fwd[i]);
+    push_gt(out, alleles_kept, gt);
+    if annotate.fmt_dp {
+        out.push(b':');
+        push_u32(out, depth);
+    }
+    if annotate.fmt_ad {
+        out.push(b':');
+        push_u32_list(out, counts);
+    }
+    if annotate.fmt_adf {
+        out.push(b':');
+        push_u32_list(out, fwd);
+    }
+    if annotate.fmt_adr {
+        out.push(b':');
+        for i in 0..counts.len() {
+            if i > 0 {
+                out.push(b',');
+            }
+            push_u32(out, rev(i));
+        }
+    }
+    if annotate.fmt_dv {
+        out.push(b':');
+        push_u32(out, counts.iter().skip(1).sum());
+    }
+    if annotate.fmt_dp4 {
+        out.push(b':');
+        push_dp4(out, counts, fwd);
+    }
+    if annotate.fmt_qs {
+        out.push(b':');
+        push_u32_list(out, quals);
+    }
+    if annotate.fmt_sp {
+        out.push(b':');
+        let rf = fwd.first().copied().unwrap_or(0);
+        let rr = counts.first().copied().unwrap_or(0).saturating_sub(rf);
+        let alt_fwd: u32 = fwd.iter().skip(1).sum();
+        let alt_rev: u32 = (1..counts.len()).map(rev).sum();
+        let _ = write!(out, "{}", strand_bias_phred(rf, rr, alt_fwd, alt_rev));
+    }
+    if annotate.fmt_scr {
+        out.push(b':');
+        push_u32(out, n_softclip);
+    }
+    if annotate.fmt_pl {
+        out.push(b':');
+        push_pl(out, pl);
+    }
+    if annotate.fmt_gq {
+        out.push(b':');
+        let _ = write!(out, "{}", gq);
+    }
+}
+
+/// The column of a sample without coverage.
+fn push_empty_sample_col(out: &mut Vec<u8>, annotate: &AnnotateSpec, n_alleles: usize) {
+    let zeros = |out: &mut Vec<u8>| {
+        for i in 0..n_alleles {
+            if i > 0 {
+                out.push(b',');
+            }
+            out.push(b'0');
+        }
+    };
+    out.extend_from_slice(b"./.");
+    if annotate.fmt_dp {
+        out.extend_from_slice(b":0");
+    }
+    if annotate.fmt_ad {
+        out.push(b':');
+        zeros(out);
+    }
+    if annotate.fmt_adf {
+        out.push(b':');
+        zeros(out);
+    }
+    if annotate.fmt_adr {
+        out.push(b':');
+        zeros(out);
+    }
+    if annotate.fmt_dv {
+        out.extend_from_slice(b":0");
+    }
+    if annotate.fmt_dp4 {
+        out.extend_from_slice(b":0,0,0,0");
+    }
+    if annotate.fmt_qs {
+        out.push(b':');
+        zeros(out);
+    }
+    if annotate.fmt_sp {
+        out.extend_from_slice(b":0");
+    }
+    if annotate.fmt_scr {
+        out.extend_from_slice(b":0");
+    }
+    if annotate.fmt_pl {
+        out.extend_from_slice(b":0");
+    }
+    if annotate.fmt_gq {
+        out.extend_from_slice(b":0");
+    }
+}
+
 fn format_keys(annotate: &AnnotateSpec) -> Vec<&'static str> {
     let mut keys = vec!["GT"];
     if annotate.fmt_dp { keys.push("DP"); }
@@ -1090,24 +1267,6 @@ fn format_keys(annotate: &AnnotateSpec) -> Vec<&'static str> {
     keys
 }
 
-/// Sample column for a sample with no reads at the site.
-fn empty_sample_col(annotate: &AnnotateSpec, n_alleles: usize) -> String {
-    let zeros = vec!["0"; n_alleles].join(",");
-    let mut parts: Vec<String> = vec!["./.".into()];
-    if annotate.fmt_dp { parts.push("0".into()); }
-    if annotate.fmt_ad { parts.push(zeros.clone()); }
-    if annotate.fmt_adf { parts.push(zeros.clone()); }
-    if annotate.fmt_adr { parts.push(zeros.clone()); }
-    if annotate.fmt_dv { parts.push("0".into()); }
-    if annotate.fmt_dp4 { parts.push("0,0,0,0".into()); }
-    if annotate.fmt_qs { parts.push(zeros); }
-    if annotate.fmt_sp { parts.push("0".into()); }
-    if annotate.fmt_scr { parts.push("0".into()); }
-    if annotate.fmt_pl { parts.push("0".into()); }
-    if annotate.fmt_gq { parts.push("0".into()); }
-    parts.join(":")
-}
-
 fn join_u32(v: &[u32]) -> String {
     v.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
 }
@@ -1119,27 +1278,6 @@ fn dp4_of(counts: &[u32], fwd: &[u32]) -> String {
     let af: u32 = fwd.iter().skip(1).sum();
     let ar: u32 = counts.iter().skip(1).zip(fwd.iter().skip(1)).map(|(c, f)| c.saturating_sub(*f)).sum();
     format!("{rf},{rr},{af},{ar}")
-}
-
-/// Per-sample FORMAT values shared by SNV and indel records.
-#[allow(clippy::too_many_arguments)]
-fn sample_parts(annotate: &AnnotateSpec, gt: String, depth: u32, counts: &[u32], fwd: &[u32], quals: &[u32], n_softclip: u32, pl: &str, gq: u32) -> Vec<String> {
-    let rev: Vec<u32> = counts.iter().zip(fwd.iter()).map(|(c, f)| c.saturating_sub(*f)).collect();
-    let alt_fwd: u32 = fwd.iter().skip(1).sum();
-    let alt_rev: u32 = rev.iter().skip(1).sum();
-    let mut parts: Vec<String> = vec![gt];
-    if annotate.fmt_dp { parts.push(depth.to_string()); }
-    if annotate.fmt_ad { parts.push(join_u32(counts)); }
-    if annotate.fmt_adf { parts.push(join_u32(fwd)); }
-    if annotate.fmt_adr { parts.push(join_u32(&rev)); }
-    if annotate.fmt_dv { parts.push(counts.iter().skip(1).sum::<u32>().to_string()); }
-    if annotate.fmt_dp4 { parts.push(dp4_of(counts, fwd)); }
-    if annotate.fmt_qs { parts.push(join_u32(quals)); }
-    if annotate.fmt_sp { parts.push(strand_bias_phred(fwd.first().copied().unwrap_or(0), rev.first().copied().unwrap_or(0), alt_fwd, alt_rev).to_string()); }
-    if annotate.fmt_scr { parts.push(n_softclip.to_string()); }
-    if annotate.fmt_pl { parts.push(pl.to_string()); }
-    if annotate.fmt_gq { parts.push(gq.to_string()); }
-    parts
 }
 
 /// Site-level INFO: depth, mean MAPQ, optional allelic depths by strand and soft-clip count.
@@ -1262,34 +1400,36 @@ fn emit_site(
     } else {
         alleles_kept[1..].iter().map(|&a| (b"ACGT"[cand[a as usize]] as char).to_string()).collect::<Vec<_>>().join(",")
     };
-    let mut per_sample_cols: Vec<String> = Vec::with_capacity(kept_samples.len());
-    for (k, &si) in kept_samples.iter().enumerate() {
-        let s = &site.per_sample[si];
-        if s.depth == 0 {
-            per_sample_cols.push(empty_sample_col(annotate, n_alleles));
-            continue;
-        }
-        let counts: Vec<u32> = alleles_kept.iter().map(|&a| s.base_counts[cand[a as usize]]).collect();
-        let fwd: Vec<u32> = alleles_kept.iter().map(|&a| s.fwd_counts[cand[a as usize]]).collect();
-        let quals: Vec<u32> = alleles_kept.iter().map(|&a| s.base_quals[cand[a as usize]]).collect();
-        let gt = gt_string(&alleles_kept, gts[k]);
-        let pl = pl_string_or_ref(&pls_sub[k], &call_site.pls[k * n_gt..(k + 1) * n_gt]);
-        let parts = sample_parts(annotate, gt, s.depth, &counts, &fwd, &quals, s.n_softclip, &pl, gqs[k]);
-        per_sample_cols.push(parts.join(":"));
-    }
-
     let ad: Vec<u32> = alleles_kept.iter().map(|&a| agg.base_counts[cand[a as usize]]).collect();
     let adf: Vec<u32> = alleles_kept.iter().map(|&a| agg.fwd_counts[cand[a as usize]]).collect();
     let info = site_info(total, mean_mq, &ad, &adf, agg.n_softclip, annotate, false);
-    let fmt_keys = format_keys(annotate);
 
     let snv_emit = any_variant || !args.variants_only;
     if snv_emit && !(args.variants_only && site_qual < args.min_qual as f64) {
         let qual_str = fmt_qual(site_qual);
         let _ = write!(out, "{}\t{}\t.\t{}\t{}\t{}\t.\t{}\t{}",
-            chr, pos1, ref_base as char, alt_str, qual_str, info, fmt_keys.join(":"));
-        for col in &per_sample_cols { let _ = write!(out, "\t{}", col); }
-        let _ = writeln!(out);
+            chr, pos1, ref_base as char, alt_str, qual_str, info, ctx.fmt_keys);
+        for (k, &si) in kept_samples.iter().enumerate() {
+            out.push(b'\t');
+            let s = &site.per_sample[si];
+            if s.depth == 0 {
+                push_empty_sample_col(out, annotate, n_alleles);
+                continue;
+            }
+            let (mut counts, mut fwd, mut quals) = ([0u32; 8], [0u32; 8], [0u32; 8]);
+            let n = alleles_kept.len().min(8);
+            for (i, &a) in alleles_kept.iter().take(n).enumerate() {
+                let c = cand[a as usize];
+                counts[i] = s.base_counts[c];
+                fwd[i] = s.fwd_counts[c];
+                quals[i] = s.base_quals[c];
+            }
+            // The caller drops PL at reference-only sites; keep the hom-ref value.
+            let raw = &call_site.pls[k * n_gt..(k + 1) * n_gt];
+            let pl: &[i32] = if pls_sub[k].is_empty() { &raw[..1.min(raw.len())] } else { &pls_sub[k] };
+            push_sample_col(out, annotate, &alleles_kept, gts[k], s.depth, &counts[..n], &fwd[..n], &quals[..n], s.n_softclip, pl, gqs[k]);
+        }
+        out.push(b'\n');
     }
 
     if !ctx.skip_indels {
@@ -1335,30 +1475,6 @@ fn emit_site_bcftools(site: &PileupSite, reads: &[LiveRead], ctx: &EmitCtx, chr:
     }
     let mean_mq = (agg.mq_sum as f64) / (total as f64);
     emit_indels(site, &agg, chr, pos1, ref_base, total, mean_mq, ctx, out, reads);
-}
-
-/// `a/b` over the kept-allele indices; `./.` for a missing genotype.
-fn gt_string(alleles_kept: &[u32], gt: Option<(u32, u32)>) -> String {
-    let Some(gt) = gt else { return "./.".to_string() };
-    let gi = alleles_kept.iter().position(|&x| x == gt.0).unwrap_or(0);
-    let gj = alleles_kept.iter().position(|&x| x == gt.1).unwrap_or(0);
-    format!("{}/{}", gi.min(gj), gi.max(gj))
-}
-
-fn pl_string(pl: &[i32]) -> String {
-    pl.iter().map(|&v| if v == PL_MISSING { ".".to_string() } else { v.to_string() }).collect::<Vec<_>>().join(",")
-}
-
-/// The caller drops PL at reference-only sites; mpileup output keeps the
-/// homozygous-reference value so FORMAT/PL is always present.
-fn pl_string_or_ref(pl: &[i32], raw: &[i32]) -> String {
-    if pl.is_empty() { pl_string(&raw[..1.min(raw.len())]) } else { pl_string(pl) }
-}
-
-/// Like [`pl_string_or_ref`], but a record that prints its ALT anyway (an
-/// indel candidate called 0/0) keeps the full likelihood vector.
-fn pl_string_or_raw(pl: &[i32], raw: &[i32]) -> String {
-    if pl.is_empty() { pl_string(raw) } else { pl_string(pl) }
 }
 
 /// Realignment flank (bp each side of the anchor).
@@ -1580,35 +1696,32 @@ fn emit_one_indel(
     if args.variants_only && (!any_variant || site_qual < args.min_qual as f64) {
         return;
     }
-    let mut per_sample_cols: Vec<String> = Vec::with_capacity(kept_samples.len());
-    for (k, &si) in kept_samples.iter().enumerate() {
-        let s = &site.per_sample[si];
-        if s.depth == 0 {
-            per_sample_cols.push(empty_sample_col(annotate, n_alleles));
-            continue;
-        }
-        let (ref_c, indel_c, ref_f, indel_f) = per_counts[k];
-        let counts = vec![ref_c, indel_c];
-        let fwd = vec![ref_f, indel_f];
-        let quals = vec![ref_c * 30, indel_c * indel_qual as u32];
-        let gt = gt_string(&alleles_kept, gts[k]);
-        let pl = pl_string_or_raw(&pls_sub[k], &call_site.pls[k * 3..(k + 1) * 3]);
-        let parts = sample_parts(annotate, gt, s.depth, &counts, &fwd, &quals, s.n_softclip, &pl, gqs[k]);
-        per_sample_cols.push(parts.join(":"));
-    }
-
     let ref_total = total.saturating_sub(indel_count);
     let ref_fwd_total: u32 = agg.fwd_counts.iter().sum::<u32>().saturating_sub(indel_fwd).min(ref_total);
-    let ad = vec![ref_total, indel_count];
-    let adf = vec![ref_fwd_total, indel_fwd];
+    let ad = [ref_total, indel_count];
+    let adf = [ref_fwd_total, indel_fwd];
     let info = site_info(total, mean_mq, &ad, &adf, agg.n_softclip, annotate, true);
-    let fmt_keys = format_keys(annotate);
 
     let qual_str = fmt_qual(site_qual);
     let _ = write!(out, "{}\t{}\t.\t{}\t{}\t{}\t.\t{}\t{}",
-        chr, pos1, ref_str, alt_str, qual_str, info, fmt_keys.join(":"));
-    for col in &per_sample_cols { let _ = write!(out, "\t{}", col); }
-    let _ = writeln!(out);
+        chr, pos1, ref_str, alt_str, qual_str, info, ctx.fmt_keys);
+    for (k, &si) in kept_samples.iter().enumerate() {
+        out.push(b'\t');
+        let s = &site.per_sample[si];
+        if s.depth == 0 {
+            push_empty_sample_col(out, annotate, n_alleles);
+            continue;
+        }
+        let (ref_c, indel_c, ref_f, indel_f) = per_counts[k];
+        let counts = [ref_c, indel_c];
+        let fwd = [ref_f, indel_f];
+        let quals = [ref_c * 30, indel_c * indel_qual as u32];
+        // An indel candidate called 0/0 prints its ALT, so it keeps the full vector.
+        let raw = &call_site.pls[k * 3..(k + 1) * 3];
+        let pl: &[i32] = if pls_sub[k].is_empty() { raw } else { &pls_sub[k] };
+        push_sample_col(out, annotate, &alleles_kept, gts[k], s.depth, &counts, &fwd, &quals, s.n_softclip, pl, gqs[k]);
+    }
+    out.push(b'\n');
 }
 
 /// `--hp-indel` quality for an indel allele: 30, minus 5 per repeat unit of
@@ -1706,26 +1819,24 @@ fn emit_assembled(
     let alt_c = call.support;
     let mut info = format!("DP={};INDEL;ASSEMBLED", call.total);
     if annotate.info_ad { info.push_str(&format!(";AD={},{}", ref_c, alt_c)); }
-    let fmt_keys = format_keys(annotate);
     let qual_str = fmt_qual(qual);
     let _ = write!(out, "{}\t{}\t.\t{}\t{}\t{}\t.\t{}\t{}",
-        chr, call.pos1, call.ref_str, call.alt_str, qual_str, info, fmt_keys.join(":"));
+        chr, call.pos1, call.ref_str, call.alt_str, qual_str, info, ctx.fmt_keys);
     for (k, &si) in kept_samples.iter().enumerate() {
+        out.push(b'\t');
         let h = hs[si];
         let depth = h.n_ref + h.n_alt;
         if depth == 0 {
-            let _ = write!(out, "\t{}", empty_sample_col(annotate, 2));
+            push_empty_sample_col(out, annotate, 2);
             continue;
         }
         // Strand counts are not tracked per haplotype; ADF/ADR/DP4/SP read as 0.
-        let counts = vec![h.n_ref, h.n_alt];
-        let fwd = vec![0u32, 0u32];
-        let quals = vec![h.n_ref * 30, h.n_alt * 30];
-        let gt = gt_string(&alleles_kept, gts[k]);
-        let parts = sample_parts(annotate, gt, depth, &counts, &fwd, &quals, 0, &pl_string(&pls_sub[k]), gqs[k]);
-        let _ = write!(out, "\t{}", parts.join(":"));
+        let counts = [h.n_ref, h.n_alt];
+        let fwd = [0u32, 0u32];
+        let quals = [h.n_ref * 30, h.n_alt * 30];
+        push_sample_col(out, annotate, &alleles_kept, gts[k], depth, &counts, &fwd, &quals, 0, &pls_sub[k], gqs[k]);
     }
-    let _ = writeln!(out);
+    out.push(b'\n');
 }
 
 /// Wrapper for the sequential path when gvcf blocking is active. Returns false

@@ -2,4 +2,4 @@
 
 pub mod glocal;
 
-pub use glocal::{GlocalParams, GlocalResult, encode_nt, glocal, glocal_loglik};
+pub use glocal::{GlocalParams, GlocalResult, GlocalScratch, encode_nt, glocal, glocal_loglik, glocal_with};

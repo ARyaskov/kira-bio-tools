@@ -129,3 +129,15 @@
         assert_eq!(&a.qual()[4..8], &[0, 0, 0, 0]);
         assert_eq!(&b.qual()[..4], &[50, 50, 50, 50]);
     }
+
+    /// Clones share the sequence buffer until one of them writes to it.
+    #[test]
+    fn clones_share_bases_until_written() {
+        let a = LiveRead::new(b"ACGT", &[30; 4], CigarOps::from_slice(&[(Kind::Match, 4)]), 5, 0, 10, 0, 0);
+        let mut b = a.clone();
+        assert!(std::sync::Arc::ptr_eq(&a.data, &b.data));
+        b.seq_qual_mut().1[0] = 0;
+        assert!(!std::sync::Arc::ptr_eq(&a.data, &b.data));
+        assert_eq!(a.qual(), &[30; 4]);
+        assert_eq!(b.qual(), &[0, 30, 30, 30]);
+    }

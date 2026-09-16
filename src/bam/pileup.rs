@@ -121,8 +121,10 @@ fn is_aligned(k: Kind) -> bool {
 /// cursor (`cur_*`) only moves forward, so a pileup walk visits every op once.
 #[derive(Clone)]
 pub struct LiveRead {
-    /// Query bases followed by their qualities.
-    data: Vec<u8>,
+    /// Query bases followed by their qualities; shared between clones and
+    /// copied on the first write (`Arc::make_mut`), so the parallel runner's
+    /// per-chunk copies cost a reference count, not the sequence.
+    data: std::sync::Arc<Vec<u8>>,
     len: u32,
     pub cigar_pairs: CigarOps,
     pub ref_start: u32,
@@ -179,7 +181,7 @@ impl LiveRead {
         let has_softclip = cigar.iter().any(|(k, _)| *k == Kind::SoftClip);
         let ref_end_cached = compute_ref_end(ref_start, &cigar);
         Self {
-            data,
+            data: std::sync::Arc::new(data),
             len: len as u32,
             cigar_pairs: cigar,
             ref_start,
@@ -230,7 +232,7 @@ impl LiveRead {
     /// Bases and mutable qualities (BAQ rewrites qualities in place).
     #[inline]
     pub fn seq_qual_mut(&mut self) -> (&[u8], &mut [u8]) {
-        let (s, q) = self.data.split_at_mut(self.len as usize);
+        let (s, q) = std::sync::Arc::make_mut(&mut self.data).split_at_mut(self.len as usize);
         (s, q)
     }
 
@@ -419,19 +421,21 @@ pub fn tweak_overlap_quality(a: &mut LiveRead, b: &mut LiveRead) {
         }
         let (ba, bb) = (a.data[qa], b.data[qb]);
         let (qual_a, qual_b) = (a.data[la + qa], b.data[lb + qb]);
+        let ad = std::sync::Arc::make_mut(&mut a.data);
+        let bd = std::sync::Arc::make_mut(&mut b.data);
         if ba.eq_ignore_ascii_case(&bb) {
             let pooled = (qual_a as u32 + qual_b as u32).min(200) as u8;
-            a.data[la + qa] = if a_keeps { pooled } else { 0 };
-            b.data[lb + qb] = if a_keeps { 0 } else { pooled };
+            ad[la + qa] = if a_keeps { pooled } else { 0 };
+            bd[lb + qb] = if a_keeps { 0 } else { pooled };
         } else if qual_a > qual_b {
-            a.data[la + qa] = (0.8 * qual_a as f64) as u8;
-            b.data[lb + qb] = 0;
+            ad[la + qa] = (0.8 * qual_a as f64) as u8;
+            bd[lb + qb] = 0;
         } else if qual_a < qual_b {
-            b.data[lb + qb] = (0.8 * qual_b as f64) as u8;
-            a.data[la + qa] = 0;
+            bd[lb + qb] = (0.8 * qual_b as f64) as u8;
+            ad[la + qa] = 0;
         } else {
-            a.data[la + qa] = if a_keeps { (0.8 * qual_a as f64) as u8 } else { 0 };
-            b.data[lb + qb] = if a_keeps { 0 } else { (0.8 * qual_b as f64) as u8 };
+            ad[la + qa] = if a_keeps { (0.8 * qual_a as f64) as u8 } else { 0 };
+            bd[lb + qb] = if a_keeps { 0 } else { (0.8 * qual_b as f64) as u8 };
         }
         i += 1;
         j += 1;

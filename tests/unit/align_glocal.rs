@@ -70,3 +70,23 @@ fn empty_inputs_are_rejected() {
     assert!(glocal(&[], &[0, 1], None, &GlocalParams::default(), true).is_none());
     assert!(glocal(&[0, 1], &[], None, &GlocalParams::default(), false).is_none());
 }
+
+/// Reused scratch matrices give the same answer as fresh ones, whatever the
+/// previous call's size.
+#[test]
+fn scratch_reuse_matches_fresh_allocation() {
+    let r = enc(REF);
+    let p = GlocalParams { d: 0.001, e: 0.1, bw: 30 };
+    let mut sc = GlocalScratch::default();
+    let _ = glocal_with(&mut sc, &r, &enc(&REF[2..38]), Some(&[30; 36]), &p, true).unwrap();
+    for (lo, hi) in [(10usize, 26usize), (0, 12), (5, 40)] {
+        let mut q = enc(&REF[lo..hi]);
+        q[3] ^= 1;
+        let iq = vec![25u8; q.len()];
+        let fresh = glocal(&r, &q, Some(&iq), &p, true).unwrap();
+        let reused = glocal_with(&mut sc, &r, &q, Some(&iq), &p, true).unwrap();
+        assert_eq!(fresh.loglik.to_bits(), reused.loglik.to_bits());
+        assert_eq!(fresh.state, reused.state);
+        assert_eq!(fresh.q, reused.q);
+    }
+}

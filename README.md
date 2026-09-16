@@ -518,7 +518,10 @@ Commands: `query`, `cnv`.
   does not match the file is ignored). Gzipped FASTA is loaded whole.
 - `mpileup --stream` decodes each BAM on its own thread and pileups from the
   channel, so no BAM is held in memory; the reference pre-scan skip-list is
-  not available on this path.
+  not available on this path. The in-memory path hands each parallel chunk
+  reads that share their sequence buffers (copied only when mate overlap
+  adjusts qualities), BAQ reuses its pair-HMM matrices per thread, and sample
+  columns are rendered straight into the output buffer.
 - `gtcheck -g` walks the panel in lock-step with the query; both inputs must
   be position-sorted with the same chromosome order.
 

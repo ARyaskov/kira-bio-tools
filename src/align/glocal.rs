@@ -69,6 +69,15 @@ fn set_u(bw: usize, i: usize, k: usize) -> isize {
     (k as isize - x) * 3
 }
 
+/// Reusable matrices for [`glocal_with`]: one per thread avoids three
+/// allocations per aligned read.
+#[derive(Default)]
+pub struct GlocalScratch {
+    f: Vec<f64>,
+    b: Vec<f64>,
+    s: Vec<f64>,
+}
+
 /// Forward-only likelihood: log P(query | reference).
 pub fn glocal_loglik(reference: &[u8], query: &[u8], iqual: Option<&[u8]>, c: &GlocalParams) -> f64 {
     glocal(reference, query, iqual, c, false).map(|r| r.loglik).unwrap_or(f64::NEG_INFINITY)
@@ -78,6 +87,18 @@ pub fn glocal_loglik(reference: &[u8], query: &[u8], iqual: Option<&[u8]>, c: &G
 /// phred base qualities (30 when absent). With `posterior`, the backward pass
 /// fills `state` and `q`.
 pub fn glocal(reference: &[u8], query: &[u8], iqual: Option<&[u8]>, c: &GlocalParams, posterior: bool) -> Option<GlocalResult> {
+    glocal_with(&mut GlocalScratch::default(), reference, query, iqual, c, posterior)
+}
+
+/// [`glocal`] with caller-owned matrices.
+pub fn glocal_with(
+    scratch: &mut GlocalScratch,
+    reference: &[u8],
+    query: &[u8],
+    iqual: Option<&[u8]>,
+    c: &GlocalParams,
+    posterior: bool,
+) -> Option<GlocalResult> {
     let l_ref = reference.len();
     let l_query = query.len();
     if l_ref == 0 || l_query == 0 {
@@ -97,9 +118,15 @@ pub fn glocal(reference: &[u8], query: &[u8], iqual: Option<&[u8]>, c: &GlocalPa
     let stride = row + 6;
     let idx = |i: usize, u: isize| -> usize { i * stride + (u + 3) as usize };
 
-    let mut f = vec![0.0f64; (l_query + 1) * stride];
-    let mut b = if posterior { vec![0.0f64; (l_query + 1) * stride] } else { Vec::new() };
-    let mut s = vec![0.0f64; l_query + 2];
+    let GlocalScratch { f, b, s } = scratch;
+    f.clear();
+    f.resize((l_query + 1) * stride, 0.0);
+    b.clear();
+    if posterior {
+        b.resize((l_query + 1) * stride, 0.0);
+    }
+    s.clear();
+    s.resize(l_query + 2, 0.0);
     let q2p = &*QUAL2PROB;
     // 1-based query index -> error probability (30 when no quality is given).
     let qual = |i: usize| -> f64 { q2p[iqual.and_then(|v| v.get(i - 1)).map(|&q| q as usize).unwrap_or(30)] };
