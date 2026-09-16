@@ -37,6 +37,57 @@ pub struct BcfRecordMeta {
     pub rlen: i32,
 }
 
+/// The alleles (REF first) of an encoded record's `shared` block, read
+/// without decoding the rest.
+pub fn shared_alleles(shared: &[u8]) -> Option<Vec<&[u8]>> {
+    if shared.len() < 24 {
+        return None;
+    }
+    let n_allele = (u32::from_le_bytes(shared[16..20].try_into().ok()?) >> 16) as usize;
+    let (_id, mut off) = typed_bytes(shared, 24)?;
+    let mut out = Vec::with_capacity(n_allele);
+    for _ in 0..n_allele {
+        let (s, next) = typed_bytes(shared, off)?;
+        out.push(s);
+        off = next;
+    }
+    Some(out)
+}
+
+/// One BCF typed value at `off`: its payload bytes and the offset after it.
+fn typed_bytes(b: &[u8], off: usize) -> Option<(&[u8], usize)> {
+    let t = *b.get(off)?;
+    let typ = (t & 0xf) as usize;
+    let mut n = (t >> 4) as usize;
+    let mut p = off + 1;
+    if n == 15 {
+        let t2 = *b.get(p)?;
+        p += 1;
+        n = match t2 & 0xf {
+            1 => *b.get(p)? as i8 as usize,
+            2 => i16::from_le_bytes([*b.get(p)?, *b.get(p + 1)?]) as usize,
+            3 => i32::from_le_bytes([*b.get(p)?, *b.get(p + 1)?, *b.get(p + 2)?, *b.get(p + 3)?])
+                as usize,
+            _ => return None,
+        };
+        p += match t2 & 0xf {
+            1 => 1,
+            2 => 2,
+            _ => 4,
+        };
+    }
+    let width = match typ {
+        0 => 0,
+        1 | 7 => 1,
+        2 => 2,
+        3 | 5 => 4,
+        _ => return None,
+    };
+    let end = p.checked_add(n.checked_mul(width)?)?;
+    let payload = b.get(p..end)?;
+    Some((payload, end))
+}
+
 pub fn record_meta(shared: &[u8]) -> Option<BcfRecordMeta> {
     if shared.len() < 12 {
         return None;

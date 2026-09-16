@@ -289,7 +289,11 @@ Commands: `query`, `cnv`.
   region/target/include/exclude selectors.
 
 - `sort`  
-  Sort VCF/BCF.  
+  Sort VCF/BCF by contig rank and position, ties broken as bcftools does
+  (alleles compared one by one, case-insensitively, then input order).
+  Records are kept as text lines, or as encoded BCF blocks when the input is
+  BCF, so nothing is decoded unless the output type differs; runs beyond
+  `-m` spill to BGZF-compressed temporary files and merge back k-way.  
   Args: `<input> [-- <passthrough>...]`, `-o/--output`, `-O/--output-type`,
   `-m/--max-mem`, `-T/--temp-dir`, `--threads`, `-W/--write-index`.
 
