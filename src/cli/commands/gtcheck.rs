@@ -251,6 +251,7 @@ struct Side {
     exclude: Option<FilterEngine>,
 }
 
+#[derive(Default)]
 struct Counters {
     ncmp: u32,
     no_match: u32,
@@ -673,6 +674,60 @@ impl Gtcheck {
     }
 }
 
+/// `--sketch K`: one pass over the query builds a SimHash sketch of every
+/// selected sample's dosage vector (same site selection as the comparison);
+/// the K nearest sketches of each sample are the pairs scored exactly, as
+/// `(query sample, genotyped sample)` with the lower index second like the
+/// all-vs-all rows.
+fn sketch_candidates(
+    path: &Path,
+    qside: &Side,
+    use_pls: u32,
+    neg_log_e: f64,
+    keep: &dyn Fn(&str) -> bool,
+    k: usize,
+    bits: usize,
+) -> Result<Vec<(usize, usize)>> {
+    let mut reader =
+        UnifiedVcfReader::open(path).with_context(|| format!("open {}", path.display()))?;
+    let _ = reader.header()?;
+    let mut sk = crate::sketch::DosageSketch::new(qside.sel.len(), bits);
+    let mut cnt = Counters::default();
+    let mut dosage = vec![-1i8; qside.sel.len()];
+    while let Some(line) = reader.read_line()? {
+        if line.is_empty() || line.as_bytes()[0] == b'#' || !keep(&line) {
+            continue;
+        }
+        let Some(q) = Rec::parse(line) else { continue };
+        if q.n_allele > 2 || q.is_ref_only || !passes(qside, &q) {
+            continue;
+        }
+        let Some((_, data)) = site_data(&q, qside.use_gt, use_pls, neg_log_e, &mut cnt) else {
+            continue;
+        };
+        for (d, &s) in dosage.iter_mut().zip(&qside.sel) {
+            *d = match data[s].0 {
+                1 => 0,
+                2 => 1,
+                4 => 2,
+                _ => -1,
+            };
+        }
+        sk.add_site(&dosage);
+    }
+    let pairs = crate::sketch::nearest_pairs(&sk.finish(), k);
+    eprintln!(
+        "[KIRA_BT] gtcheck --sketch {k}: {} sites, {} samples, {} candidate pairs",
+        sk.sites(),
+        qside.sel.len(),
+        pairs.len()
+    );
+    Ok(pairs
+        .into_iter()
+        .map(|(hi, lo)| (qside.sel[hi], qside.sel[lo]))
+        .collect())
+}
+
 pub fn cmd_gtcheck(args: GtcheckArgs) -> Result<()> {
     let qry_path = args
         .input
@@ -913,6 +968,23 @@ pub fn cmd_gtcheck(args: GtcheckArgs) -> Result<()> {
         });
     }
     let gside = gside.unwrap();
+    let pairs = match args.sketch {
+        Some(k) if pairs.is_none() => {
+            if !cross {
+                bail!("--sketch works in the all-vs-all mode only (no -g)");
+            }
+            Some(sketch_candidates(
+                &qry_path,
+                &qside,
+                use_pls,
+                neg_log_e,
+                &keep,
+                k,
+                args.sketch_bits,
+            )?)
+        }
+        _ => pairs,
+    };
     if pairs.is_some() && !args.genotypes.is_some() && (!smp_g.is_empty() || !sfile_g.is_empty()) {
         // pairs win over sample lists
     }

@@ -32,6 +32,13 @@ pub struct GtcheckArgs {
 
     #[arg(short = 'H', long = "homs-only")]
     pub homs_only: bool,
+    /// All-vs-all only: score just the INT nearest samples of each sample,
+    /// found by a SimHash sketch of the dosage vectors in a first pass.
+    #[arg(long = "sketch")]
+    pub sketch: Option<usize>,
+    /// Sketch width in bits (rounded up to a multiple of 64).
+    #[arg(long = "sketch-bits", default_value_t = 256)]
+    pub sketch_bits: usize,
 
     /// `TAG1[,TAG2]`: tag used in the query file and in the -g file [PL,GT].
     #[arg(short = 'u', long = "use", default_value = "PL,GT")]

@@ -549,6 +549,10 @@ Commands: `query`, `cnv`.
 
 - `gtcheck`  
   Sample concordance, swap and contamination detection.  
+  `--sketch K` (all-vs-all only) first sketches every sample's dosage vector
+  with `--sketch-bits` (256) SimHash projections in one pass, then scores
+  exactly only the K nearest samples of each sample: duplicate and relative
+  search in a large cohort costs O(n·m·bits) instead of O(n²·m).  
   Args: `[input]`, `-g/--genotypes`, `-p/--pairs`, `-P/--pairs-file`,
   `-s/--samples`, `-S/--samples-file`, `-e/--error-probability`,
   `-n/--n-matches`, `-H/--homs-only`, `-u/--use`, `--no-HWE-prob`,

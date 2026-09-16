@@ -35,6 +35,7 @@ pub mod kbi;
 pub mod norm;
 pub mod regions;
 pub mod roh;
+pub mod sketch;
 pub mod threads;
 pub mod util;
 pub mod vcf;
