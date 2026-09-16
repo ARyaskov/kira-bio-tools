@@ -8,6 +8,7 @@ pub mod bgzf;
 pub mod call;
 pub mod cli;
 pub mod cnv;
+pub mod consensus;
 pub mod csi;
 pub mod csq;
 pub mod fasta;

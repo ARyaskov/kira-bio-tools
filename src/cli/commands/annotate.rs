@@ -374,7 +374,7 @@ fn apply_postproc_stream_with_args(
         writer.write_all(h.as_bytes())?;
         writer.write_all(b"\n")?;
     }
-    let mut canon = crate::vcf::FloatCanon::from_headers(&out_headers);
+    let mut canon = crate::vcf::RecordCanon::from_headers(&out_headers);
 
     if let Some(line) = first_record {
         write_processed_line(&mut writer, &line, &pp, &mut canon)?;
@@ -391,7 +391,7 @@ fn write_processed_line<W: Write>(
     writer: &mut W,
     line: &str,
     pp: &annotate::postproc::PostProcessor,
-    canon: &mut crate::vcf::FloatCanon,
+    canon: &mut crate::vcf::RecordCanon,
 ) -> Result<()> {
     use annotate::postproc::{LineAction, process_record_line};
     let out = match process_record_line(line, pp, false) {

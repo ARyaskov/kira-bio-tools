@@ -58,6 +58,19 @@ enum BinaryOp {
     Mod,
 }
 
+impl BinaryOp {
+    /// The operator with its operands swapped: `a < b` is `b > a`.
+    fn mirrored(self) -> Self {
+        match self {
+            Self::Lt => Self::Gt,
+            Self::Le => Self::Ge,
+            Self::Gt => Self::Lt,
+            Self::Ge => Self::Le,
+            other => other,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UnaryOp {
     Not,
@@ -1148,8 +1161,8 @@ fn fast_eval(fast: &FastExpr, rec: &crate::vcf::VcfRecordRef<'_>) -> bool {
             }
             FastField::InfoFlag(idx) => {
                 let key = &fast.info_keys[idx];
-                let present = info_has_flag(&rec.info, key);
-                let values = if present { vec![1.0] } else { Vec::new() };
+                // A Flag reads as 1 when set and 0 when absent (`INDEL=0`).
+                let values = vec![if info_has_flag(&rec.info, key) { 1.0 } else { 0.0 }];
                 fast_cmp_values(term.op, values, term.value)
             }
         };
@@ -1461,8 +1474,8 @@ fn eval_info_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValue>
             }
         }
         None => {
-            if matches!(field_type, FieldType::Flag) && info_has_flag(&ctx.rec.info, &field.name) {
-                vec![Value::Int(1)]
+            if matches!(field_type, FieldType::Flag) {
+                vec![Value::Int(if info_has_flag(&ctx.rec.info, &field.name) { 1 } else { 0 })]
             } else {
                 Vec::new()
             }
@@ -2012,7 +2025,7 @@ fn compare_values(
             Ok(compare_samples_scalar(op, &av, &bv.values))
         }
         (EvalValue::Scalar(av), EvalValue::Samples(bv)) => {
-            Ok(compare_samples_scalar(op, &bv, &av.values))
+            Ok(compare_samples_scalar(op.mirrored(), &bv, &av.values))
         }
         (EvalValue::Samples(av), EvalValue::Samples(bv)) => Ok(compare_samples(op, &av, &bv)),
         _ => Ok(EvalResult {

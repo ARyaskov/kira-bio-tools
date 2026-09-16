@@ -1,9 +1,11 @@
-//! Float text the way bcftools writes it. htslib parses every record it
-//! reads and re-renders floats with `kputd` (`%g`, six significant digits),
-//! so `1e-1` comes out as `0.1` and `1e6` as `1e+06`. kira copies text
-//! records verbatim; [`FloatCanon`] rewrites the QUAL column and the
-//! Float-typed INFO/FORMAT values of a line only when they differ from that
-//! rendering, leaving already-canonical lines untouched.
+//! Record text the way bcftools writes it. htslib parses every record it
+//! reads and re-renders it: floats go through `kputd` (`%g`, six significant
+//! digits), so `1e-1` comes out as `0.1` and `1e6` as `1e+06`, and a sample
+//! column shorter than FORMAT is padded with missing fields (`.` becomes
+//! `.:.:.`). kira copies text records verbatim; [`RecordCanon`] rewrites
+//! the QUAL column, the Float-typed INFO/FORMAT values and short sample
+//! columns of a line only when they differ from that rendering, leaving
+//! already-canonical lines untouched.
 
 use std::borrow::Cow;
 
@@ -158,9 +160,10 @@ fn splice(line: &str, edits: Vec<Edit>) -> Option<String> {
     Some(out)
 }
 
-/// Rewrites the Float-typed values of text records, given the header.
+/// Rewrites the Float-typed values and short sample columns of text
+/// records, given the header.
 #[derive(Clone, Debug)]
-pub struct FloatCanon {
+pub struct RecordCanon {
     info: FxHashSet<Box<[u8]>>,
     info_first: [bool; 256],
     format: FxHashSet<Box<[u8]>>,
@@ -168,7 +171,7 @@ pub struct FloatCanon {
     fmt_cache: (Vec<u8>, Vec<usize>),
 }
 
-impl Default for FloatCanon {
+impl Default for RecordCanon {
     fn default() -> Self {
         Self {
             info: FxHashSet::default(),
@@ -179,7 +182,7 @@ impl Default for FloatCanon {
     }
 }
 
-impl FloatCanon {
+impl RecordCanon {
     pub fn from_headers<S: AsRef<str>>(headers: &[S]) -> Self {
         Self::from_header_info(&HeaderInfo::parse(headers))
     }
@@ -215,8 +218,9 @@ impl FloatCanon {
         splice(info, edits).map_or(Cow::Borrowed(info), Cow::Owned)
     }
 
-    /// The record with QUAL and every Float value re-rendered, or `None`
-    /// when nothing had to change. Header lines are never touched.
+    /// The record with QUAL, every Float value and every short sample column
+    /// re-rendered, or `None` when nothing had to change. Header lines are
+    /// never touched.
     pub fn canon_line(&mut self, line: &str) -> Option<String> {
         let b = line.as_bytes();
         if b.first().is_none_or(|&c| c == b'#') {
@@ -236,15 +240,16 @@ impl FloatCanon {
         if !self.info.is_empty() {
             self.info_edits(line, t7 + 1, t8.unwrap_or(b.len()), &mut edits);
         }
-        if let (Some(t8), false) = (t8, self.format.is_empty()) {
+        if let Some(t8) = t8 {
             let t9 = tabs.next();
             let fmt = &b[t8 + 1..t9.unwrap_or(b.len())];
+            let n_fields = if fmt.is_empty() { 0 } else { memchr_iter(b':', fmt).count() + 1 };
             let positions = self.float_positions(fmt);
-            if let (Some(t9), false) = (t9, positions.is_empty()) {
+            if let Some(t9) = t9 {
                 let mut start = t9 + 1;
                 loop {
                     let end = memchr(b'\t', &b[start..]).map_or(b.len(), |i| start + i);
-                    sample_edits(line, start, end, positions, &mut edits);
+                    sample_edits(line, start, end, positions, n_fields, &mut edits);
                     if end == b.len() {
                         break;
                     }
@@ -288,26 +293,30 @@ impl FloatCanon {
     }
 }
 
-/// Re-render the fields at `positions` (ascending) of one sample column.
-fn sample_edits(line: &str, start: usize, end: usize, positions: &[usize], edits: &mut Vec<Edit>) {
+/// Re-render the fields at `positions` (ascending) of one sample column and
+/// pad it to `n_fields` fields with `.` the way htslib prints a short one.
+fn sample_edits(line: &str, start: usize, end: usize, positions: &[usize], n_fields: usize, edits: &mut Vec<Edit>) {
     let b = line.as_bytes();
     let (mut pi, mut idx, mut s) = (0usize, 0usize, start);
-    while pi < positions.len() {
+    loop {
         let e = memchr(b':', &b[s..end]).map_or(end, |i| s + i);
-        if idx == positions[pi] {
+        if pi < positions.len() && idx == positions[pi] {
             if let Cow::Owned(v) = canonical_floats(&line[s..e]) {
                 edits.push((s, e, v));
             }
             pi += 1;
         }
+        idx += 1;
         if e == end {
             break;
         }
         s = e + 1;
-        idx += 1;
+    }
+    if idx < n_fields && end > start {
+        edits.push((end, end, ":.".repeat(n_fields - idx)));
     }
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/vcf_floats.rs"]
+#[path = "../../tests/unit/vcf_canon.rs"]
 mod tests;

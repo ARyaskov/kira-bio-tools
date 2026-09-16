@@ -260,13 +260,20 @@ pub fn merge_info_fields(
 
             if should_transfer && has_flag {
                 dirty |= insert_if_changed(&mut info_map, dst_key, String::new());
+            } else if !has_flag && !bundles.is_empty() && info_map.contains_key(dst_key) {
+                // A flag has no missing value: bcftools' setter writes the
+                // annotation record's state, clearing it when unset there.
+                info_map.shift_remove(dst_key);
+                dirty = true;
             }
 
             continue;
         }
 
+        // Guess a per-allele layout only for tags the annotation header does
+        // not describe; a declared Number=1 or Number=. vector is copied whole.
         let mut effective_number = field_number;
-        if effective_number != FieldNumber::A && effective_number != FieldNumber::R {
+        if effective_number != FieldNumber::A && effective_number != FieldNumber::R && !field_meta.contains_key(src_key) {
             if existing_parts.len() == vcf_alt_alleles.len() {
                 effective_number = FieldNumber::A;
             } else if existing_parts.len() == vcf_alt_alleles.len() + 1 {
@@ -699,7 +706,7 @@ fn merge_field_number_r(
 }
 
 /// SIMD-accelerated INFO field parser via `memchr2(';', '=')`.
-fn parse_existing_info(info: &str) -> IndexMap<String, String> {
+pub(crate) fn parse_existing_info(info: &str) -> IndexMap<String, String> {
     let mut map = IndexMap::new();
     if info == "." || info.is_empty() {
         return map;

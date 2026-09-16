@@ -68,6 +68,12 @@ impl ColumnSpec {
     }
 
     pub fn parse_all(columns: &[String]) -> Vec<Self> {
+        // A tab-delimited source lists its key columns (CHROM,POS,REF,ALT);
+        // there ALT is a match key, not an annotation target.
+        let tab_keys = columns.iter().any(|c| {
+            let upper = c.to_uppercase();
+            upper.starts_with("CHROM") || upper.starts_with("POS")
+        });
         columns
             .iter()
             .filter(|c| {
@@ -79,6 +85,7 @@ impl ColumnSpec {
                     && !upper.starts_with("TO")
                     && !upper.starts_with("BEG")
                     && !upper.starts_with("END")
+                    && !(tab_keys && upper == "ALT")
                     && *c != "-"
             })
             .map(|c| Self::parse(c))

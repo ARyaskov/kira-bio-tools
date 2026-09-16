@@ -223,7 +223,7 @@ pub fn writer_thread_annotated(
     timing: bool,
     log_tag: &'static str,
 ) -> Result<()> {
-    let mut canon = crate::vcf::FloatCanon::from_headers(&headers);
+    let mut canon = crate::vcf::RecordCanon::from_headers(&headers);
     let start = Instant::now();
     let mut lines_written = 0usize;
     let mut bytes_written = 0usize;
@@ -344,7 +344,7 @@ pub fn writer_thread(
     timing: bool,
     log_tag: &'static str,
 ) -> Result<()> {
-    let mut canon = crate::vcf::FloatCanon::from_headers(&headers);
+    let mut canon = crate::vcf::RecordCanon::from_headers(&headers);
     let start = Instant::now();
     let mut lines_written = 0usize;
     let mut bytes_written = 0usize;

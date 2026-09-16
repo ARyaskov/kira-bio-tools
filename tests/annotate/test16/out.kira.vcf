@@ -5,4 +5,4 @@
 ##bcftools_viewVersion=1.19+htslib-1.19
 ##bcftools_viewCommand=view -Oz -o annotate20.dst.vcf.gz annotate20.dst.vcf; Date=Tue Feb 24 04:14:52 2026
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SAMPLE1	SAMPLE2
-20	20202020	.	C	G	.	.	.	GT	0/1	./.
+20	20202020	.	C	G	.	.	.	GT	0/1	0/0

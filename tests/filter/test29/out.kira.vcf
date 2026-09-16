@@ -5,4 +5,4 @@
 ##contig=<ID=1,length=248956422,assembly=hg38>
 ##FILTER=<ID=PASS,Description="All filters passed">
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SMPL
-1	1100	.	T	G	.	PASS	.	GT:AD:DP	1/1:5,6:12
+1	1101	.	T	G	.	PASS	.	GT:AD:DP	1/1:5,6:10

@@ -167,7 +167,7 @@ pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
         if snp_gap.is_some() || args.indel_gap.is_some() {
             let gap_start = Instant::now();
             let var_type = variant_type_flags(&out_rec);
-            let ref_len = out_rec.ref_allele.len() as u32;
+            let ref_len = record_rlen(&out_rec);
             if let Some(last) = buffer.back() {
                 if last.rec.chrom != out_rec.chrom {
                     let flush_start = Instant::now();
@@ -1220,6 +1220,18 @@ fn add_filter_tag(current: &str, tag: &str) -> String {
         parts.push(tag);
     }
     parts.join(";")
+}
+
+/// htslib's `rlen`: INFO/END when present, else the REF length.
+fn record_rlen(rec: &VcfRecord) -> u32 {
+    let end = rec
+        .info
+        .split(';')
+        .find_map(|kv| kv.strip_prefix("END=").and_then(|v| v.parse::<u32>().ok()));
+    match end {
+        Some(end) if end >= rec.pos => end - rec.pos + 1,
+        _ => rec.ref_allele.len() as u32,
+    }
 }
 
 fn variant_type_flags(rec: &VcfRecord) -> u32 {

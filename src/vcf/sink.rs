@@ -1,7 +1,7 @@
 //! Output sink shared by every VCF-writing command: plain VCF, BGZF VCF or
 //! BCF, to a file or to standard output. `finish` finalizes the stream; a
 //! sink dropped early still flushes what it has (BGZF finalizes on Drop) but
-//! only `finish` reports errors. Text records pass through [`FloatCanon`],
+//! only `finish` reports errors. Text records pass through [`RecordCanon`],
 //! so floats print as bcftools prints them; BCF records are re-rendered by
 //! the decoder anyway.
 
@@ -15,7 +15,7 @@ use flate2::Compression;
 pub use crate::annotate::postproc::{OutputKind, parse_output_type};
 use crate::bcf::BcfWriter;
 use crate::bgzf::{BgzfWriter, FILE_BUFFER_SIZE, STREAM_BUFFER_SIZE};
-use crate::vcf::floats::FloatCanon;
+use crate::vcf::canon::RecordCanon;
 
 enum Out {
     Plain(BufWriter<Box<dyn Write + Send>>),
@@ -25,7 +25,7 @@ enum Out {
 
 pub struct VcfSink {
     out: Out,
-    canon: Option<FloatCanon>,
+    canon: Option<RecordCanon>,
     /// Bytes of an unterminated line received through `Write`.
     partial: Vec<u8>,
 }
@@ -86,7 +86,7 @@ impl VcfSink {
         let canon = if matches!(out, Out::Bcf(_)) {
             None
         } else {
-            Some(FloatCanon::from_headers(headers))
+            Some(RecordCanon::from_headers(headers))
         };
         Ok(Self {
             out,

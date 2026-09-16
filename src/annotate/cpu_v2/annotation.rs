@@ -76,6 +76,12 @@ pub fn column_targets_format(raw: &str) -> bool {
     is_format_ref(dst)
 }
 
+/// With `-c ALT` bcftools pairs records on POS and REF alone: the
+/// annotation's ALT replaces the target's, so it cannot be a match key.
+fn alt_key<'a>(alt: &'a str, column_modes: &[(String, AnnotateMode)]) -> &'a str {
+    if column_modes.iter().any(|(k, _)| split_mapped_ref(k).1.eq_ignore_ascii_case("ALT")) { "." } else { alt }
+}
+
 fn column_targets_info(raw: &str) -> bool {
     let (_, dst) = split_mapped_ref(raw);
     !is_fixed_column(dst) && !is_format_ref(dst)
@@ -265,6 +271,31 @@ fn read_scalar_from_bundle(bundle: &AnnotationBundle, src_ref: &str) -> Option<S
     None
 }
 
+/// `INFO/X:=./FILTER` copies the target's own FILTER column (as it stands
+/// when the column is processed) into INFO/X.
+fn local_filter_transfer<'a>(src_ref: &str, dst_ref: &'a str) -> Option<&'a str> {
+    let dst = dst_ref.strip_prefix("INFO/").or_else(|| dst_ref.strip_prefix("info/"))?;
+    let src = src_ref.strip_prefix("./")?;
+    src.eq_ignore_ascii_case("FILTER").then_some(dst)
+}
+
+fn apply_local_transfers(info: &str, transfers: &[(String, String, AnnotateMode)]) -> String {
+    use crate::annotate::cpu_v2::merge_info::parse_existing_info;
+    let mut map = parse_existing_info(info);
+    for (key, value, mode) in transfers {
+        let existing = map.get(key).map(String::as_str).unwrap_or("");
+        if should_replace(existing, value, *mode) {
+            map.insert(key.clone(), value.clone());
+        }
+    }
+    serialize_info_map(&map)
+}
+
+/// A genotype is missing when every allele is (`.`, `./.`, `.|.`).
+fn gt_is_missing(v: &str) -> bool {
+    v.split(['/', '|']).all(|a| a.is_empty() || a == ".")
+}
+
 fn apply_format_field_mappings(
     format: &mut Option<String>,
     samples: &mut Vec<String>,
@@ -291,6 +322,9 @@ fn apply_format_field_mappings(
         })
         .unwrap_or_default();
     let original_keys = out_keys.clone();
+    // Keys a mapping wrote are kept even when every value is missing: the
+    // annotation record matched, so bcftools adds the tag.
+    let mut mapped_keys: Vec<String> = Vec::new();
     let mut out_sample_values: Vec<Vec<String>> = samples
         .iter()
         .map(|s| {
@@ -330,6 +364,8 @@ fn apply_format_field_mappings(
                 out_keys.len() - 1
             }
         };
+        mapped_keys.push(dst_key.to_string());
+        let is_gt = dst_key == "GT";
 
         for (sample_idx, vals) in out_sample_values.iter_mut().enumerate() {
             if dst_out_idx >= vals.len() {
@@ -337,14 +373,23 @@ fn apply_format_field_mappings(
             }
             let existing = vals.get(dst_out_idx).map(|s| s.as_str()).unwrap_or(".");
             let db_idx = sample_map.get(sample_idx).and_then(|v| *v);
-            if db_idx.is_none() {
-                continue;
-            }
-            let db_val = db_idx
-                .and_then(|idx| bundle.format_samples.get(idx))
+            let Some(db_idx) = db_idx else { continue };
+            let db_val = bundle
+                .format_samples
+                .get(db_idx)
                 .and_then(|s| s.split(':').nth(src_db_idx))
                 .unwrap_or(".");
-            if let Some(v) = merge_scalar_field(existing, db_val, *mode, ",") {
+            if is_gt {
+                // Genotypes are copied whole, missing ones included; `+` fills
+                // only genotypes with every allele missing.
+                let existing_missing = gt_is_missing(existing);
+                let take = mode.replace_all
+                    || (mode.replace_missing && existing_missing)
+                    || (mode.replace_non_missing && !existing_missing);
+                if take {
+                    vals[dst_out_idx] = db_val.to_string();
+                }
+            } else if let Some(v) = merge_scalar_field(existing, db_val, *mode, ",") {
                 vals[dst_out_idx] = v;
             }
         }
@@ -355,6 +400,7 @@ fn apply_format_field_mappings(
         .enumerate()
         .filter_map(|(idx, key)| {
             if original_keys.iter().any(|k| k == key)
+                || mapped_keys.iter().any(|k| k == key)
                 || out_sample_values.iter().any(|vals| {
                     vals.get(idx)
                         .map(|v| !is_missing_value(v))
@@ -456,7 +502,7 @@ pub fn annotate_line(
             pos,
             ref_allele,
             ref_hash,
-            alt,
+            alt_key(alt, column_modes),
             field_meta,
             need_info,
             need_format,
@@ -661,7 +707,7 @@ pub fn annotate_line_with_mph_hints<'a>(
                     pos,
                     ref_allele,
                     ref_hash,
-                    alt,
+                    alt_key(alt, column_modes),
                     field_meta,
                     need_info,
                     need_format,
@@ -773,7 +819,7 @@ pub fn annotate_line_with_timing(
             pos,
             ref_allele,
             ref_hash,
-            alt,
+            alt_key(alt, column_modes),
             field_meta,
             need_info,
             need_format,
@@ -791,7 +837,7 @@ pub fn annotate_line_with_timing(
             pos,
             ref_allele,
             ref_hash,
-            alt,
+            alt_key(alt, column_modes),
             need_info,
             need_format,
         ) {
@@ -951,13 +997,19 @@ fn annotate_record_with_alts(
         column_modes,
     );
 
-    let new_info = serialize_info_map(&merged_info.map);
+    let mut new_info = serialize_info_map(&merged_info.map);
 
+    let mut local_transfers: Vec<(String, String, AnnotateMode)> = Vec::new();
     if !bundles.is_empty() {
         let bundle = &bundles[0].1;
 
         for (key, mode) in column_modes {
             let (src_ref, dst_ref) = split_mapped_ref(key);
+            if let Some(dst) = local_filter_transfer(src_ref, dst_ref) {
+                // bcftools joins several filters with a comma in INFO.
+                local_transfers.push((dst.to_string(), new_filter.replace(';', ","), *mode));
+                continue;
+            }
             match dst_ref.to_ascii_uppercase().as_str() {
                 "ID" => {
                     if let Some(db_id) = read_scalar_from_bundle(bundle, src_ref) {
@@ -1012,6 +1064,10 @@ fn annotate_record_with_alts(
                 sample_map,
             );
         }
+    }
+
+    if !local_transfers.is_empty() {
+        new_info = apply_local_transfers(&new_info, &local_transfers);
     }
 
     let mut out = String::new();
@@ -1140,7 +1196,7 @@ fn annotate_record_with_alts_and_info(
         Vec::new()
     };
 
-    let new_info = if let Some(info) = merged_info {
+    let mut new_info = if let Some(info) = merged_info {
         if info.is_empty() {
             ".".to_string()
         } else {
@@ -1164,11 +1220,17 @@ fn annotate_record_with_alts_and_info(
         serialize_info_map(&merged.map)
     };
 
+    let mut local_transfers: Vec<(String, String, AnnotateMode)> = Vec::new();
     if !bundles.is_empty() {
         let bundle = &bundles[0].1;
 
         for (key, mode) in column_modes {
             let (src_ref, dst_ref) = split_mapped_ref(key);
+            if let Some(dst) = local_filter_transfer(src_ref, dst_ref) {
+                // bcftools joins several filters with a comma in INFO.
+                local_transfers.push((dst.to_string(), new_filter.replace(';', ","), *mode));
+                continue;
+            }
             match dst_ref.to_ascii_uppercase().as_str() {
                 "ID" => {
                     if let Some(db_id) = read_scalar_from_bundle(bundle, src_ref) {
@@ -1223,6 +1285,10 @@ fn annotate_record_with_alts_and_info(
                 sample_map,
             );
         }
+    }
+
+    if !local_transfers.is_empty() {
+        new_info = apply_local_transfers(&new_info, &local_transfers);
     }
 
     let mut out = String::new();
@@ -1529,6 +1595,9 @@ fn merge_all_format(
                         input_val.unwrap_or(".")
                     };
                     sample_values.push(final_val.to_string());
+                } else if final_keys[k_i] == "GT" && mode.replace_all && db_idx.is_some() {
+                    // Genotypes are copied whole, missing ones included.
+                    sample_values.push(db_val.unwrap_or(".").to_string());
                 } else {
                     let final_val = merge_format_value_str(input_val, db_val, mode);
                     sample_values.push(final_val);

@@ -71,7 +71,8 @@ fn rewrite_header_id(line: &str, dst_id: &str) -> String {
 }
 
 fn synthetic_info_header_for_fixed_source(src_ref: &str, dst_id: &str) -> Option<String> {
-    let src_upper = src_ref.to_ascii_uppercase();
+    // `./FILTER` names the target's own column (a local transfer).
+    let src_upper = src_ref.strip_prefix("./").unwrap_or(src_ref).to_ascii_uppercase();
     if src_upper == "ID" {
         return Some(format!(
             "##INFO=<ID={dst_id},Number=1,Type=String,Description=\"Transferred ID column\">"
@@ -132,13 +133,11 @@ pub fn annotate_vcf_ani_v2_with_extra_headers(
     let start = Instant::now();
 
     let mut column_specs = ColumnSpec::parse_all(columns);
-    let info_overwrite_all = column_specs
-        .iter()
-        .any(|c| c.key.eq_ignore_ascii_case("INFO") && c.mode.replace_all);
-    let format_overwrite_all = column_specs.iter().any(|c| {
-        (c.key.eq_ignore_ascii_case("FMT") || c.key.eq_ignore_ascii_case("FORMAT"))
-            && c.mode.replace_all
-    });
+    // bcftools treats `-c INFO` / `-c FMT` as "every tag of the annotation
+    // header", each transferred on its own: target tags the annotation lacks
+    // or leaves missing stay as they are, so nothing is wiped wholesale.
+    let info_overwrite_all = false;
+    let format_overwrite_all = false;
 
     let num_threads = (rayon::current_num_threads() / 2).max(1);
     if debug {
@@ -651,12 +650,13 @@ fn ensure_header_compatible(
     let ann_number = header_attr(annotation_line, "Number");
     let ann_type = header_attr(annotation_line, "Type");
     if input_number != ann_number || input_type != ann_type {
-        anyhow::bail!(
-            "{kind}/{id} header conflict: input Number={:?},Type={:?}; annotation Number={:?},Type={:?}",
-            input_number,
-            input_type,
-            ann_number,
-            ann_type
+        // bcftools keeps the target's definition and carries the values over.
+        eprintln!(
+            "Warning: {kind}/{id} is defined differently in the annotation file (Number={},Type={}) and the input (Number={},Type={}); using the input definition",
+            ann_number.as_deref().unwrap_or("?"),
+            ann_type.as_deref().unwrap_or("?"),
+            input_number.as_deref().unwrap_or("?"),
+            input_type.as_deref().unwrap_or("?")
         );
     }
     Ok(())

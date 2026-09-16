@@ -11,8 +11,8 @@ pub struct ConsensusArgs {
     #[arg(short = 'c', long = "chain")]
     pub chain: Option<PathBuf>,
 
-    #[arg(short = 'H', long = "haplotype", default_value = "1")]
-    pub haplotype: String,
+    #[arg(short = 'H', long = "haplotype")]
+    pub haplotype: Option<String>,
 
     #[arg(short = 'I', long = "iupac-codes")]
     pub iupac_codes: bool,

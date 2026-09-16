@@ -52,9 +52,9 @@
 
     #[test]
     fn line_rewrites_only_float_typed_fields() {
-        let mut c = FloatCanon::from_headers(&headers());
+        let mut c = RecordCanon::from_headers(&headers());
         let line = "1\t100\t.\tA\tC,G\t238.0\tPASS\tDP=1e1;XRF=1e6,2e6,3e6;TXT=1e6;AF=1e-1,5e-2\tGT:FGS:FGF\t0/1:1e-1,2,3:1e-1,2e-2,3e-3\t.";
-        let want = "1\t100\t.\tA\tC,G\t238\tPASS\tDP=1e1;XRF=1e+06,2e+06,3e+06;TXT=1e6;AF=0.1,0.05\tGT:FGS:FGF\t0/1:1e-1,2,3:0.1,0.02,0.003\t.";
+        let want = "1\t100\t.\tA\tC,G\t238\tPASS\tDP=1e1;XRF=1e+06,2e+06,3e+06;TXT=1e6;AF=0.1,0.05\tGT:FGS:FGF\t0/1:1e-1,2,3:0.1,0.02,0.003\t.:.:.";
         assert_eq!(c.canon_line(line).as_deref(), Some(want));
         assert_eq!(c.canon_line(want), None);
         assert_eq!(c.canon_line("#CHROM\tPOS"), None);
@@ -63,15 +63,21 @@
             c.canon_line("1\t100\t.\tA\tC\t1e2\t.\t.").as_deref(),
             Some("1\t100\t.\tA\tC\t100\t.\t.")
         );
-        // A FORMAT column without Float keys, then samples shorter than FORMAT.
+        // A FORMAT column without Float keys leaves values alone; a short
+        // sample column is padded with missing fields as htslib prints it.
         assert_eq!(
-            c.canon_line("1\t100\t.\tA\tC\t.\t.\t.\tGT:FGS\t0/1:1e-1\t0/1"),
-            None
+            c.canon_line("1\t100\t.\tA\tC\t.\t.\t.\tGT:FGS\t0/1:1e-1\t0/1").as_deref(),
+            Some("1\t100\t.\tA\tC\t.\t.\t.\tGT:FGS\t0/1:1e-1\t0/1:.")
         );
+        assert_eq!(
+            c.canon_line("1\t100\t.\tA\tC\t.\t.\t.\tDP:AD:FR\t.\t2:2,11:2,11\t3:3").as_deref(),
+            Some("1\t100\t.\tA\tC\t.\t.\t.\tDP:AD:FR\t.:.:.\t2:2,11:2,11\t3:3:.")
+        );
+        assert_eq!(c.canon_line("1\t100\t.\tA\tC\t.\t.\t.\tGT\t0/1\t."), None);
         assert_eq!(
             c.canon_line("1\t100\t.\tA\tC\t.\t.\t.\tFGF:GT\t1e-1:0/1\t.")
                 .as_deref(),
-            Some("1\t100\t.\tA\tC\t.\t.\t.\tFGF:GT\t0.1:0/1\t.")
+            Some("1\t100\t.\tA\tC\t.\t.\t.\tFGF:GT\t0.1:0/1\t.:.")
         );
         assert_eq!(c.canon_info("AF=1e-1;DP=1e1"), "AF=0.1;DP=1e1");
         assert!(c.info_is_float("AF") && !c.info_is_float("DP") && c.format_is_float("FGF"));

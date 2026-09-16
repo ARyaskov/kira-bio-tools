@@ -495,7 +495,7 @@ struct QueryFormatContext {
     selected: Vec<usize>,
     parts: Vec<QPart>,
     /// bcftools re-renders floats it prints; so do we.
-    canon: crate::vcf::FloatCanon,
+    canon: crate::vcf::RecordCanon,
 }
 
 impl QueryFormatContext {
@@ -510,7 +510,7 @@ impl QueryFormatContext {
             samples: samples.to_vec(),
             selected,
             parts: parse_qparts(&format)?,
-            canon: crate::vcf::FloatCanon::from_headers(header),
+            canon: crate::vcf::RecordCanon::from_headers(header),
         })
     }
 

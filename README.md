@@ -86,12 +86,13 @@ Streaming: every reader accepts `-` (or no path where the input is optional)
 for stdin and detects plain, gzip, BGZF, VCF and BCF by content; `-O z`, `-O b`
 and `-O u` write to stdout when no `-o` is given.
 
-Floats: output floats are rendered as htslib renders them (`kputd`, i.e.
-`%g` with six significant digits, after the value is narrowed to `float`), so
-`1e-1` prints as `0.1`, `60.00` as `60` and `1e6` as `1e+06`. Text sinks apply
-this to QUAL and to Float-typed INFO/FORMAT values only, leaving every other
-column byte-for-byte as read; BCF decoding, `query` and `merge` use the same
-formatter.
+Record text: output floats are rendered as htslib renders them (`kputd`,
+i.e. `%g` with six significant digits, after the value is narrowed to
+`float`), so `1e-1` prints as `0.1`, `60.00` as `60` and `1e6` as `1e+06`,
+and a sample column shorter than FORMAT is padded with missing fields (`.`
+becomes `.:.:.`), as bcftools prints it. Text sinks apply this to QUAL, to
+Float-typed INFO/FORMAT values and to short sample columns only, leaving every
+other byte as read; BCF decoding, `query` and `merge` use the same formatter.
 
 **3. Free-form bcftools argv.** These take the whole bcftools command line as
 positional arguments, with no native options of their own:
@@ -166,6 +167,17 @@ Commands: `query`, `cnv`.
   Backend and I/O tuning: `--gpu`, `--bgzf-level`, `--cache-plain`,
   `--bgzf-after`, `--mmap-output`, `--mmap-no-flush`, `--ram-output`,
   `--ram-max-mb`, `--no-ktile`, `--no-build-ktile`, `--force-build-ktile`.
+  Column semantics follow bcftools: `-c INFO` / `-c FMT` transfer every tag
+  of the annotation header one by one (target tags the source lacks or
+  leaves missing are kept; Flag tags take the source record's state),
+  `DST:=SRC` renames on transfer (`FMT/newGT:=GT`, `FMT/GT:=newGT`, with
+  genotypes copied whole and `+FMT/GT` filling only `./.`),
+  `INFO/TAG:=./FILTER` copies the target's own FILTER column (filters joined
+  by `,`), `-c ALT` pairs records on POS/REF and replaces ALT, and a tag
+  defined differently in the two headers keeps the input definition with a
+  warning. Not yet mirrored: INFO/END matching for symbolic alleles,
+  allele-aware FORMAT vectors under `-c FMT`, and bcftools' `+`-mode quirk
+  that replaces an Integer vector whole when its first value is missing.  
 
 - `annotate-serve`  
   Server mode driven by stdin commands. Same annotation source group and
@@ -251,6 +263,11 @@ Commands: `query`, `cnv`.
   `-S`, `--mask` or gap options the expression is evaluated on the record
   borrowed from its line and the line is written back unchanged (FILTER
   `.` becomes `PASS`, as bcftools does).  
+  The engine follows bcftools for per-sample subscripts (`AD[:1]`,
+  `FR[0:1]`), Flag tags compared as 0/1 (`INDEL=0`), aggregates against
+  FORMAT fields (`sum(AD[*]) > FORMAT/DP`) and `-g` type lists
+  (`-g2:mnp,indel,other`, spans from INFO/END); `-S .` with `-e` masks the
+  samples the expression matches and recomputes AN/AC.  
   Args: `<input>`, `-i/--include`, `-e/--exclude`, `--expr`, `-s/--soft-filter`,
   `-m/--mode`, `-S/--set-GTs`, `-g/--SnpGap`, `-G/--IndelGap`, `--mask`,
   `-M/--mask-file`, `--mask-overlap`, `-o/--output`, `-O/--output-type`,
@@ -324,6 +341,14 @@ Commands: `query`, `cnv`.
 
 - `consensus`  
   Apply variants to a reference to build a consensus sequence.  
+  A port of bcftools' `consensus.c`: the FASTA is streamed line by line with
+  the same buffer bookkeeping, output wraps at 60 columns, and sample
+  selection is bcftools 1.19's (without `-s` every sample is used and
+  genotypes become IUPAC codes; `-s -` applies every ALT; `-H` needs exactly
+  one sample and takes `N`, `R`, `A`, `L[R|A]`, `S[R|A]`, `I` or `NpIu`).
+  Masks are BED (0-based) or TAB (1-based) regions; a character mask also
+  skips the variants it overlaps, `uc`/`lc` masks only change case.
+  `--mask-with` pairs with `-m` by position on the command line.  
   Args: `[input]`, `-f/--fasta-ref`, `-c/--chain`, `-H/--haplotype`,
   `-I/--iupac-codes`, `-a/--absent`, `--mark-del`, `--mark-ins`, `--mark-snv`,
   `-m/--mask`, `--mask-with`, `-M/--missing`, `-s/--samples`,

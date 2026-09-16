@@ -434,7 +434,9 @@ impl AniIndex {
 
         if let Some(list) = self.lookup_pos_index(chr_id, pos) {
             // Pass 1: exact REF + exact ALT. The fastest and overwhelmingly
-            // common case — same source/target naming conventions.
+            // common case — same source/target naming conventions. A
+            // REF-only target (ALT ".") takes the first record with the same
+            // REF, as bcftools' default pair logic does.
             for &idx in list {
                 let e = &self.entries[idx as usize];
                 if e.chr_id != chr_id || e.pos != pos {
@@ -445,7 +447,9 @@ impl AniIndex {
                     continue;
                 }
                 let alt_str = self.read_cstring(e.alt_ofs as usize);
-                if alt_str.as_ref() != alt {
+                // An unsplit multi-allelic entry (tab sources) matches when
+                // it carries the allele; the A/R merge then maps by allele.
+                if alt != "." && alt_str.as_ref() != alt && !alt_str.as_ref().split(',').any(|a| a == alt) {
                     continue;
                 }
                 return Some(self.build_bundle_from_entry_idx_opts_with_meta_filtered(
