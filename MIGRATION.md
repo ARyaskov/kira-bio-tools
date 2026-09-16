@@ -180,42 +180,30 @@ process index_vcf {
 }
 ```
 
-## Performance Improvements
+## Presets and Custom Layouts
 
-`kira-bt` offers several performance advantages over tabix:
-
-### Parallel Indexing
+`kira-bt tabix` indexes the same text layouts as tabix:
 
 ```bash
-# kira-bt automatically uses multiple cores
-kira-bt tabix -p vcf large_file.vcf.gz
-
-# Specify thread count explicitly
-kira-bt tabix -@ 8 -p vcf large_file.vcf.gz
+kira-bt tabix -p vcf calls.vcf.gz      # VCF: POS and REF length, or INFO/END
+kira-bt tabix -p bed regions.bed.gz    # BED: 0-based half-open columns 1-3
+kira-bt tabix -p gff genes.gff3.gz     # GFF/GTF: 1-based columns 1, 4, 5
+kira-bt tabix -p sam reads.sam.gz      # SAM: RNAME/POS and the CIGAR span
+kira-bt tabix -s 2 -b 3 -e 4 table.tsv.gz   # any tab-delimited layout
 ```
 
-### O(1) Point Queries (Optional)
+Without `-p` the layout is guessed from the file name (`.vcf`, `.bed`,
+`.gff`/`.gff3`/`.gtf`, `.sam`, with or without `.gz`); `-s/-b/-e` select a
+generic layout (defaults 1, 4, 5 as in tabix), and `-0`, `-c` and `-S` adjust
+whichever applies. The `.tbi` records the layout, so later queries, `-h`,
+`-H` and `-l` read the file with the same columns and comment character.
 
-kira-bt creates an additional `.kbi` index for instant lookups:
+## Performance
 
-```bash
-# Index creates both .tbi and .kbi
-kira-bt tabix -p vcf file.vcf.gz
-
-# Point queries use .kbi automatically
-kira-bt tabix file.vcf.gz chr1:12345
-```
-
-### Benchmark Comparison
-
-On a 1M variant VCF (BGZF-compressed, 200 MB):
-
-| Operation | tabix | kira-bt | Speedup |
-|-----------|-------|---------|---------|
-| Index build | 7-10s | 9-10s | ~1x |
-| Point query | 180-300ms | 50-100ms | ~2-3x |
-| Range query | 200-350ms | 210ms | ~1x |
-| Range scan | 1-4M/s | 5-22M/s | ~2-5x |
+Indexing is single-threaded, as in tabix, and runs at a comparable speed;
+`-@/--threads` is accepted for command-line compatibility and currently has
+no effect. Queries read the same `.tbi`/`.csi` chunks tabix reads. No extra
+index files are created.
 
 ## Backward Compatibility
 
@@ -226,15 +214,6 @@ kira-bt reads and writes standard `.tbi` and `.csi` files:
 - **`.tbi`** files created by kira-bt work with tabix
 - **`.csi`** files created by kira-bt work with tabix
 - **`.tbi/.csi`** files created by tabix work with kira-bt
-
-### Additional `.kbi` Index
-
-kira-bt may create an additional `.kbi` file for performance. This file:
-
-- Is **optional** and can be deleted
-- Does **not** affect tabix compatibility
-- Provides O(1) lookups when present
-- Is **ignored** by tabix and other tools
 
 ## Troubleshooting
 
@@ -268,15 +247,14 @@ kira-bt tabix -p vcf input.vcf.gz
 Beyond tabix compatibility, kira-bt offers extended commands:
 
 ```bash
-# Extended index command with KBI
+# CSI by default, .tbi with -t; -n/-s report record counts from the index
 kira-bt index file.vcf.gz
 
-# Extended query with count
-kira-bt query file.vcf.gz chr1:1-1000000 --count
+# bcftools-style region queries and formatted output
+kira-bt query -r chr1:1-1000000 -f '%CHROM\t%POS\n' file.vcf.gz
 
-# Index statistics
-kira-bt stat file.vcf.gz.tbi
-kira-bt stat file.kbi
+# bcftools view on an indexed file
+kira-bt view -r chr1:1-1000000 file.vcf.gz
 ```
 
 ## Testing Your Migration

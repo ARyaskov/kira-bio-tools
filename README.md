@@ -201,7 +201,10 @@ Commands: `query`, `cnv`.
 - `tabix`  
   Tabix-compatible indexing and querying. Writes `.tbi` by default and `.csi`
   with `-C`; both are readable by htslib, and htslib-made indexes are used for
-  queries. Regions use tabix semantics (`chr:beg-end`, `-0`, `-R/-T` region
+  queries. Layouts: `-p vcf|bed|gff|sam` (guessed from the file name when
+  `-p` is absent) or custom `-s/-b/-e` columns with `-0`, `-c`, `-S`; the
+  index records the layout, so queries, `-h`/`-H` and `-l` follow it for any
+  text file. Regions use tabix semantics (`chr:beg-end`, `-0`, `-R/-T` region
   files).  
   Args: `<input> [regions...]`.  
   Options: `-p/--preset`, `-C/--csi`, `-m/--min-shift`, `-s/--sequence`,

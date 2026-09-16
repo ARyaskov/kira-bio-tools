@@ -168,9 +168,12 @@ impl IndexBuilder {
                     }
                     let first = list.first().map(|c| c.0 >> 16).unwrap_or(0);
                     let last = list.last().map(|c| c.1 >> 16).unwrap_or(0);
-                    if last.saturating_sub(first) < MIN_MARKER_DIST {
+                    // htslib folds a small bin only into a parent that
+                    // already has records of its own.
+                    let parent = bin_parent(id);
+                    if last.saturating_sub(first) < MIN_MARKER_DIST && r.bins.contains_key(&parent) {
                         let moved = r.bins.remove(&id).unwrap();
-                        r.bins.entry(bin_parent(id)).or_default().extend(moved);
+                        r.bins.get_mut(&parent).unwrap().extend(moved);
                     }
                 }
             }
@@ -241,6 +244,271 @@ pub fn vcf_line_interval(line: &str) -> Option<(&str, u64, u64)> {
     Some((chrom, beg0, end0))
 }
 
+pub const TBX_GENERIC: i32 = 0;
+pub const TBX_SAM: i32 = 1;
+pub const TBX_VCF: i32 = 2;
+pub const TBX_UCSC: i32 = 0x10000;
+
+/// htslib `tbx_conf_t`: which columns carry the sequence name and the
+/// coordinates (1-based column numbers), the comment character and the
+/// number of leading lines to skip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TabixConf {
+    pub preset: i32,
+    pub sc: i32,
+    pub bc: i32,
+    pub ec: i32,
+    pub meta: u8,
+    pub skip: i32,
+}
+
+impl TabixConf {
+    pub const GFF: Self = Self { preset: TBX_GENERIC, sc: 1, bc: 4, ec: 5, meta: b'#', skip: 0 };
+    pub const BED: Self = Self { preset: TBX_UCSC, sc: 1, bc: 2, ec: 3, meta: b'#', skip: 0 };
+    pub const PSLTBL: Self = Self { preset: TBX_UCSC, sc: 15, bc: 17, ec: 18, meta: b'#', skip: 0 };
+    pub const SAM: Self = Self { preset: TBX_SAM, sc: 3, bc: 4, ec: 0, meta: b'@', skip: 0 };
+    pub const VCF: Self = Self { preset: TBX_VCF, sc: 1, bc: 2, ec: 0, meta: b'#', skip: 0 };
+
+    /// `-p gff|bed|sam|vcf` (`psltbl` too).
+    pub fn preset(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "gff" => Some(Self::GFF),
+            "bed" => Some(Self::BED),
+            "sam" => Some(Self::SAM),
+            "vcf" => Some(Self::VCF),
+            "psltbl" => Some(Self::PSLTBL),
+            _ => None,
+        }
+    }
+
+    /// Guess the preset from the file name, `.gz`/`.bgz` stripped.
+    pub fn from_extension(path: &Path) -> Option<Self> {
+        let name = path.file_name()?.to_str()?.to_ascii_lowercase();
+        let base = name.strip_suffix(".gz").or_else(|| name.strip_suffix(".bgz")).unwrap_or(&name);
+        let ext = base.rsplit('.').next()?;
+        match ext {
+            "vcf" => Some(Self::VCF),
+            "bed" => Some(Self::BED),
+            "gff" | "gff3" | "gtf" => Some(Self::GFF),
+            "sam" => Some(Self::SAM),
+            "psl" | "psltbl" => Some(Self::PSLTBL),
+            _ => None,
+        }
+    }
+
+    pub fn from_header(h: &TabixHeader) -> Self {
+        Self { preset: h.format, sc: h.col_seq, bc: h.col_beg, ec: h.col_end, meta: h.meta as u8, skip: h.skip }
+    }
+
+    pub fn to_header(self, names: Vec<String>) -> TabixHeader {
+        TabixHeader { format: self.preset, col_seq: self.sc, col_beg: self.bc, col_end: self.ec, meta: self.meta as i32, skip: self.skip, names }
+    }
+
+    /// The VCF preset on the standard columns, where [`vcf_line_interval`]
+    /// applies.
+    pub fn is_vcf(&self) -> bool {
+        self.preset & 0xffff == TBX_VCF && self.sc == 1 && self.bc == 2
+    }
+}
+
+/// `strtoll(s, .., 0)` without the hex/octal cases: leading blanks, a sign
+/// and decimal digits.
+fn leading_i64(s: &str) -> Option<i64> {
+    let t = s.trim_start();
+    let (neg, digits) = match t.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    let n = digits.bytes().take_while(u8::is_ascii_digit).count();
+    if n == 0 {
+        return None;
+    }
+    let v: i64 = digits[..n].parse().ok()?;
+    Some(if neg { -v } else { v })
+}
+
+/// `tbx_parse1`: `(name, beg0, end0)` of a text line under `conf`.
+pub fn tabix_line_interval<'a>(conf: &TabixConf, line: &'a str) -> Option<(&'a str, u64, u64)> {
+    let mut name: Option<&str> = None;
+    let (mut beg, mut end): (i64, i64) = (-1, -1);
+    for (i, field) in line.split('\t').enumerate() {
+        let id = i as i32 + 1;
+        if id == conf.sc {
+            name = Some(field);
+        } else if id == conf.bc {
+            beg = leading_i64(field)?;
+            if conf.bc <= conf.ec {
+                end = beg;
+            }
+            if conf.preset & TBX_UCSC == 0 {
+                beg -= 1;
+            } else if conf.bc <= conf.ec {
+                end += 1;
+            }
+            if beg < 0 {
+                eprintln!("Warning: Coordinate <= 0 detected. Did you forget to use the -0 option?");
+                beg = 0;
+            }
+            if end < 1 {
+                end = 1;
+            }
+        } else {
+            match conf.preset & 0xffff {
+                TBX_GENERIC => {
+                    if id == conf.ec {
+                        end = leading_i64(field)?;
+                    }
+                }
+                TBX_SAM => {
+                    if id == 6 {
+                        // Reference span of the CIGAR: M, D and N consume reference.
+                        let mut l: i64 = 0;
+                        let mut num: i64 = 0;
+                        for c in field.bytes() {
+                            if c.is_ascii_digit() {
+                                num = num * 10 + (c - b'0') as i64;
+                            } else {
+                                if matches!(c.to_ascii_uppercase(), b'M' | b'D' | b'N') {
+                                    l += num;
+                                }
+                                num = 0;
+                            }
+                        }
+                        if l == 0 {
+                            l = 1;
+                        }
+                        end = beg + l;
+                    }
+                }
+                TBX_VCF => {
+                    if id == 4 {
+                        if !field.is_empty() {
+                            end = beg + field.len() as i64;
+                        }
+                    } else if id == 8 {
+                        let v = field.strip_prefix("END=").or_else(|| field.find(";END=").map(|k| &field[k + 5..]));
+                        if let Some(v) = v.filter(|v| !v.starts_with('.')) {
+                            if let Some(e) = leading_i64(v) {
+                                if e > beg {
+                                    end = e;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let name = name?;
+    if beg < 0 || end < 0 {
+        return None;
+    }
+    Some((name, beg as u64, end as u64))
+}
+
+/// `adjust_n_lvls`: enough levels for `max_len` bases at `min_shift`.
+fn adjust_n_lvls(min_shift: u8, mut n_lvls: u8, max_len: i64) -> u8 {
+    let mut s: i64 = 1i64 << (min_shift as i64 + n_lvls as i64 * 3);
+    while max_len > s {
+        n_lvls += 1;
+        s <<= 3;
+    }
+    n_lvls
+}
+
+/// The longest sequence a header line declares (`##contig` length, `@SQ LN`).
+fn header_ref_len(conf: &TabixConf, line: &str) -> Option<i64> {
+    match conf.preset & 0xffff {
+        TBX_VCF => {
+            let body = line.strip_prefix("##contig=<")?;
+            let v = body.split(',').find_map(|kv| kv.strip_prefix("length="))?;
+            leading_i64(v.trim_end_matches('>'))
+        }
+        TBX_SAM => {
+            if !line.starts_with("@SQ") {
+                return None;
+            }
+            line.split('\t').find_map(|f| f.strip_prefix("LN:")).and_then(leading_i64)
+        }
+        _ => None,
+    }
+}
+
+/// Index a BGZF text file under a tabix column layout (`tbx_index`): the
+/// first `conf.skip` lines and lines starting with `conf.meta` are header,
+/// every other line contributes `[beg0, end0)` on its sequence. A CSI gets
+/// as many levels as the longest declared sequence needs (100 Gbp when the
+/// header declares none), as htslib does.
+pub fn build_tabix_index(input: &Path, conf: &TabixConf, kind: IndexKind, min_shift: Option<u8>) -> Result<BinIndex> {
+    if !is_bgzf(input).with_context(|| format!("open {}", input.display()))? {
+        bail!("{}: not BGZF-compressed; only bgzip-compressed files can be indexed", input.display());
+    }
+    let (min_shift, mut depth) = match kind {
+        IndexKind::Tbi => (14u8, 5u8),
+        IndexKind::Csi => {
+            let ms = min_shift.unwrap_or(14);
+            (ms, tabix_depth_for(ms))
+        }
+    };
+    let f = File::open(input).with_context(|| format!("open {}", input.display()))?;
+    let mut reader = noodles_bgzf::io::Reader::new(f);
+    let mut b: Option<IndexBuilder> = None;
+    let mut names: Vec<String> = Vec::new();
+    let mut name_ids: fxhash::FxHashMap<String, usize> = fxhash::FxHashMap::default();
+    let mut line = String::new();
+    let mut lineno = 0i64;
+    let mut max_ref_len = 0i64;
+    loop {
+        let start = u64::from(reader.virtual_position());
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            break;
+        }
+        lineno += 1;
+        let end = u64::from(reader.virtual_position());
+        let is_meta = line.as_bytes().first() == Some(&conf.meta);
+        if is_meta && kind == IndexKind::Csi {
+            if let Some(l) = header_ref_len(conf, line.trim_end_matches(['\r', '\n'])) {
+                max_ref_len = max_ref_len.max(l);
+            }
+        }
+        if lineno <= conf.skip as i64 || is_meta || line.trim_end().is_empty() {
+            continue;
+        }
+        let b = b.get_or_insert_with(|| {
+            if kind == IndexKind::Csi {
+                if max_ref_len == 0 {
+                    max_ref_len = 100 * 1024 * 1024 * 1024;
+                }
+                depth = adjust_n_lvls(min_shift, depth, max_ref_len);
+            }
+            IndexBuilder::new(kind, min_shift, depth)
+        });
+        let l = line.trim_end_matches(['\r', '\n']);
+        let interval = if conf.is_vcf() { vcf_line_interval(l) } else { tabix_line_interval(conf, l) };
+        let Some((chrom, beg0, end0)) = interval else {
+            // htslib skips lines it cannot parse.
+            eprintln!("Warning: failed to parse line {lineno} of {}, was the wrong -p [type] used?\n{}", input.display(), l);
+            continue;
+        };
+        let tid = match name_ids.get(chrom) {
+            Some(&t) => t,
+            None => {
+                let t = names.len();
+                names.push(chrom.to_string());
+                name_ids.insert(chrom.to_string(), t);
+                t
+            }
+        };
+        b.add(tid, beg0, end0, start, end)?;
+    }
+    let b = b.unwrap_or_else(|| IndexBuilder::new(kind, min_shift, depth));
+    let n = names.len();
+    Ok(b.finish(Some(conf.to_header(names)), n))
+}
+
 fn is_bcf_bgzf(path: &Path) -> Result<bool> {
     let f = File::open(path)?;
     let mut r = noodles_bgzf::io::Reader::new(f);
@@ -287,46 +555,7 @@ fn build_bcf_index(input: &Path, min_shift: u8) -> Result<BinIndex> {
 }
 
 fn build_vcf_index(input: &Path, kind: IndexKind, min_shift: Option<u8>) -> Result<BinIndex> {
-    let (min_shift, depth) = match kind {
-        IndexKind::Tbi => (14u8, 5u8),
-        IndexKind::Csi => {
-            let ms = min_shift.unwrap_or(14);
-            (ms, tabix_depth_for(ms))
-        }
-    };
-    let f = File::open(input).with_context(|| format!("open {}", input.display()))?;
-    let mut reader = noodles_bgzf::io::Reader::new(f);
-    let mut b = IndexBuilder::new(kind, min_shift, depth);
-    let mut names: Vec<String> = Vec::new();
-    let mut name_ids: fxhash::FxHashMap<String, usize> = fxhash::FxHashMap::default();
-    let mut line = String::new();
-    loop {
-        let start = u64::from(reader.virtual_position());
-        line.clear();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
-            break;
-        }
-        let end = u64::from(reader.virtual_position());
-        if line.starts_with('#') || line.trim_end().is_empty() {
-            continue;
-        }
-        let Some((chrom, beg0, end0)) = vcf_line_interval(line.trim_end_matches(['\r', '\n'])) else {
-            bail!("malformed VCF line: {}", line.trim_end());
-        };
-        let tid = match name_ids.get(chrom) {
-            Some(&t) => t,
-            None => {
-                let t = names.len();
-                names.push(chrom.to_string());
-                name_ids.insert(chrom.to_string(), t);
-                t
-            }
-        };
-        b.add(tid, beg0, end0, start, end)?;
-    }
-    let n = names.len();
-    Ok(b.finish(Some(TabixHeader::vcf(names)), n))
+    build_tabix_index(input, &TabixConf::VCF, kind, min_shift)
 }
 
 /// Build and write an index next to `input` (or at `output`).

@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use crate::cli::args::TabixArgs;
-use crate::csi::{BinIndex, IndexKind, IndexedVcfReader, build_index, find_index_for};
+use crate::csi::{BinIndex, IndexKind, IndexedVcfReader, TabixConf, build_index, build_tabix_index, find_index_for};
 use crate::util::Region;
 use crate::vcf::VcfReader;
 
@@ -13,7 +13,7 @@ pub fn cmd_tabix(args: TabixArgs) -> Result<()> {
         return cmd_list_tabix(&args);
     }
     if args.only_header {
-        return print_vcf_header(&args.input);
+        return print_header_lines(&args.input, header_conf(&args)?);
     }
     if args.regions.is_empty() && args.regions_file.is_none() && args.targets_file.is_none() {
         return cmd_index_tabix(&args);
@@ -30,27 +30,69 @@ fn index_path_for(input: &Path, kind: IndexKind) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// The column layout for indexing: `-p`, else custom `-s/-b/-e` (generic,
+/// gff-like defaults), else guessed from the file name; `-c`, `-S` and `-0`
+/// adjust whichever applies.
+fn index_conf(args: &TabixArgs) -> Result<TabixConf> {
+    let custom = args.sequence_col.is_some() || args.begin_col.is_some() || args.end_col.is_some();
+    let mut conf = if let Some(p) = &args.preset {
+        TabixConf::preset(p).ok_or_else(|| anyhow::anyhow!("unknown preset {p:?}; expected gff, bed, sam or vcf"))?
+    } else if custom {
+        TabixConf::GFF
+    } else {
+        TabixConf::from_extension(&args.input)
+            .ok_or_else(|| anyhow::anyhow!("cannot guess the format of {}; use -p gff|bed|sam|vcf or -s/-b/-e", args.input.display()))?
+    };
+    if let Some(c) = args.sequence_col {
+        conf.sc = c as i32;
+    }
+    if let Some(c) = args.begin_col {
+        conf.bc = c as i32;
+    }
+    if let Some(c) = args.end_col {
+        conf.ec = c as i32;
+    }
+    if let Some(c) = args.comment_char {
+        conf.meta = c as u8;
+    }
+    if let Some(n) = args.skip_lines {
+        conf.skip = n as i32;
+    }
+    if args.zero_based {
+        conf.preset |= crate::csi::TBX_UCSC;
+    }
+    Ok(conf)
+}
+
+/// The layout for reading headers: the existing index's, else as for indexing.
+fn header_conf(args: &TabixArgs) -> Result<TabixConf> {
+    if let Some(idx) = find_index_for(&args.input) {
+        if let Ok(index) = BinIndex::load(&idx) {
+            if let Some(h) = index.tabix_header() {
+                return Ok(TabixConf::from_header(h));
+            }
+        }
+    }
+    Ok(index_conf(args).unwrap_or(TabixConf::VCF))
+}
+
 fn cmd_index_tabix(args: &TabixArgs) -> Result<()> {
     if !args.input.exists() {
         bail!("Input file does not exist: {}", args.input.display());
     }
-    if let Some(p) = &args.preset {
-        if !p.eq_ignore_ascii_case("vcf") {
-            bail!("tabix preset {p:?} is not supported; only VCF/BCF inputs can be indexed");
-        }
-    }
-    let custom_cols = args.sequence_col.is_some_and(|c| c != 1)
-        || args.begin_col.is_some_and(|c| c != 2)
-        || args.end_col.is_some_and(|c| c != 0 && c != 2);
-    if custom_cols {
-        bail!("custom -s/-b/-e columns are not supported; only the VCF layout can be indexed");
-    }
+    let conf = index_conf(args)?;
     let kind = if args.csi { IndexKind::Csi } else { IndexKind::Tbi };
     let out = index_path_for(&args.input, kind);
     if out.exists() && !args.force {
         bail!("the index file exists; use -f to overwrite: {}", out.display());
     }
-    build_index(&args.input, &out, kind, args.min_shift)?;
+    if conf == TabixConf::VCF {
+        // VCF and BCF (CSI only) through the VCF/BCF driver.
+        build_index(&args.input, &out, kind, args.min_shift)?;
+    } else {
+        let idx = build_tabix_index(&args.input, &conf, kind, args.min_shift)?;
+        idx.save(&out).with_context(|| format!("write {}", out.display()))?;
+    }
     Ok(())
 }
 
@@ -176,12 +218,18 @@ fn cmd_list_tabix(args: &TabixArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_vcf_header(path: &Path) -> Result<()> {
-    let mut reader = VcfReader::open(path)?;
-    let headers = reader.header()?;
+/// `-H`: the leading lines a layout treats as header (skipped lines and
+/// lines starting with the comment character), for any tabix-indexed text.
+fn print_header_lines(path: &Path, conf: TabixConf) -> Result<()> {
+    let reader = crate::util::open_text_maybe_gz(path)?;
     let stdout = std::io::stdout();
     let mut out = BufWriter::new(stdout.lock());
-    for line in headers {
+    for (i, line) in reader.lines().enumerate() {
+        let line = line?;
+        let line = line.trim_end_matches('\r');
+        if !((i as i64) < conf.skip as i64 || line.as_bytes().first() == Some(&conf.meta)) {
+            break;
+        }
         out.write_all(line.as_bytes())?;
         out.write_all(b"\n")?;
     }

@@ -346,6 +346,12 @@ impl BinIndex {
         Ok(())
     }
 
+    /// The tabix header (column layout and sequence names) of a TBI or a
+    /// CSI built from text; `None` for BCF indexes.
+    pub fn tabix_header(&self) -> Option<&TabixHeader> {
+        self.header.as_ref()
+    }
+
     pub fn names(&self) -> &[String] {
         self.header.as_ref().map(|h| h.names.as_slice()).unwrap_or(&[])
     }

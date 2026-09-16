@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use super::binning::BinIndex;
-use super::builder::{find_index_for, vcf_line_interval};
+use super::builder::{TabixConf, find_index_for, tabix_line_interval, vcf_line_interval};
 use crate::bcf::record::{record_end0, record_meta};
 use crate::bcf::{BCF_MAGIC, BcfReader};
 
@@ -22,6 +22,8 @@ pub struct IndexedVcfReader {
     index_path: PathBuf,
     headers: Vec<String>,
     names: Vec<String>,
+    /// Column layout of a text source, from the index header.
+    conf: TabixConf,
 }
 
 impl IndexedVcfReader {
@@ -48,22 +50,25 @@ impl IndexedVcfReader {
                     names.push(r.dict.contig_name(rid).unwrap_or("").to_string());
                 }
             }
-            return Ok(Self { src: Source::Bcf(r), index, index_path: index_path.to_path_buf(), headers, names });
+            return Ok(Self { src: Source::Bcf(r), index, index_path: index_path.to_path_buf(), headers, names, conf: TabixConf::VCF });
         }
+        let conf = index.tabix_header().map(TabixConf::from_header).unwrap_or(TabixConf::VCF);
         let f = File::open(path)?;
         let mut r = noodles_bgzf::io::Reader::new(f);
         let mut headers = Vec::new();
         let mut line = String::new();
+        let mut lineno = 0i64;
         loop {
             line.clear();
             let n = r.read_line(&mut line)?;
-            if n == 0 || !line.starts_with('#') {
+            lineno += 1;
+            if n == 0 || !(lineno <= conf.skip as i64 || line.as_bytes().first() == Some(&conf.meta)) {
                 break;
             }
             headers.push(line.trim_end_matches(['\r', '\n']).to_string());
         }
         let names = index.names().to_vec();
-        Ok(Self { src: Source::Vcf(r), index, index_path: index_path.to_path_buf(), headers, names })
+        Ok(Self { src: Source::Vcf(r), index, index_path: index_path.to_path_buf(), headers, names, conf })
     }
 
     pub fn headers(&self) -> &[String] {
@@ -131,6 +136,7 @@ impl IndexedVcfReader {
         let beg0 = beg1.saturating_sub(1) as u64;
         let end0 = end1 as u64;
         let chunks = self.index.query(rid, beg0, end0);
+        let conf = self.conf;
         match &mut self.src {
             Source::Vcf(r) => {
                 let mut line = String::new();
@@ -146,10 +152,11 @@ impl IndexedVcfReader {
                             break;
                         }
                         let l = line.trim_end_matches(['\r', '\n']);
-                        if l.is_empty() || l.starts_with('#') {
+                        if l.is_empty() || l.as_bytes()[0] == conf.meta {
                             continue;
                         }
-                        let Some((c, rb, re)) = vcf_line_interval(l) else { continue };
+                        let interval = if conf.is_vcf() { vcf_line_interval(l) } else { tabix_line_interval(&conf, l) };
+                        let Some((c, rb, re)) = interval else { continue };
                         if c != chrom {
                             continue;
                         }

@@ -93,3 +93,56 @@
         assert!(build_index_in_memory(&path, IndexKind::Csi, None).is_err());
         let _ = std::fs::remove_file(&path);
     }
+
+    #[test]
+    fn tabix_presets_parse_intervals() {
+        assert_eq!(tabix_line_interval(&TabixConf::BED, "chr1\t100\t200\tx"), Some(("chr1", 100, 200)));
+        assert_eq!(tabix_line_interval(&TabixConf::GFF, "chr1\tsrc\tgene\t101\t200\t.\t+\t.\tID=g"), Some(("chr1", 100, 200)));
+        assert_eq!(tabix_line_interval(&TabixConf::SAM, "r1\t0\tchr1\t100\t60\t10M2D5M3I\t*\t0\t0\tACGT\t*"), Some(("chr1", 99, 116)));
+        assert_eq!(tabix_line_interval(&TabixConf::VCF, "1\t100\t.\tACGT\tA\t.\t.\tEND=250"), Some(("1", 99, 250)));
+        let custom = TabixConf { preset: TBX_GENERIC, sc: 2, bc: 3, ec: 4, meta: b'#', skip: 1 };
+        assert_eq!(tabix_line_interval(&custom, "x\tchrZ\t5\t9"), Some(("chrZ", 4, 9)));
+        assert_eq!(tabix_line_interval(&TabixConf::BED, "chr1\tabc\t200"), None);
+        assert_eq!(TabixConf::from_extension(Path::new("a/b.gff3.gz")), Some(TabixConf::GFF));
+        assert_eq!(TabixConf::from_extension(Path::new("x.bed")), Some(TabixConf::BED));
+        assert_eq!(TabixConf::from_extension(Path::new("x.txt.gz")), None);
+        // CSI depth grows with the declared sequence length, 100 Gbp when none is declared.
+        assert_eq!(adjust_n_lvls(14, 6, 100 * 1024 * 1024 * 1024), 8);
+        assert_eq!(adjust_n_lvls(14, 6, 249_250_621), 6);
+        assert_eq!(header_ref_len(&TabixConf::VCF, "##contig=<ID=1,length=249250621>"), Some(249250621));
+        assert_eq!(header_ref_len(&TabixConf::SAM, "@SQ\tSN:chr1\tLN:5000"), Some(5000));
+    }
+
+    /// A BED file indexed with the bed preset answers overlap queries by its
+    /// own columns, and the index header records the layout.
+    #[test]
+    fn bed_index_then_query() {
+        let bed = tmp("regions.bed.gz");
+        write_bgzf_vcf(&bed, &[
+            "#chrom\tstart\tend\tname".into(),
+            "chr1\t100\t200\ta".into(),
+            "chr1\t150\t400\tb".into(),
+            "chr1\t1000\t1001\tc".into(),
+            "chr2\t5\t10\td".into(),
+        ]);
+        let idx = build_tabix_index(&bed, &TabixConf::BED, IndexKind::Tbi, None).unwrap();
+        let h = idx.tabix_header().unwrap();
+        assert_eq!((h.format, h.col_seq, h.col_beg, h.col_end), (TBX_UCSC, 1, 2, 3));
+        assert_eq!(h.names, vec!["chr1".to_string(), "chr2".to_string()]);
+        let mut ip = bed.as_os_str().to_os_string();
+        ip.push(".tbi");
+        idx.save(&ip).unwrap();
+        let mut r = IndexedVcfReader::open(&bed).unwrap();
+        assert_eq!(r.headers(), ["#chrom\tstart\tend\tname".to_string()]);
+        let mut hits = Vec::new();
+        r.query("chr1", 190, 210, |l| { hits.push(l.to_string()); Ok(true) }).unwrap();
+        assert_eq!(hits, vec!["chr1\t100\t200\ta".to_string(), "chr1\t150\t400\tb".to_string()]);
+        hits.clear();
+        r.query("chr1", 1001, 1001, |l| { hits.push(l.to_string()); Ok(true) }).unwrap();
+        assert_eq!(hits, vec!["chr1\t1000\t1001\tc".to_string()]);
+        hits.clear();
+        r.query("chr2", 1, 5, |l| { hits.push(l.to_string()); Ok(true) }).unwrap();
+        assert!(hits.is_empty());
+        let _ = std::fs::remove_file(&bed);
+        let _ = std::fs::remove_file(&ip);
+    }
