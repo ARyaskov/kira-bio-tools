@@ -136,6 +136,79 @@ impl<'a> VcfFieldsFull<'a> {
     }
 }
 
+/// A record borrowed from its text line: every field is a slice of the
+/// line, the only allocation is the sample vector.
+#[derive(Clone, Debug)]
+pub struct VcfRecordRef<'a> {
+    pub chrom: &'a str,
+    pub pos: u32,
+    pub id: &'a str,
+    pub ref_allele: &'a str,
+    pub alt: &'a str,
+    pub qual: &'a str,
+    pub filter: &'a str,
+    pub info: &'a str,
+    pub format: Option<&'a str>,
+    pub samples: Vec<&'a str>,
+}
+
+impl<'a> VcfRecordRef<'a> {
+    /// Split a data line; `None` for header lines, short lines or a
+    /// non-numeric POS.
+    pub fn parse(line: &'a str) -> Option<Self> {
+        if line.starts_with('#') {
+            return None;
+        }
+        let mut it = line.trim_end_matches(['\r', '\n']).split('\t');
+        let chrom = it.next()?;
+        let pos = fast_parse_u32(it.next()?.as_bytes())?;
+        let id = it.next()?;
+        let ref_allele = it.next()?;
+        let alt = it.next()?;
+        let qual = it.next()?;
+        let filter = it.next()?;
+        let info = it.next()?;
+        let format = it.next();
+        let samples: Vec<&'a str> = it.collect();
+        Some(Self { chrom, pos, id, ref_allele, alt, qual, filter, info, format, samples })
+    }
+
+    /// Borrow the fields of an owned record.
+    pub fn from_record(r: &'a VcfRecord) -> Self {
+        Self {
+            chrom: &r.chrom,
+            pos: r.pos,
+            id: &r.id,
+            ref_allele: &r.ref_allele,
+            alt: &r.alt,
+            qual: &r.qual,
+            filter: &r.filter,
+            info: &r.info,
+            format: r.format.as_deref(),
+            samples: r.samples.iter().map(String::as_str).collect(),
+        }
+    }
+
+    /// From already split columns (at least 8).
+    pub fn from_cols(cols: &[&'a str]) -> Option<Self> {
+        if cols.len() < 8 {
+            return None;
+        }
+        Some(Self {
+            chrom: cols[0],
+            pos: fast_parse_u32(cols[1].as_bytes())?,
+            id: cols[2],
+            ref_allele: cols[3],
+            alt: cols[4],
+            qual: cols[5],
+            filter: cols[6],
+            info: cols[7],
+            format: cols.get(8).copied(),
+            samples: if cols.len() > 9 { cols[9..].to_vec() } else { Vec::new() },
+        })
+    }
+}
+
 #[inline]
 pub fn fast_parse_u32(bytes: &[u8]) -> Option<u32> {
     if bytes.is_empty() || bytes.len() > 10 {
@@ -152,3 +225,10 @@ pub fn fast_parse_u32(bytes: &[u8]) -> Option<u32> {
 
     Some(result)
 }
+
+
+
+
+#[cfg(test)]
+#[path = "../../../tests/unit/vcf_record_ref.rs"]
+mod tests;

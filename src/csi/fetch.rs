@@ -87,6 +87,40 @@ impl IndexedVcfReader {
         self.names.iter().position(|n| n == chrom)
     }
 
+    /// BCF sources only: like [`query`] but the callback receives the
+    /// encoded `(shared, indiv)` blocks of each overlapping record.
+    pub fn query_raw<F>(&mut self, chrom: &str, beg1: u32, end1: u32, mut f: F) -> Result<()>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<bool>,
+    {
+        let Some(rid) = self.ref_id(chrom) else { return Ok(()) };
+        let beg0 = beg1.saturating_sub(1) as u64;
+        let end0 = end1 as u64;
+        let chunks = self.index.query(rid, beg0, end0);
+        let Source::Bcf(r) = &mut self.src else { bail!("query_raw needs a BCF input") };
+        for (s, e) in chunks {
+            r.seek(s)?;
+            loop {
+                if r.virtual_position().unwrap_or(u64::MAX) >= e {
+                    break;
+                }
+                let Some((shared, indiv)) = r.read_record_raw()? else { break };
+                let Some(m) = record_meta(&shared) else { continue };
+                if m.rid < 0 || m.rid as usize != rid {
+                    continue;
+                }
+                let rb = m.pos.max(0) as u64;
+                if rb >= end0 {
+                    return Ok(());
+                }
+                if record_end0(&m) > beg0 && !f(&shared, &indiv)? {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Visit records overlapping `[beg1, end1]` (1-based, inclusive) on
     /// `chrom`, in file order. The callback returns `false` to stop early.
     pub fn query<F>(&mut self, chrom: &str, beg1: u32, end1: u32, mut f: F) -> Result<()>

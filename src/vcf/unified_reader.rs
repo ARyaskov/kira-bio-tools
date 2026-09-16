@@ -148,6 +148,30 @@ impl UnifiedVcfReader {
         }
     }
 
+    pub fn is_bcf(&self) -> bool {
+        matches!(self, Self::Bcf(_))
+    }
+
+    /// The input's BCF dictionary (BCF sources only).
+    pub fn bcf_dict(&self) -> Option<&crate::bcf::BcfHeaderDict> {
+        match self {
+            Self::Bcf(r) => Some(&r.inner.dict),
+            _ => None,
+        }
+    }
+
+    /// Next record as its encoded `(shared, indiv)` blocks, without
+    /// decoding to text (BCF sources only).
+    pub fn read_raw_bcf(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        match self {
+            Self::Bcf(r) => r
+                .inner
+                .read_record_raw()
+                .map_err(|e| VcfError::Io(io::Error::other(format!("bcf read: {e}")))),
+            _ => Err(VcfError::Io(io::Error::other("not a BCF source"))),
+        }
+    }
+
     /// Next data line (header lines are never returned).
     pub fn read_line(&mut self) -> Result<Option<String>> {
         match self {

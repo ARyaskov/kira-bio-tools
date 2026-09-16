@@ -196,6 +196,11 @@ impl FilterEngine {
     }
 
     pub fn eval(&self, rec: &crate::vcf::VcfRecord) -> Result<EvalResult> {
+        self.eval_ref(&crate::vcf::VcfRecordRef::from_record(rec))
+    }
+
+    /// Evaluate on a record borrowed from its line (no field allocation).
+    pub fn eval_ref(&self, rec: &crate::vcf::VcfRecordRef<'_>) -> Result<EvalResult> {
         let mut ctx = EvalContext::new(rec, &self.header, self.needed.as_ref());
         let mut result = if let Some(fast) = &self.fast {
             EvalResult {
@@ -233,7 +238,7 @@ struct NeededFields {
 }
 
 struct EvalContext<'a> {
-    rec: &'a crate::vcf::VcfRecord,
+    rec: &'a crate::vcf::VcfRecordRef<'a>,
     header: &'a HeaderMeta,
     needed: Option<&'a NeededFields>,
     info_cache: Option<HashMap<String, String>>,
@@ -243,7 +248,7 @@ struct EvalContext<'a> {
 
 impl<'a> EvalContext<'a> {
     fn new(
-        rec: &'a crate::vcf::VcfRecord,
+        rec: &'a crate::vcf::VcfRecordRef<'a>,
         header: &'a HeaderMeta,
         needed: Option<&'a NeededFields>,
     ) -> Self {
@@ -312,8 +317,8 @@ struct FormatCache<'a> {
 }
 
 impl<'a> FormatCache<'a> {
-    fn new(rec: &'a crate::vcf::VcfRecord) -> Self {
-        let fmt = rec.format.as_deref().unwrap_or(".");
+    fn new(rec: &'a crate::vcf::VcfRecordRef<'a>) -> Self {
+        let fmt = rec.format.unwrap_or(".");
         let keys: Vec<&str> = fmt.split(':').collect();
         let mut key_index = HashMap::new();
         for (i, k) in keys.iter().enumerate() {
@@ -1133,13 +1138,13 @@ fn collect_fast_term(
     true
 }
 
-fn fast_eval(fast: &FastExpr, rec: &crate::vcf::VcfRecord) -> bool {
+fn fast_eval(fast: &FastExpr, rec: &crate::vcf::VcfRecordRef<'_>) -> bool {
     for term in &fast.terms {
         let pass = match term.field {
             FastField::Qual => fast_cmp_values(term.op, parse_qual(&rec.qual), term.value),
             FastField::Info(idx) => {
                 let key = &fast.info_keys[idx];
-                fast_cmp_values(term.op, info_numbers(rec.info.as_str(), key), term.value)
+                fast_cmp_values(term.op, info_numbers(rec.info, key), term.value)
             }
             FastField::InfoFlag(idx) => {
                 let key = &fast.info_keys[idx];
@@ -1334,7 +1339,7 @@ fn eval_std_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValue> 
     let rec = ctx.rec;
     match name {
         "CHROM" => Ok(EvalValue::Scalar(ValueVec {
-            values: vec![Value::Str(rec.chrom.clone())],
+            values: vec![Value::Str(rec.chrom.to_string())],
             kind: ValueKind::Normal,
         })),
         "POS" => Ok(EvalValue::Scalar(ValueVec {
@@ -1342,11 +1347,11 @@ fn eval_std_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValue> 
             kind: ValueKind::Normal,
         })),
         "ID" => Ok(EvalValue::Scalar(ValueVec {
-            values: vec![Value::Str(rec.id.clone())],
+            values: vec![Value::Str(rec.id.to_string())],
             kind: ValueKind::Normal,
         })),
         "REF" => Ok(EvalValue::Scalar(ValueVec {
-            values: vec![Value::Str(rec.ref_allele.clone())],
+            values: vec![Value::Str(rec.ref_allele.to_string())],
             kind: ValueKind::Normal,
         })),
         "ALT" => Ok(EvalValue::Scalar(ValueVec {
@@ -1721,7 +1726,7 @@ const VCF_OTHER: u32 = 8;
 const VCF_BND: u32 = 16;
 const VCF_OVERLAP: u32 = 32;
 
-fn variant_type_mask(rec: &crate::vcf::VcfRecord) -> u32 {
+fn variant_type_mask(rec: &crate::vcf::VcfRecordRef<'_>) -> u32 {
     let ref_bytes = rec.ref_allele.as_bytes();
     let mut mask = 0u32;
     for alt in rec.alt.split(',') {
@@ -1821,7 +1826,7 @@ fn eq_icase(a: u8, b: u8) -> bool {
     a.to_ascii_uppercase() == b.to_ascii_uppercase()
 }
 
-fn variant_ilen(rec: &crate::vcf::VcfRecord) -> i32 {
+fn variant_ilen(rec: &crate::vcf::VcfRecordRef<'_>) -> i32 {
     let alts: Vec<&str> = rec.alt.split(',').collect();
     if alts.is_empty() {
         return 0;
@@ -3257,3 +3262,8 @@ fn value_from_bool(res: EvalResult) -> EvalValue {
         kind: ValueKind::Normal,
     })
 }
+
+
+#[cfg(test)]
+#[path = "../tests/unit/filter_engine.rs"]
+mod tests;

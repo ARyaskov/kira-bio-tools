@@ -57,6 +57,19 @@ impl BcfHeaderDict {
         self.filter_by_idx.get(idx as usize).and_then(|&p| if p == NONE { None } else { self.filter.get(p as usize) })
     }
 
+    /// Do records encoded against `other` decode identically against
+    /// `self`? True when the contig, INFO/FORMAT/FILTER and sample tables
+    /// map the same names to the same indexes.
+    pub fn same_dictionary(&self, other: &Self) -> bool {
+        self.contigs == other.contigs
+            && self.samples == other.samples
+            && self.info_idx == other.info_idx
+            && self.format_idx == other.format_idx
+            && self.filter_idx == other.filter_idx
+            && self.info.iter().map(|f| (&f.id, &f.typ, &f.number)).eq(other.info.iter().map(|f| (&f.id, &f.typ, &f.number)))
+            && self.format.iter().map(|f| (&f.id, &f.typ, &f.number)).eq(other.format.iter().map(|f| (&f.id, &f.typ, &f.number)))
+    }
+
     pub fn contig_name(&self, rid: u32) -> Option<&str> {
         self.contig_by_idx
             .get(rid as usize)

@@ -76,6 +76,16 @@ impl BcfWriter {
         encode_record(&mut self.inner, line, &self.dict)
     }
 
+    /// Copy an encoded record (its `shared` and `indiv` blocks) verbatim;
+    /// only valid when the source dictionary equals this writer's.
+    pub fn write_raw(&mut self, shared: &[u8], indiv: &[u8]) -> Result<()> {
+        self.inner.write_all(&(shared.len() as u32).to_le_bytes())?;
+        self.inner.write_all(&(indiv.len() as u32).to_le_bytes())?;
+        self.inner.write_all(shared)?;
+        self.inner.write_all(indiv)?;
+        Ok(())
+    }
+
     pub fn finish(self) -> Result<()> {
         match self.inner {
             BcfOut::Bgzf(w) => w.finish().context("finalize BGZF-BCF"),

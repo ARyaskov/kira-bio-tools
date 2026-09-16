@@ -234,10 +234,16 @@ Commands: `query`, `cnv`.
   `-f/--apply-filters`, `-v/--types`, `-V/--exclude-types`, `--known`,
   `--novel`, `-m/--min-alleles`, `-M/--max-alleles`, `-g/--genotype`,
   `-p/--phased`, `-u/--uncalled`, `-x/--private`, `-c/--min-ac`, `-C/--max-ac`,
-  `-q/--min-af`, `-Q/--max-af`, `--threads`, `-W/--write-index`.
+  `-q/--min-af`, `-Q/--max-af`, `--threads`, `-W/--write-index`.  
+  BCF in, BCF out (`-O b`/`-O u`) with only `-r/-R/-t/-T` (overlap modes 0
+  and 1) copies the encoded records through without decoding them; any
+  option that reads or rewrites a record takes the text path.
 
 - `filter`  
-  Expression filtering with soft-filter and gap controls.  
+  Expression filtering with soft-filter and gap controls. Without `-s`,
+  `-S`, `--mask` or gap options the expression is evaluated on the record
+  borrowed from its line and the line is written back unchanged (FILTER
+  `.` becomes `PASS`, as bcftools does).  
   Args: `<input>`, `-i/--include`, `-e/--exclude`, `--expr`, `-s/--soft-filter`,
   `-m/--mode`, `-S/--set-GTs`, `-g/--SnpGap`, `-G/--IndelGap`, `--mask`,
   `-M/--mask-file`, `--mask-overlap`, `-o/--output`, `-O/--output-type`,

@@ -108,7 +108,60 @@ pub fn cmd_view(args: ViewArgs) -> Result<()> {
     let indexed = region_filter
         .as_ref()
         .filter(|_| args.input != Path::new("-") && find_index_for(&args.input).is_some());
-    if let Some(rf) = indexed {
+    // BCF in, BCF out, nothing that needs the decoded record: copy the
+    // encoded records through and skip the text round trip.
+    let raw_bcf = reader.is_bcf()
+        && sink.is_bcf()
+        && raw_passthrough_ok(&args, &ctx)
+        && args.regions_overlap <= 1
+        && (target_filter.is_none() || args.targets_overlap <= 1)
+        && match (reader.bcf_dict(), sink.bcf_dict()) {
+            (Some(a), Some(b)) => a.same_dictionary(b),
+            _ => false,
+        };
+    if raw_bcf {
+        let contig_names: Vec<Option<String>> = reader
+            .bcf_dict()
+            .map(|d| {
+                let max = d.contig_idx.values().copied().max().map_or(0, |m| m + 1);
+                (0..max).map(|rid| d.contig_name(rid).map(str::to_string)).collect()
+            })
+            .unwrap_or_default();
+        let contig_name = |rid: i32| -> Option<String> { contig_names.get(rid.max(0) as usize).cloned().flatten() };
+        let passes = |shared: &[u8]| -> bool {
+            let Some(m) = crate::bcf::record::record_meta(shared) else { return false };
+            let Some(chr) = contig_name(m.rid) else { return false };
+            let pos1 = m.pos.max(0) as u32 + 1;
+            let rlen = m.rlen.max(0) as u32;
+            if let Some(tf) = &target_filter {
+                if tf.span_passes(&chr, pos1, rlen, args.targets_overlap) == targets_inverse {
+                    return false;
+                }
+            }
+            true
+        };
+        if let Some(rf) = indexed {
+            rf.stream_raw_with_index(&args.input, args.regions_overlap, |shared, indiv| {
+                if passes(shared) {
+                    sink.write_raw_bcf(shared, indiv)?;
+                }
+                Ok(())
+            })?;
+        } else {
+            while let Some((shared, indiv)) = reader.read_raw_bcf()? {
+                if let Some(rf) = &region_filter {
+                    let Some(m) = crate::bcf::record::record_meta(&shared) else { continue };
+                    let Some(chr) = contig_name(m.rid) else { continue };
+                    if !rf.span_passes(&chr, m.pos.max(0) as u32 + 1, m.rlen.max(0) as u32, args.regions_overlap) {
+                        continue;
+                    }
+                }
+                if passes(&shared) {
+                    sink.write_raw_bcf(&shared, &indiv)?;
+                }
+            }
+        }
+    } else if let Some(rf) = indexed {
         rf.stream_with_index(&args.input, args.regions_overlap, |line| {
             if let Some(out_line) = process_view_record(line, &ctx) {
                 sink.write_line(&out_line)?;
@@ -252,6 +305,32 @@ fn process_view_record(line: &str, ctx: &RecordCtx<'_>) -> Option<String> {
         out_line = trim_alt_alleles(&out_line, ctx.hdr, args.trim_alt_alleles, args.trim_unseen_allele);
     }
     Some(out_line)
+}
+
+/// True when no option of this run looks at or rewrites a record beyond its
+/// coordinates, so encoded BCF records can be copied verbatim.
+fn raw_passthrough_ok(args: &ViewArgs, ctx: &RecordCtx<'_>) -> bool {
+    ctx.pp.include.is_none()
+        && ctx.pp.exclude.is_none()
+        && ctx.type_filter.is_none()
+        && ctx.ac_filter.is_none()
+        && ctx.gt_filter.is_none()
+        && ctx.apply_filters.is_none()
+        && ctx.samples_keep.is_none()
+        && !ctx.update_ac_an
+        && !args.known
+        && !args.novel
+        && args.min_alleles.is_none()
+        && args.max_alleles.is_none()
+        && !args.drop_genotypes
+        && !args.trim_alt_alleles
+        && !args.trim_unseen_allele
+        && !args.phased
+        && !args.exclude_phased
+        && !args.uncalled
+        && !args.exclude_uncalled
+        && !args.private
+        && !args.exclude_private
 }
 
 fn resolve_samples(args: &ViewArgs, input: &[String]) -> Result<Option<Vec<usize>>> {

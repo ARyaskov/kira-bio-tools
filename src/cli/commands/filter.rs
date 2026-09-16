@@ -15,7 +15,7 @@ use crate::kbi::KbiIndex;
 use crate::util::Region;
 use anyhow::Context as _;
 use crate::vcf::VcfParser;
-use crate::vcf::{VcfReader, VcfRecord};
+use crate::vcf::{UnifiedVcfReader, VcfReader, VcfRecord, VcfRecordRef};
 
 pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
     let total_start = Instant::now();
@@ -58,6 +58,49 @@ pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
 
     let use_parallel =
         args.threads.unwrap_or(0) > 1 && snp_gap.is_none() && args.indel_gap.is_none();
+    // Nothing rewrites the record: evaluate on borrowed fields and pass the
+    // line through untouched.
+    let simple = filter_name.is_none() && set_gts.is_none() && mask.is_none() && snp_gap.is_none() && args.indel_gap.is_none();
+    if simple {
+        let mut inner = reader.into_inner();
+        let (records, dropped, eval_time) = if use_parallel {
+            run_parallel_filter_lines(&mut inner, &mut writer, Arc::new(engine), mode, args.threads.unwrap_or(0))?
+        } else {
+            let mut records = 0u64;
+            let mut dropped = 0u64;
+            let mut eval_time = Duration::ZERO;
+            while let Some(line) = inner.read_line()? {
+                if line.is_empty() || line.as_bytes()[0] == b'#' {
+                    continue;
+                }
+                records += 1;
+                let Some(rec) = VcfRecordRef::parse(&line) else { anyhow::bail!("cannot parse VCF line: {line}") };
+                let t = Instant::now();
+                let pass = engine.eval_ref(&rec)?.pass_site;
+                eval_time += t.elapsed();
+                if pass {
+                    match line_with_filter(&line, rec.filter, &mode) {
+                        Some(l) => writer.write_line(&l)?,
+                        None => writer.write_line(&line)?,
+                    }
+                } else {
+                    dropped += 1;
+                }
+            }
+            (records, dropped, eval_time)
+        };
+        writer.finish()?;
+        maybe_write_index(args.output.as_deref(), args.write_index.as_deref(), args.output_type.as_deref())?;
+        eprintln!(
+            "filter done records={} dropped={} header_ms={} eval_ms={} mask_ms=0 mode_ms=0 setgt_ms=0 gap_ms=0 flush_ms=0 write_ms=0 total_ms={}",
+            records,
+            dropped,
+            duration_ms(header_time),
+            duration_ms(eval_time),
+            duration_ms(total_start.elapsed())
+        );
+        return Ok(());
+    }
     if use_parallel {
         let stats = run_parallel_filter(
             &mut reader,
@@ -456,6 +499,98 @@ impl ParallelStats {
     fn write_ns(&self) -> u64 {
         self.write_ns.load(Ordering::Relaxed)
     }
+}
+
+/// A passing record's line with FILTER set the way `apply_filter_mode`
+/// does without `-s` (`.`/empty become `PASS`, `-m x` resets); `None` when
+/// the line is already right.
+fn line_with_filter(line: &str, current: &str, mode: &FilterMode) -> Option<String> {
+    let no_filter = current == "." || current == "PASS" || current.is_empty();
+    if !(mode.reset || no_filter) || current == "PASS" {
+        return None;
+    }
+    let mut tabs = line.match_indices('\t').map(|(i, _)| i);
+    let t6 = tabs.nth(5)?;
+    let t7 = tabs.next().unwrap_or(line.len());
+    Some(format!("{}\tPASS{}", &line[..t6], &line[t7..]))
+}
+
+/// Parallel `-i/-e` without record rewriting: lines are evaluated on
+/// borrowed fields and written back in input order.
+fn run_parallel_filter_lines(
+    reader: &mut UnifiedVcfReader,
+    writer: &mut VcfSink,
+    engine: Arc<FilterEngine>,
+    mode: FilterMode,
+    threads: usize,
+) -> Result<(u64, u64, Duration)> {
+    let (res_tx, res_rx) = mpsc::channel::<Result<(u64, Option<String>)>>();
+    let eval_ns = Arc::new(AtomicU64::new(0));
+    let mut handles = Vec::new();
+    let mut worker_txs = Vec::with_capacity(threads);
+    for _ in 0..threads {
+        let (tx, rx) = mpsc::channel::<(u64, String)>();
+        worker_txs.push(tx);
+        let engine = Arc::clone(&engine);
+        let res_tx = res_tx.clone();
+        let eval_ns = Arc::clone(&eval_ns);
+        handles.push(std::thread::spawn(move || {
+            while let Ok((idx, line)) = rx.recv() {
+                let Some(rec) = VcfRecordRef::parse(&line) else {
+                    let _ = res_tx.send(Err(anyhow::anyhow!("cannot parse VCF line: {line}")));
+                    continue;
+                };
+                let t = Instant::now();
+                let pass = match engine.eval_ref(&rec) {
+                    Ok(r) => r.pass_site,
+                    Err(e) => {
+                        let _ = res_tx.send(Err(e));
+                        continue;
+                    }
+                };
+                eval_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                let out = if pass {
+                    Some(line_with_filter(&line, rec.filter, &mode).unwrap_or_else(|| line.clone()))
+                } else {
+                    None
+                };
+                let _ = res_tx.send(Ok((idx, out)));
+            }
+        }));
+    }
+    drop(res_tx);
+    let mut sent = 0u64;
+    while let Some(line) = reader.read_line()? {
+        if line.is_empty() || line.as_bytes()[0] == b'#' {
+            continue;
+        }
+        worker_txs[(sent as usize) % threads].send((sent, line))?;
+        sent += 1;
+    }
+    drop(worker_txs);
+    let mut next = 0u64;
+    let mut pending: HashMap<u64, Option<String>> = HashMap::new();
+    let mut received = 0u64;
+    let mut dropped = 0u64;
+    while received < sent {
+        let (idx, line) = match res_rx.recv() {
+            Ok(v) => v?,
+            Err(_) => break,
+        };
+        received += 1;
+        pending.insert(idx, line);
+        while let Some(l) = pending.remove(&next) {
+            match l {
+                Some(l) => writer.write_line(&l)?,
+                None => dropped += 1,
+            }
+            next += 1;
+        }
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+    Ok((sent, dropped, Duration::from_nanos(eval_ns.load(Ordering::Relaxed))))
 }
 
 fn run_parallel_filter(

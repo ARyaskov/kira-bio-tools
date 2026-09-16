@@ -603,31 +603,8 @@ fn render_id_template(t: &IdTemplate, chrom: &str, pos: &str, ref_: &str, alt: &
 }
 
 fn eval_predicate(p: &Predicate, cols: &[&str]) -> bool {
-    let Some(rec) = parse_record_for_filter(cols) else { return true; };
-    p.engine.eval(&rec).map(|r| r.pass_site).unwrap_or(true)
-}
-
-/// Record for the filter engine from already split columns.
-fn parse_record_for_filter(cols: &[&str]) -> Option<crate::vcf::VcfRecord> {
-    if cols.len() < 8 { return None; }
-    let pos: u32 = cols[1].parse().ok()?;
-    let format = if cols.len() > 8 { Some(cols[8].to_string()) } else { None };
-    let samples = if cols.len() > 9 { cols[9..].iter().map(|s| s.to_string()).collect() } else { Vec::new() };
-    Some(crate::vcf::VcfRecord {
-        chrom: cols[0].to_string(),
-        pos,
-        id: cols[2].to_string(),
-        ref_allele: cols[3].to_string(),
-        alt: cols[4].to_string(),
-        qual: cols[5].to_string(),
-        filter: cols[6].to_string(),
-        info: cols[7].to_string(),
-        format,
-        samples,
-        chr_id: 0,
-        position: pos,
-        offset: 0,
-    })
+    let Some(rec) = crate::vcf::VcfRecordRef::from_cols(cols) else { return true; };
+    p.engine.eval_ref(&rec).map(|r| r.pass_site).unwrap_or(true)
 }
 
 pub fn parse_output_type(s: &str) -> Result<OutputKind> {

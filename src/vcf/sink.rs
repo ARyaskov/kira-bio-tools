@@ -65,6 +65,22 @@ impl VcfSink {
         matches!(self, Self::Bcf { .. })
     }
 
+    /// The BCF writer's dictionary, for raw passthrough checks.
+    pub fn bcf_dict(&self) -> Option<&crate::bcf::BcfHeaderDict> {
+        match self {
+            Self::Bcf { writer, .. } => Some(&writer.dict),
+            _ => None,
+        }
+    }
+
+    /// Copy an encoded BCF record verbatim (BCF sinks only).
+    pub fn write_raw_bcf(&mut self, shared: &[u8], indiv: &[u8]) -> Result<()> {
+        match self {
+            Self::Bcf { writer, .. } => writer.write_raw(shared, indiv),
+            _ => anyhow::bail!("raw BCF records can only be written to a BCF sink"),
+        }
+    }
+
     /// Write header lines (no-op for BCF, whose header was written at open).
     pub fn write_header(&mut self, headers: &[String]) -> Result<()> {
         if self.is_bcf() {

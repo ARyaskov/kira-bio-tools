@@ -252,6 +252,45 @@ impl RegionSet {
         Ok(())
     }
 
+    /// [`record_passes`] from a record's coordinates alone: `rlen` is the
+    /// REF span (mode 1); mode 2 needs the alleles and is not supported here.
+    pub fn span_passes(&self, chrom: &str, pos: u32, rlen: u32, mode: OverlapMode) -> bool {
+        if mode == 0 {
+            return self.contains(chrom, pos);
+        }
+        self.overlaps_range(chrom, pos, pos + rlen.max(1) - 1)
+    }
+
+    /// [`stream_with_index`] for BCF inputs, handing over encoded records
+    /// without decoding them. Modes 0 and 1 only.
+    pub fn stream_raw_with_index<P: AsRef<Path>>(
+        &self,
+        input: P,
+        mode: OverlapMode,
+        mut cb: impl FnMut(&[u8], &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        if mode > 1 {
+            bail!("raw BCF streaming supports --regions-overlap 0 and 1 only");
+        }
+        let mut reader = crate::csi::IndexedVcfReader::open(input.as_ref())?;
+        let mut chroms: Vec<&String> = self.by_chr.keys().collect();
+        chroms.sort_by_key(|c| reader.ref_id(c).unwrap_or(usize::MAX));
+        for chrom in chroms {
+            let Some(ranges) = self.by_chr.get(chrom) else { continue };
+            for &(beg, end) in ranges {
+                reader.query_raw(chrom, beg, end, |shared, indiv| {
+                    let Some(m) = crate::bcf::record::record_meta(shared) else { return Ok(true) };
+                    let pos1 = m.pos.max(0) as u32 + 1;
+                    if self.span_passes(chrom, pos1, m.rlen.max(0) as u32, mode) {
+                        cb(shared, indiv)?;
+                    }
+                    Ok(true)
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn has_index_for<P: AsRef<Path>>(input: P) -> Option<std::path::PathBuf> {
         crate::csi::find_index_for(input.as_ref())
     }
