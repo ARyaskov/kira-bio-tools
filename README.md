@@ -575,6 +575,24 @@ Commands: `query`, `cnv`.
   `--threads`.
 
 
+### 7. Columnar Export
+
+- `zarr`
+  Export a VCF/BCF to a VCF Zarr store (specification 0.2, the layout
+  sgkit and `vcf2zarr` read) as a Zarr v2 directory: `variant_contig`,
+  `variant_position`, `variant_id`, `variant_allele`, `variant_quality`,
+  `variant_filter`, `call_genotype` with `call_genotype_phased` and
+  `call_genotype_mask`, the `contig_id`/`contig_length`/`filter_id`/
+  `sample_id` tables, and every Number=1 Integer/Float INFO/FORMAT field
+  plus INFO flags as `variant_<TAG>`/`call_<TAG>` (or the `--fields`
+  selection). Arrays are chunked along variants and samples and
+  zlib-compressed (numcodecs `zlib`); strings are fixed-width `S`; the
+  header is kept in the root attributes. Two passes over the input: the
+  first sizes the arrays (variants, alleles, ploidy, string widths), the
+  second writes the chunks.
+  Args: `<input>`, `-o/--output`, `--chunk-variants`, `--chunk-samples`,
+  `-l/--level`, `--fields`, `-f/--force`.
+
 ## Performance notes
 
 - One thread budget per process: `--threads N` (or `-@ N`) caps every pool

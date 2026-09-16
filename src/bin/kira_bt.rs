@@ -73,6 +73,9 @@ enum Commands {
     #[command(about = "Check sample concordance, detect sample swaps and contamination")]
     Gtcheck(GtcheckArgs),
 
+    #[command(about = "Export VCF/BCF to a VCF Zarr store (sgkit / vcf2zarr layout)")]
+    Zarr(ZarrArgs),
+
     #[command(about = "Haplotype aware consequence caller")]
     Csq(CsqArgs),
 
@@ -172,6 +175,7 @@ fn main() -> Result<()> {
         Commands::DbBuild(args) => cmd_db_build(args),
         Commands::Filter(args) => cmd_filter(&args),
         Commands::Gtcheck(args) => cmd_gtcheck(args),
+        Commands::Zarr(args) => cmd_zarr(args),
         Commands::Csq(args) => cmd_csq(args),
         Commands::Convert(args) => cmd_convert(args),
         Commands::Consensus(args) => cmd_consensus(args),

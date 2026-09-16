@@ -39,6 +39,7 @@ pub mod sketch;
 pub mod threads;
 pub mod util;
 pub mod vcf;
+pub mod zarr;
 
 pub use bgzf::{BgzfReader, BgzfWriter, VirtualPosition};
 pub use csi::{

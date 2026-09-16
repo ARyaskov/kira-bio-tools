@@ -24,6 +24,7 @@ pub mod stats;
 pub mod tabix;
 pub mod tile;
 pub mod view;
+pub mod zarr;
 
 pub use annotate::*;
 pub use call::*;
@@ -51,3 +52,4 @@ pub use stats::*;
 pub use tabix::*;
 pub use tile::*;
 pub use view::*;
+pub use zarr::*;
