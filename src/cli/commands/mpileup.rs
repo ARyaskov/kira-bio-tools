@@ -2291,7 +2291,7 @@ fn emit_indels(
     // For each indel allele, emit a biallelic record (REF + this one ALT).
     for (seq, c, f) in &agg.ins_alleles {
         let (mn, af) = if ctx.hp_indel {
-            indel_repeat_stringency(ctx.fasta, chr, pos1, seq.as_bytes(), ind_min, ind_af)
+            indel_repeat_stringency(ctx.fasta, chr, pos1, seq.as_bytes(), true, ind_min, ind_af)
         } else {
             (ind_min, ind_af)
         };
@@ -2351,7 +2351,7 @@ fn emit_indels(
             continue;
         }
         let (mn, af) = if ctx.hp_indel {
-            indel_repeat_stringency(ctx.fasta, chr, pos1, deleted, ind_min, ind_af)
+            indel_repeat_stringency(ctx.fasta, chr, pos1, deleted, false, ind_min, ind_af)
         } else {
             (ind_min, ind_af)
         };
@@ -2562,34 +2562,34 @@ fn emit_one_indel(
     out.push(b'\n');
 }
 
-/// `--hp-indel` quality for an indel allele: 30, minus 5 per repeat unit of
-/// the indel sequence beyond two in the reference downstream of the anchor,
-/// floored at 8 (polymerase slippage makes long tracts unreliable).
+/// The repeat context of an indel anchored at `pos1`: `seq` is the inserted
+/// or deleted sequence, taken with up to 64 reference bases on each side.
+fn str_context_at(
+    fa: Option<&Fasta>,
+    chr: &str,
+    pos1: u64,
+    seq: &[u8],
+    is_ins: bool,
+) -> Option<crate::bam::str_model::StrContext> {
+    let fa = fa?;
+    let left_start = (pos1 as u32).saturating_sub(63).max(1);
+    let left = fa.slice_bytes(chr, left_start, (pos1 as u32 - left_start + 1) as usize)?;
+    let right = fa.slice_bytes(chr, pos1 as u32 + 1, 64).unwrap_or(&[]);
+    Some(crate::bam::str_model::str_context(seq, left, right, is_ins))
+}
+
+/// `--hp-indel`: the quality of an indel observation from the STR error
+/// model (unit length and copy number of the tract), 30 without a reference.
 fn hp_indel_qual(ctx: &EmitCtx, chr: &str, pos1: u64, ref_str: &str, alt_str: &str) -> u8 {
-    let unit: &[u8] = if alt_str.len() > ref_str.len() {
+    let is_ins = alt_str.len() > ref_str.len();
+    let seq: &[u8] = if is_ins {
         &alt_str.as_bytes()[1..]
     } else {
         &ref_str.as_bytes()[1..]
     };
-    let u = unit.len();
-    let run_units = ctx
-        .fasta
-        .and_then(|fa| {
-            if u == 0 || u > 6 {
-                return None;
-            }
-            let c = fa.slice_bytes(chr, pos1 as u32 + 1, 64)?;
-            let mut units = 0u32;
-            let mut i = 0usize;
-            while i + u <= c.len() && c[i..i + u].eq_ignore_ascii_case(unit) {
-                units += 1;
-                i += u;
-            }
-            Some(units)
-        })
-        .unwrap_or(0);
-    let penalty = 5u32.saturating_mul(run_units.saturating_sub(2));
-    30u32.saturating_sub(penalty).max(8) as u8
+    str_context_at(ctx.fasta, chr, pos1, seq, is_ins)
+        .map(|c| crate::bam::str_model::indel_quality(&c))
+        .unwrap_or(30)
 }
 
 struct AsmCfg {
@@ -2803,42 +2803,19 @@ fn emit_site_or_gvcf<W: Write>(
     Ok(true)
 }
 
-/// Repeat-context stringency for short indels. Homopolymer/STR tracts are the dominant source
-/// of false-positive indels (polymerase slippage), so for a short inserted/deleted `unit` that
-/// tiles a long repeat run immediately 3' of the anchor `pos1`, require more supporting reads and
-/// a higher alt fraction. Returns the (possibly tightened) (min_count, min_frac). No-op for
-/// non-repeat or long indels.
+/// `--hp-indel`: in tracts where the STR error model expects slippage, an
+/// indel needs more reads and a higher fraction of them.
 fn indel_repeat_stringency(
     fa: Option<&Fasta>,
     chr: &str,
     pos1: u64,
-    unit: &[u8],
+    seq: &[u8],
+    is_ins: bool,
     base_min: u32,
     base_af: f64,
 ) -> (u32, f64) {
-    let u = unit.len();
-    if u == 0 || u > 4 {
-        return (base_min, base_af);
-    }
-    let fa = match fa {
-        Some(f) => f,
-        None => return (base_min, base_af),
-    };
-    let ctx = match fa.slice_bytes(chr, pos1 as u32 + 1, 64) {
-        Some(c) => c,
-        None => return (base_min, base_af),
-    };
-    let mut bases = 0u32;
-    let mut i = 0usize;
-    while i + u <= ctx.len() && ctx[i..i + u].eq_ignore_ascii_case(unit) {
-        bases += u as u32;
-        i += u;
-    }
-    let copies = bases / (u as u32);
-    let strict = (u == 1 && bases >= 5) || (u >= 2 && copies >= 4);
-    if strict {
-        (base_min.max(4), base_af + 0.12)
-    } else {
-        (base_min, base_af)
+    match str_context_at(fa, chr, pos1, seq, is_ins) {
+        Some(c) if crate::bam::str_model::error_prone(&c) => (base_min.max(4), base_af + 0.12),
+        _ => (base_min, base_af),
     }
 }

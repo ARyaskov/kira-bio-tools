@@ -408,7 +408,10 @@ Commands: `query`, `cnv`.
   per-sample-normalised quality sum per allele. Kira extensions, all off by
   default and deviations from bcftools when enabled:
   `--nm-weight off|auto|FULL,SLOPE` (down-weight high-mismatch reads),
-  `--hp-indel` (stricter indels in homopolymer/STR tracts),
+  `--hp-indel` (an STR-aware indel error model: each candidate's quality
+  and required support follow the unit length and copy number of the repeat
+  tract it sits in, a log-linear slippage model in the spirit of Dindel and
+  Strelka2, instead of a fixed homopolymer penalty),
   `--indel-realign off|ins|all` (pair-HMM realignment of indel candidates),
   `--assemble` (local assembly in active regions with haplotype PLs from the
   same pair-HMM kernel) and `--recal` (empirical base-quality recalibration

@@ -14,6 +14,7 @@ pub mod fastmath;
 pub mod mpileup_opts;
 pub mod pos_filter;
 pub mod samples;
+pub mod str_model;
 pub mod streaming;
 pub mod writer;
 pub use errmod::ErrorModel;

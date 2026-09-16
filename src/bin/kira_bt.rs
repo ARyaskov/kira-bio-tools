@@ -14,6 +14,9 @@ struct Cli {
     command: Commands,
 }
 
+// One variant per command carries its clap args; the boxes such a size
+// difference would buy are not worth the indirection on a one-shot parse.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Commands {
     #[command(about = "Build annotation index (.ani) from VCF")]
