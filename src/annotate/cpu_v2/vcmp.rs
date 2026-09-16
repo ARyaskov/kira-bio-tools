@@ -106,6 +106,55 @@ pub fn find_allele(als1: &[&[u8]], al2: &[u8], diff: &RefDiff<'_>) -> Option<usi
     als1.iter().position(|a| matches_allele(a, al2, diff))
 }
 
+/// The representation-free core of a variant: REF and ALT stripped of the
+/// bases they share at the end and then at the start, with POS moved past
+/// the stripped prefix. Cores may be empty (a pure insertion or deletion),
+/// so `GATC>GC` at 100 and `ATC>C` at 101 both become `AT>` at 101 and
+/// `GAT>GCT` at 100 becomes `A>C` at 101. Left-alignment inside repeats
+/// needs the reference and is not attempted.
+pub fn canonical_allele<'a>(pos: u32, refa: &'a [u8], alt: &'a [u8]) -> (u32, &'a [u8], &'a [u8]) {
+    let mut suffix = 0usize;
+    while suffix < refa.len()
+        && suffix < alt.len()
+        && eq_ascii_lower(refa[refa.len() - 1 - suffix], alt[alt.len() - 1 - suffix])
+    {
+        suffix += 1;
+    }
+    let (r, a) = (&refa[..refa.len() - suffix], &alt[..alt.len() - suffix]);
+    let prefix = common_prefix_len(r, a);
+    (
+        pos.saturating_add(prefix as u32),
+        &r[prefix..],
+        &a[prefix..],
+    )
+}
+
+/// An allele of another record rewritten over `t_ref` at `t_pos`: its core
+/// replaces the matching stretch of the target REF. `None` when the target
+/// REF does not cover that stretch.
+pub fn reframe_allele(
+    t_pos: u32,
+    t_ref: &[u8],
+    e_pos: u32,
+    e_ref: &[u8],
+    e_alt: &[u8],
+) -> Option<Vec<u8>> {
+    let (cp, cr, ca) = canonical_allele(e_pos, e_ref, e_alt);
+    if cp < t_pos {
+        return None;
+    }
+    let off = (cp - t_pos) as usize;
+    let end = off.checked_add(cr.len())?;
+    if end > t_ref.len() || !t_ref[off..end].eq_ignore_ascii_case(cr) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(t_ref.len() + ca.len());
+    out.extend_from_slice(&t_ref[..off]);
+    out.extend_from_slice(ca);
+    out.extend_from_slice(&t_ref[end..]);
+    Some(out)
+}
+
 #[cfg(test)]
 #[path = "../../../tests/unit/annotate_cpu_v2_vcmp.rs"]
 mod tests;

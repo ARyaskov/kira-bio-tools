@@ -7,6 +7,9 @@ use crate::util::chr_name_to_id;
 use std::collections::HashMap;
 use std::time::Instant;
 
+/// How far before its canonical position a differently padded record may start.
+const CANONICAL_MAX_PAD: u32 = 32;
+
 pub struct BundleTiming {
     pub read_s: f64,
     pub info_s: f64,
@@ -508,7 +511,99 @@ impl AniIndex {
             }
         }
 
+        // Pass 3: the representation-free core (shared suffix and prefix of
+        // REF/ALT stripped, POS moved past the prefix) on both sides, so the
+        // same event written with different padding or anchored on the
+        // other side still matches. A hit is re-expressed over the target's
+        // REF so the A/R value mapping sees identical alleles.
+        if let Some(bundle) = self.lookup_canonical(
+            chr_id,
+            pos,
+            rf,
+            alt,
+            field_meta,
+            need_info,
+            need_format,
+            info_filter,
+        ) {
+            return Some(bundle);
+        }
+
         self.lookup_exact_by_chr_id_opts(chr_id, pos, rf, rf_hash, alt, need_info, need_format)
+    }
+
+    /// Records whose canonical allele core equals the target's, looked up at
+    /// most [`CANONICAL_MAX_PAD`] bases before the canonical position (the
+    /// padding a differently written record can carry).
+    #[allow(clippy::too_many_arguments)]
+    fn lookup_canonical(
+        &self,
+        chr_id: u32,
+        pos: u32,
+        rf: &str,
+        alt: &str,
+        field_meta: &HashMap<String, FieldNumber>,
+        need_info: bool,
+        need_format: bool,
+        info_filter: Option<&std::collections::HashSet<&str>>,
+    ) -> Option<AnnotationBundle> {
+        use crate::annotate::cpu_v2::vcmp::{canonical_allele, reframe_allele};
+        if rf.is_empty()
+            || alt.is_empty()
+            || alt == "."
+            || alt.starts_with('<')
+            || alt.starts_with('*')
+        {
+            return None;
+        }
+        let (cp, cr, ca) = canonical_allele(pos, rf.as_bytes(), alt.as_bytes());
+        let lo = cp.saturating_sub(CANONICAL_MAX_PAD).max(1);
+        for p in lo..=cp {
+            let Some(list) = self.lookup_pos_index(chr_id, p) else {
+                continue;
+            };
+            for &idx in list {
+                let e = &self.entries[idx as usize];
+                if e.chr_id != chr_id || e.pos != p {
+                    continue;
+                }
+                let e_ref = self.read_cstring(e.ref_ofs as usize);
+                let e_alt = self.read_cstring(e.alt_ofs as usize);
+                let (e_ref, e_alt) = (e_ref.as_ref(), e_alt.as_ref());
+                let hit = e_alt.split(',').any(|a| {
+                    let (p2, r2, a2) = canonical_allele(e.pos, e_ref.as_bytes(), a.as_bytes());
+                    p2 == cp && r2.eq_ignore_ascii_case(cr) && a2.eq_ignore_ascii_case(ca)
+                });
+                if !hit {
+                    continue;
+                }
+                let mut bundle = self.build_bundle_from_entry_idx_opts_with_meta_filtered(
+                    idx as usize,
+                    field_meta,
+                    need_info,
+                    need_format,
+                    info_filter,
+                );
+                let alts: Vec<String> = e_alt
+                    .split(',')
+                    .map(|a| {
+                        reframe_allele(pos, rf.as_bytes(), e.pos, e_ref.as_bytes(), a.as_bytes())
+                            .map(|v| String::from_utf8_lossy(&v).into_owned())
+                            .unwrap_or_else(|| a.to_string())
+                    })
+                    .collect();
+                bundle.alt = alts.join(",");
+                bundle.db_ref = rf.to_string();
+                if std::env::var("KIRA_BT_DEBUG").is_ok() {
+                    eprintln!(
+                        "[LOOKUP] canonical hit: {chr_id}:{pos} ({rf}>{alt}) ↔ {}:{} ({e_ref}>{e_alt})",
+                        chr_id, e.pos
+                    );
+                }
+                return Some(bundle);
+            }
+        }
+        None
     }
 
     pub fn lookup_exact_by_chr_id_timed(

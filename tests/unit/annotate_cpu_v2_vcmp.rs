@@ -66,3 +66,43 @@ fn case_insensitive_throughout() {
     assert_eq!(diff.ndref, 0);
     assert!(m("att", "ATT", &diff));
 }
+
+#[test]
+fn canonical_cores_ignore_padding_and_anchor_side() {
+    assert_eq!(
+        canonical_allele(100, b"GAT", b"GCT"),
+        (101, &b"A"[..], &b"C"[..])
+    );
+    assert_eq!(
+        canonical_allele(100, b"GATC", b"GC"),
+        (101, &b"AT"[..], &b""[..])
+    );
+    assert_eq!(
+        canonical_allele(101, b"ATC", b"C"),
+        (101, &b"AT"[..], &b""[..])
+    );
+    assert_eq!(
+        canonical_allele(100, b"A", b"AT"),
+        (101, &b""[..], &b"T"[..])
+    );
+    assert_eq!(
+        canonical_allele(100, b"AC", b"ATC"),
+        (101, &b""[..], &b"T"[..])
+    );
+    assert_eq!(canonical_allele(5, b"A", b"C"), (5, &b"A"[..], &b"C"[..]));
+    assert_eq!(canonical_allele(5, b"A", b"A"), (5, &b""[..], &b""[..]));
+    // Re-expressed over another record's REF.
+    assert_eq!(
+        reframe_allele(100, b"GAT", 101, b"A", b"C").as_deref(),
+        Some(&b"GCT"[..])
+    );
+    assert_eq!(reframe_allele(101, b"ATC", 200, b"GATC", b"GC"), None);
+    assert_eq!(
+        reframe_allele(101, b"ATC", 100, b"GATC", b"GC").as_deref(),
+        Some(&b"C"[..])
+    );
+    assert_eq!(
+        reframe_allele(100, b"A", 100, b"AC", b"ATC").as_deref(),
+        Some(&b"AT"[..])
+    );
+}
