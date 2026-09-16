@@ -80,6 +80,10 @@ name = "query_bench"
 harness = false
 
 [[bench]]
+name = "glocal_bench"
+harness = false
+
+[[bench]]
 name = "annotate_bench"
 harness = false
 

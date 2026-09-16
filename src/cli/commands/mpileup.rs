@@ -1110,6 +1110,11 @@ fn run_prepared<W: Write>(
         }
     }
     if timing {
+        let (calls, hits) = crate::bam::reader::baq_cache_stats();
+        eprintln!(
+            "[KIRA_BT] BAQ: {} reads through the HMM, {} served from the per-thread cache",
+            calls, hits
+        );
         eprintln!(
             "[KIRA_BT] engine done in {:.1}s",
             t_engine.elapsed().as_secs_f64()

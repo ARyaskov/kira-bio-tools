@@ -159,6 +159,31 @@ pub fn baq_read(lr: &mut LiveRead, ref_names: &[String], fasta: &impl FastaLike,
     let lo = ref_start.saturating_sub(pad);
     let len = (ref_start - lo) as usize + span as usize + pad as usize;
     let cigar = lr.cigar_pairs.clone();
+    // Identical reads (same placement, bases and qualities: unmarked
+    // duplicates, re-sequenced fragments) share one HMM result per thread.
+    let key = {
+        use std::hash::Hasher;
+        let mut h = crate::fx::FxHasher64::default();
+        h.write_usize(lr.ref_id);
+        h.write_u32(ref_start);
+        for &(k, l) in cigar.iter() {
+            h.write_u8(k as u8);
+            h.write_u32(l);
+        }
+        h.write(lr.seq());
+        h.write(lr.qual());
+        h.finish()
+    };
+    let cached = BAQ_CACHE.with(|c| c.borrow().get(&key).cloned());
+    BAQ_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Some(q) = cached {
+        let (_, qual) = lr.seq_qual_mut();
+        if q.len() == qual.len() {
+            qual.copy_from_slice(&q);
+            BAQ_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+    }
     if let Some(window) = fasta.slice(chr, lo + 1, len) {
         let (seq, qual) = lr.seq_qual_mut();
         crate::bam::baq::apply_baq_hmm(seq, qual, &cigar, window, lo, ref_start);
@@ -166,7 +191,31 @@ pub fn baq_read(lr: &mut LiveRead, ref_names: &[String], fasta: &impl FastaLike,
         if off < window.len() {
             crate::bam::baq::nm_weight_qual(seq, qual, &cigar, &window[off..]);
         }
+        BAQ_CACHE.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.len() >= BAQ_CACHE_CAP {
+                c.clear();
+            }
+            c.insert(key, qual.to_vec().into_boxed_slice());
+        });
     }
+}
+
+const BAQ_CACHE_CAP: usize = 4096;
+
+thread_local! {
+    static BAQ_CACHE: std::cell::RefCell<crate::fx::FxHashMap<u64, Box<[u8]>>> =
+        std::cell::RefCell::new(crate::fx::FxHashMap::default());
+}
+static BAQ_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BAQ_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `(reads through BAQ, cache hits)` so far in this process.
+pub fn baq_cache_stats() -> (u64, u64) {
+    (
+        BAQ_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        BAQ_HITS.load(std::sync::atomic::Ordering::Relaxed),
+    )
 }
 
 fn ref_span(cigar: &[(noodles_sam::alignment::record::cigar::op::Kind, u32)]) -> u32 {

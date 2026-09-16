@@ -179,7 +179,13 @@ Commands: `query`, `cnv`.
   `INFO/TAG:=./FILTER` copies the target's own FILTER column (filters joined
   by `,`), `-c ALT` pairs records on POS/REF and replaces ALT, and a tag
   defined differently in the two headers keeps the input definition with a
-  warning. Not yet mirrored: INFO/END matching for symbolic alleles,
+  warning. Records are matched first as written, then with bcftools' REF
+  padding rule (vcmp), then by their representation-free core (REF/ALT
+  stripped of shared suffix and prefix, POS moved accordingly), so
+  `GAT>GCT` at 100 finds `A>C` at 101 and a deletion anchored on either side
+  finds the other; a core match is re-expressed over the target's REF before
+  values are mapped. Left-alignment inside repeats needs a reference and is
+  not attempted. Not yet mirrored: INFO/END matching for symbolic alleles,
   allele-aware FORMAT vectors under `-c FMT`, and bcftools' `+`-mode quirk
   that replaces an Integer vector whole when its first value is missing.  
 
@@ -564,7 +570,12 @@ Commands: `query`, `cnv`.
   not available on this path. The in-memory path hands each parallel chunk
   reads that share their sequence buffers (copied only when mate overlap
   adjusts qualities), BAQ reuses its pair-HMM matrices per thread, and sample
-  columns are rendered straight into the output buffer.
+  columns are rendered straight into the output buffer. The pair-HMM keeps
+  its three states in separate planes so the match and insertion cells of a
+  row are computed in one vectorisable loop (bit-identical to htslib's
+  probaln), and identical reads (same placement, bases and qualities) reuse
+  one BAQ result through a per-thread cache (`KIRA_BT_TIMING=1` reports the
+  hit count).
 - `gtcheck -g` walks the panel in lock-step with the query; both inputs must
   be position-sorted with the same chromosome order.
 
