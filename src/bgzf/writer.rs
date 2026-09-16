@@ -46,7 +46,10 @@ impl BgzfWriter {
         Self::from_writer_buffered(io::stdout(), compression, STREAM_BUFFER_SIZE)
     }
 
-    pub fn from_writer<W: Write + Send + 'static>(writer: W, compression: Compression) -> io::Result<Self> {
+    pub fn from_writer<W: Write + Send + 'static>(
+        writer: W,
+        compression: Compression,
+    ) -> io::Result<Self> {
         Self::from_writer_buffered(writer, compression, FILE_BUFFER_SIZE)
     }
 
@@ -100,7 +103,13 @@ impl BgzfWriter {
     ) -> io::Result<()> {
         while let Ok((data, seq)) = chunk_rx.recv() {
             let compressed = Self::compress_block(&data, compressor, scratch)?;
-            if block_tx.send(CompressedBlock { data: compressed, sequence: seq }).is_err() {
+            if block_tx
+                .send(CompressedBlock {
+                    data: compressed,
+                    sequence: seq,
+                })
+                .is_err()
+            {
                 break;
             }
         }
@@ -168,7 +177,10 @@ impl BgzfWriter {
             return Ok(());
         }
         let Some(tx) = self.tx.as_ref() else {
-            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "BGZF writer already finished"));
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "BGZF writer already finished",
+            ));
         };
         let seq = self.sequence;
         self.sequence += 1;
@@ -191,7 +203,11 @@ impl BgzfWriter {
         }
     }
 
-    fn compress_block(data: &[u8], compressor: &mut Compressor, scratch: &mut Vec<u8>) -> io::Result<Vec<u8>> {
+    fn compress_block(
+        data: &[u8],
+        compressor: &mut Compressor,
+        scratch: &mut Vec<u8>,
+    ) -> io::Result<Vec<u8>> {
         let bound = compressor.deflate_compress_bound(data.len());
         if scratch.len() < bound {
             scratch.resize(bound, 0);
@@ -203,7 +219,9 @@ impl BgzfWriter {
 
         let total = BGZF_HEADER.len() + n + 8;
         if total > 65536 {
-            return Err(io::Error::other(format!("BGZF block of {total} bytes exceeds the 64 KiB limit")));
+            return Err(io::Error::other(format!(
+                "BGZF block of {total} bytes exceeds the 64 KiB limit"
+            )));
         }
         let mut block = Vec::with_capacity(total);
         block.extend_from_slice(&BGZF_HEADER);

@@ -2,8 +2,8 @@ use anyhow::{Result, anyhow};
 use bytemuck::{self, Pod, Zeroable};
 #[cfg(feature = "gpu")]
 use cust::memory::DeviceCopy;
-use kira_kv_engine::Index;
 use flate2::{Decompress, FlushDecompress, Status};
+use kira_kv_engine::Index;
 use memchr::memchr;
 use memmap2::{Mmap, MmapOptions};
 use std::cell::RefCell;
@@ -938,7 +938,9 @@ impl AniIndex {
                     field_meta,
                 );
                 if let Some(set) = info_filter {
-                    all.into_iter().filter(|f| set.contains(f.key.as_str())).collect()
+                    all.into_iter()
+                        .filter(|f| set.contains(f.key.as_str()))
+                        .collect()
                 } else {
                     all
                 }
@@ -1114,11 +1116,7 @@ struct ChunkCache {
     str_data: Vec<u8>,
 }
 
-fn build_chunk(
-    pairs: &[AniInfoPair],
-    blob: &AniInfoBlob,
-    tag_types: &[FieldType],
-) -> ChunkCache {
+fn build_chunk(pairs: &[AniInfoPair], blob: &AniInfoBlob, tag_types: &[FieldType]) -> ChunkCache {
     let mut pair_offsets = Vec::with_capacity(pairs.len());
     let mut pair_counts = Vec::with_capacity(pairs.len());
     let mut pair_kinds = Vec::with_capacity(pairs.len());
@@ -1346,7 +1344,8 @@ fn read_header(mmap: &Mmap) -> Result<AniHeader> {
             if mmap.len() < mem::size_of::<AniHeaderV6>() {
                 return Err(anyhow!("ANI file too small for v6 header (rebuild)"));
             }
-            let h6: AniHeaderV6 = bytemuck::pod_read_unaligned(&mmap[..mem::size_of::<AniHeaderV6>()]);
+            let h6: AniHeaderV6 =
+                bytemuck::pod_read_unaligned(&mmap[..mem::size_of::<AniHeaderV6>()]);
             Ok(AniHeader {
                 magic: h6.magic,
                 version: h6.version,
@@ -1418,7 +1417,8 @@ fn load_entries_v2(mmap: &Mmap, ent_start: usize, n_entries: usize) -> Result<Ve
 
     for chunk in mmap[ent_start..ent_end].chunks_exact(ent_size) {
         // SAFETY: chunk is exactly size_of::<AniEntryV2>() bytes of a plain-data struct.
-        let e: AniEntryV2 = unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const AniEntryV2) };
+        let e: AniEntryV2 =
+            unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const AniEntryV2) };
         entries.push(AniEntry {
             chr_id: e.chr_id as u32,
             pos: e.pos,
@@ -1464,7 +1464,8 @@ fn load_strings(mmap: &Mmap, header: &AniHeader) -> Result<StringSource> {
         let mut blocks = Vec::with_capacity(count);
         for chunk in mmap[start..end].chunks_exact(ent_size) {
             // SAFETY: chunk is exactly size_of::<AniBlockEntry>() bytes of a plain-data struct.
-            let e: AniBlockEntry = unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const AniBlockEntry) };
+            let e: AniBlockEntry =
+                unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const AniBlockEntry) };
             blocks.push(e);
         }
 
@@ -1483,7 +1484,9 @@ fn load_strings(mmap: &Mmap, header: &AniHeader) -> Result<StringSource> {
         let len = mmap.len().saturating_sub(str_start);
         // Validated once here so `CStrRef::as_str` can skip the check.
         if std::str::from_utf8(&mmap[str_start.min(mmap.len())..]).is_err() {
-            return Err(anyhow!("ANI string section is not valid UTF-8 (rebuild the index)"));
+            return Err(anyhow!(
+                "ANI string section is not valid UTF-8 (rebuild the index)"
+            ));
         }
         Ok(StringSource::Raw(StringStorage::Mmap {
             offset: str_start,

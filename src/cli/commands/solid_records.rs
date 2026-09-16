@@ -175,7 +175,11 @@ fn mapped_record(read: &ReadRecord, aln: &Alignment) -> Option<RecordBuf> {
         Some(q) => q.iter().map(|&c| phred_from_ascii(c)).collect(),
         None => Vec::new(),
     };
-    let qual = if qual.is_empty() { qual } else { qual[keep_start..keep_end].to_vec() };
+    let qual = if qual.is_empty() {
+        qual
+    } else {
+        qual[keep_start..keep_end].to_vec()
+    };
 
     let last_op = aln.cigar.len().saturating_sub(1);
     let cigar_ops: Vec<Op> = aln
@@ -184,7 +188,11 @@ fn mapped_record(read: &ReadRecord, aln: &Alignment) -> Option<RecordBuf> {
         .enumerate()
         .map(|(i, op)| {
             let terminal_clip = op.op == CigarKind::SoftClip && (i == 0 || i == last_op);
-            let kind = if hard_clip && terminal_clip { Kind::HardClip } else { cigar_kind(op.op) };
+            let kind = if hard_clip && terminal_clip {
+                Kind::HardClip
+            } else {
+                cigar_kind(op.op)
+            };
             Op::new(kind, op.len as usize)
         })
         .collect();

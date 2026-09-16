@@ -67,12 +67,20 @@ pub struct SolidArgs {
     /// NM-aware quality weighting for the mpileup stage: `off`, `auto`, or
     /// `FULL,SLOPE`. Suppresses paralog misplacements the aligner still lets
     /// through. `KIRA_NM_WEIGHT` sets it when the flag is absent.
-    #[arg(long = "mpileup-nm-weight", env = "KIRA_NM_WEIGHT", default_value = "off")]
+    #[arg(
+        long = "mpileup-nm-weight",
+        env = "KIRA_NM_WEIGHT",
+        default_value = "off"
+    )]
     pub mpileup_nm_weight: String,
 
     /// Pair-HMM realignment of indel candidates in the mpileup stage: `off`,
     /// `ins` or `all`. `KIRA_INDEL_REALIGN` sets it when the flag is absent.
-    #[arg(long = "mpileup-indel-realign", env = "KIRA_INDEL_REALIGN", default_value = "off")]
+    #[arg(
+        long = "mpileup-indel-realign",
+        env = "KIRA_INDEL_REALIGN",
+        default_value = "off"
+    )]
     pub mpileup_indel_realign: String,
 
     /// Run the variant caller on the pileup, in-stream, so the pipeline emits a

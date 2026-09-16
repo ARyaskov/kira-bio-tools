@@ -53,7 +53,9 @@ fn config_from_args(args: &CallArgs) -> Result<CallConfig> {
         _ => Default::default(),
     };
     let ploidy_regions = match &args.ploidy_file {
-        Some(p) => parse_ploidy_file(p).with_context(|| format!("--ploidy-file {}", p.display()))?,
+        Some(p) => {
+            parse_ploidy_file(p).with_context(|| format!("--ploidy-file {}", p.display()))?
+        }
         None => Vec::new(),
     };
 
@@ -72,7 +74,11 @@ fn config_from_args(args: &CallArgs) -> Result<CallConfig> {
     if let Some(spec) = &args.novel_rate {
         let vals: Vec<f64> = spec
             .split(',')
-            .map(|s| s.trim().parse::<f64>().with_context(|| format!("-X/--novel-rate: bad value {s:?}")))
+            .map(|s| {
+                s.trim()
+                    .parse::<f64>()
+                    .with_context(|| format!("-X/--novel-rate: bad value {s:?}"))
+            })
             .collect::<Result<_>>()?;
         match vals.len() {
             1 => novel_rate = [vals[0]; 3],
@@ -81,7 +87,11 @@ fn config_from_args(args: &CallArgs) -> Result<CallConfig> {
             n => bail!("-X/--novel-rate: expected 1 to 3 rates, got {n}"),
         }
     }
-    let ped_path = if constrain == ConstrainMode::Trio { args.samples_file.clone() } else { None };
+    let ped_path = if constrain == ConstrainMode::Trio {
+        args.samples_file.clone()
+    } else {
+        None
+    };
 
     let cfg = CallConfig {
         mode: if args.consensus_caller {
@@ -103,11 +113,18 @@ fn config_from_args(args: &CallArgs) -> Result<CallConfig> {
         ped_path,
         novel_rate,
         groups_path: args.group_samples.clone(),
-        group_tag: args.group_samples_tag.clone().unwrap_or_else(|| "AD".to_string()),
+        group_tag: args
+            .group_samples_tag
+            .clone()
+            .unwrap_or_else(|| "AD".to_string()),
         gvcf: match &args.gvcf {
             Some(spec) => Some(
                 spec.split(',')
-                    .map(|s| s.trim().parse::<u32>().with_context(|| format!("-g/--gvcf: bad depth {s:?}")))
+                    .map(|s| {
+                        s.trim()
+                            .parse::<u32>()
+                            .with_context(|| format!("-g/--gvcf: bad depth {s:?}"))
+                    })
                     .collect::<Result<Vec<u32>>>()?,
             ),
             None => None,

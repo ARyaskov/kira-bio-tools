@@ -8,14 +8,14 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::cli::args::FilterArgs;
-use crate::vcf::VcfSink;
 use crate::filter::FilterEngine;
 use crate::filter_arch;
 use crate::kbi::KbiIndex;
 use crate::util::Region;
-use anyhow::Context as _;
 use crate::vcf::VcfParser;
+use crate::vcf::VcfSink;
 use crate::vcf::{UnifiedVcfReader, VcfReader, VcfRecord, VcfRecordRef};
+use anyhow::Context as _;
 
 pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
     let total_start = Instant::now();
@@ -59,11 +59,21 @@ pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
         args.threads.unwrap_or(0) > 1 && snp_gap.is_none() && args.indel_gap.is_none();
     // Nothing rewrites the record: evaluate on borrowed fields and pass the
     // line through untouched.
-    let simple = filter_name.is_none() && set_gts.is_none() && mask.is_none() && snp_gap.is_none() && args.indel_gap.is_none();
+    let simple = filter_name.is_none()
+        && set_gts.is_none()
+        && mask.is_none()
+        && snp_gap.is_none()
+        && args.indel_gap.is_none();
     if simple {
         let mut inner = reader.into_inner();
         let (records, dropped, eval_time) = if use_parallel {
-            run_parallel_filter_lines(&mut inner, &mut writer, Arc::new(engine), mode, args.threads.unwrap_or(0))?
+            run_parallel_filter_lines(
+                &mut inner,
+                &mut writer,
+                Arc::new(engine),
+                mode,
+                args.threads.unwrap_or(0),
+            )?
         } else {
             let mut records = 0u64;
             let mut dropped = 0u64;
@@ -73,7 +83,9 @@ pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
                     continue;
                 }
                 records += 1;
-                let Some(rec) = VcfRecordRef::parse(&line) else { anyhow::bail!("cannot parse VCF line: {line}") };
+                let Some(rec) = VcfRecordRef::parse(&line) else {
+                    anyhow::bail!("cannot parse VCF line: {line}")
+                };
                 let t = Instant::now();
                 let pass = engine.eval_ref(&rec)?.pass_site;
                 eval_time += t.elapsed();
@@ -89,7 +101,11 @@ pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
             (records, dropped, eval_time)
         };
         writer.finish()?;
-        maybe_write_index(args.output.as_deref(), args.write_index.as_deref(), args.output_type.as_deref())?;
+        maybe_write_index(
+            args.output.as_deref(),
+            args.write_index.as_deref(),
+            args.output_type.as_deref(),
+        )?;
         eprintln!(
             "filter done records={} dropped={} header_ms={} eval_ms={} mask_ms=0 mode_ms=0 setgt_ms=0 gap_ms=0 flush_ms=0 write_ms=0 total_ms={}",
             records,
@@ -168,11 +184,12 @@ pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
             let var_type = variant_type_flags(&out_rec);
             let ref_len = record_rlen(&out_rec);
             if let Some(last) = buffer.back()
-                && last.rec.chrom != out_rec.chrom {
-                    let flush_start = Instant::now();
-                    flush_buffer(&mut buffer, &mut writer, filter_name.is_some())?;
-                    stats.flush_time += flush_start.elapsed();
-                }
+                && last.rec.chrom != out_rec.chrom
+            {
+                let flush_start = Instant::now();
+                flush_buffer(&mut buffer, &mut writer, filter_name.is_some())?;
+                stats.flush_time += flush_start.elapsed();
+            }
             buffer.push_back(BufferedRecord {
                 rec: out_rec,
                 var_type,
@@ -214,7 +231,11 @@ pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
     }
 
     writer.finish()?;
-    maybe_write_index(args.output.as_deref(), args.write_index.as_deref(), args.output_type.as_deref())?;
+    maybe_write_index(
+        args.output.as_deref(),
+        args.write_index.as_deref(),
+        args.output_type.as_deref(),
+    )?;
     let total_time = total_start.elapsed();
     eprintln!(
         "filter done records={} dropped={} header_ms={} eval_ms={} mask_ms={} mode_ms={} setgt_ms={} gap_ms={} flush_ms={} write_ms={} total_ms={}",
@@ -233,15 +254,27 @@ pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
     Ok(())
 }
 
-fn maybe_write_index(out: Option<&std::path::Path>, kind: Option<&str>, output_type: Option<&str>) -> Result<()> {
-    let Some(out) = out else { return Ok(()); };
-    let Some(kind) = kind else { return Ok(()); };
+fn maybe_write_index(
+    out: Option<&std::path::Path>,
+    kind: Option<&str>,
+    output_type: Option<&str>,
+) -> Result<()> {
+    let Some(out) = out else {
+        return Ok(());
+    };
+    let Some(kind) = kind else {
+        return Ok(());
+    };
     let bgzf_out = matches!(output_type, Some(s) if s.starts_with('z') || s.starts_with('b'));
     if !bgzf_out {
         eprintln!("[filter] -W: index requires BGZF output (-O z or -O b); skipping for plain VCF");
         return Ok(());
     }
-    let (ikind, ext) = if kind == "tbi" { (crate::csi::IndexKind::Tbi, "tbi") } else { (crate::csi::IndexKind::Csi, "csi") };
+    let (ikind, ext) = if kind == "tbi" {
+        (crate::csi::IndexKind::Tbi, "tbi")
+    } else {
+        (crate::csi::IndexKind::Csi, "csi")
+    };
     let idx_path = std::path::PathBuf::from(format!("{}.{}", out.display(), ext));
     crate::csi::build_index(out, &idx_path, ikind, None)
         .with_context(|| format!("-W {kind}: writing index {}", idx_path.display()))?;
@@ -250,9 +283,10 @@ fn maybe_write_index(out: Option<&std::path::Path>, kind: Option<&str>, output_t
 
 fn load_expr(s: &str) -> String {
     if let Some(path) = s.strip_prefix('@')
-        && let Ok(c) = std::fs::read_to_string(path) {
-            return c.trim().to_string();
-        }
+        && let Ok(c) = std::fs::read_to_string(path)
+    {
+        return c.trim().to_string();
+    }
     s.to_string()
 }
 
@@ -380,9 +414,10 @@ fn extract_filter_id(line: &str) -> Option<String> {
 fn ensure_filter_header(headers: &mut Vec<String>, id: &str, desc: &str) {
     for h in headers.iter() {
         if let Some(existing) = extract_filter_id(h)
-            && existing == id {
-                return;
-            }
+            && existing == id
+        {
+            return;
+        }
     }
 
     let line = format!(
@@ -404,9 +439,16 @@ fn ensure_filter_header(headers: &mut Vec<String>, id: &str, desc: &str) {
 }
 
 /// Output sink for the requested `-O` type (plain, BGZF or BCF).
-pub(crate) fn open_writer(path: Option<&PathBuf>, output_type: Option<&str>, headers: &[String]) -> Result<VcfSink> {
+pub(crate) fn open_writer(
+    path: Option<&PathBuf>,
+    output_type: Option<&str>,
+    headers: &[String],
+) -> Result<VcfSink> {
     use crate::annotate::postproc::{OutputKind, parse_output_type};
-    let kind = output_type.map(parse_output_type).transpose()?.unwrap_or(OutputKind::Vcf);
+    let kind = output_type
+        .map(parse_output_type)
+        .transpose()?
+        .unwrap_or(OutputKind::Vcf);
     VcfSink::open(path.map(|p| p.as_path()), kind, headers)
 }
 
@@ -586,7 +628,11 @@ fn run_parallel_filter_lines(
     for h in handles {
         let _ = h.join();
     }
-    Ok((sent, dropped, Duration::from_nanos(eval_ns.load(Ordering::Relaxed))))
+    Ok((
+        sent,
+        dropped,
+        Duration::from_nanos(eval_ns.load(Ordering::Relaxed)),
+    ))
 }
 
 fn run_parallel_filter(
@@ -875,10 +921,13 @@ fn mask_pass_kbi(mask: &KbiMask, rec: &VcfRecord) -> bool {
         for (_pos, offset) in hits {
             if let Ok(line) = fetcher.fetch(offset)
                 && let Some((mchr, mbeg, mend)) = parse_mask_vcf_bounds(line, mask.overlap)
-                    && mchr == rec.chrom && mbeg <= end && mend >= beg {
-                        hit = true;
-                        break;
-                    }
+                && mchr == rec.chrom
+                && mbeg <= end
+                && mend >= beg
+            {
+                hit = true;
+                break;
+            }
         }
     }
     if mask.negate { hit } else { !hit }
@@ -958,7 +1007,9 @@ fn try_load_kbi_mask(
         let index = KbiIndex::load(mask_path)?;
         let (data_path, has_data) = resolve_kbi_data_path(mask_path);
         let fetcher = if has_data {
-            Some(std::sync::Mutex::new(crate::vcf::LineFetcher::open(&data_path)?))
+            Some(std::sync::Mutex::new(crate::vcf::LineFetcher::open(
+                &data_path,
+            )?))
         } else {
             None
         };
@@ -975,7 +1026,9 @@ fn try_load_kbi_mask(
         let index = KbiIndex::load(&kbi_path)?;
         return Ok(Some(KbiMask {
             index,
-            fetcher: Some(std::sync::Mutex::new(crate::vcf::LineFetcher::open(mask_path)?)),
+            fetcher: Some(std::sync::Mutex::new(crate::vcf::LineFetcher::open(
+                mask_path,
+            )?)),
             overlap: overlap.unwrap_or(1),
             negate,
             has_data: true,
@@ -1078,9 +1131,10 @@ fn buffered_filters(
         let mut idx = 0usize;
         for rec in buffer.iter_mut() {
             if let Some(last) = last_to
-                && last < rec.rec.pos.saturating_sub(1) {
-                    break;
-                }
+                && last < rec.rec.pos.saturating_sub(1)
+            {
+                break;
+            }
             k_flush += 1;
             if rec.var_type & VCF_INDEL == 0 {
                 idx += 1;
@@ -1108,11 +1162,10 @@ fn buffered_filters(
                     continue;
                 }
                 let qual = rec.rec.qual.parse::<f64>().unwrap_or(f64::NEG_INFINITY);
-                if qual > 0.0
-                    && qual > max_qual {
-                        max_qual = qual;
-                        best_idx = Some(i);
-                    }
+                if qual > 0.0 && qual > max_qual {
+                    max_qual = qual;
+                    best_idx = Some(i);
+                }
                 if max_qual == f64::NEG_INFINITY {
                     let ac = first_alt_ac(&rec.rec).unwrap_or(i64::MIN);
                     if ac > max_ac {

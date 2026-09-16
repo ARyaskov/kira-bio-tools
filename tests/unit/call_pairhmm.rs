@@ -26,7 +26,10 @@ fn deletion_read_prefers_alt_haplotype() {
     read.extend_from_slice(&refh[14..]);
     let alt = read.clone(); // haplotype carrying the deletion
     let lr = loglik_ratio(&read, &q(read.len()), refh, &alt);
-    assert!(lr > 5.0, "deletion read should strongly prefer alt hap, LR={lr}");
+    assert!(
+        lr > 5.0,
+        "deletion read should strongly prefer alt hap, LR={lr}"
+    );
 }
 
 #[test]
@@ -50,5 +53,8 @@ fn clean_ref_read_rejects_spurious_indel() {
     alt.extend_from_slice(&refh[..15]);
     alt.extend_from_slice(&refh[16..]);
     let lr = loglik_ratio(read, &q(read.len()), refh, &alt);
-    assert!(lr < 0.0, "clean ref read must reject spurious indel, LR={lr}");
+    assert!(
+        lr < 0.0,
+        "clean ref read must reject spurious indel, LR={lr}"
+    );
 }

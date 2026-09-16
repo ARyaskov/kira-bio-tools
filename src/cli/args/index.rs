@@ -47,13 +47,23 @@ pub struct RegionIndexArgs {
     #[arg(short, long, help = "Output index file")]
     pub output: Option<PathBuf>,
 
-    #[arg(short, long, default_value = "vcf", help = "Format preset (vcf, bed, gff, sam)")]
+    #[arg(
+        short,
+        long,
+        default_value = "vcf",
+        help = "Format preset (vcf, bed, gff, sam)"
+    )]
     pub preset: String,
 
     #[arg(short, long, help = "Force overwrite existing index")]
     pub force: bool,
 
-    #[arg(short = 's', long, default_value = "14", help = "Minimum bin shift (CSI)")]
+    #[arg(
+        short = 's',
+        long,
+        default_value = "14",
+        help = "Minimum bin shift (CSI)"
+    )]
     pub min_shift: u8,
 
     #[arg(short = 'd', long, default_value = "5", help = "Bin depth (CSI)")]

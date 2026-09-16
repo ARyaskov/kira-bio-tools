@@ -1,4 +1,6 @@
-use crate::bam::pileup::{LiveRead, SampleResolver, build_live_from_bam_with, build_live_from_cram_with};
+use crate::bam::pileup::{
+    LiveRead, SampleResolver, build_live_from_bam_with, build_live_from_cram_with,
+};
 use anyhow::{Context, Result, bail};
 use noodles_bam as bam;
 use noodles_cram as cram;
@@ -39,7 +41,10 @@ impl BamReader {
 }
 
 fn header_lengths(h: &sam::Header) -> Vec<u64> {
-    h.reference_sequences().values().map(|s| usize::from(s.length()) as u64).collect()
+    h.reference_sequences()
+        .values()
+        .map(|s| usize::from(s.length()) as u64)
+        .collect()
 }
 
 pub fn apply_hmm_baq_to_reads(
@@ -68,7 +73,9 @@ pub fn apply_hmm_baq_to_reads_masked(
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     let total = reads.len() as u64;
-    if total == 0 { return; }
+    if total == 0 {
+        return;
+    }
 
     // The NM profile is chosen once from the observed read length (a platform proxy).
     {
@@ -80,10 +87,16 @@ pub fn apply_hmm_baq_to_reads_masked(
     let no_pb = std::env::var("KIRA_BT_NO_PROGRESS").is_ok();
     let pb = ProgressBar::new(total);
     pb.set_style(
-        ProgressStyle::with_template("[BAQ] {bar:40.cyan/blue} {pos}/{len} reads ({per_sec}, ETA {eta})")
-            .unwrap_or_else(|_| ProgressStyle::default_bar()),
+        ProgressStyle::with_template(
+            "[BAQ] {bar:40.cyan/blue} {pos}/{len} reads ({per_sec}, ETA {eta})",
+        )
+        .unwrap_or_else(|_| ProgressStyle::default_bar()),
     );
-    pb.set_draw_target(if no_pb { ProgressDrawTarget::hidden() } else { ProgressDrawTarget::stderr_with_hz(2) });
+    pb.set_draw_target(if no_pb {
+        ProgressDrawTarget::hidden()
+    } else {
+        ProgressDrawTarget::stderr_with_hz(2)
+    });
     let counter = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let ticker = {
@@ -110,9 +123,10 @@ pub fn apply_hmm_baq_to_reads_masked(
             for (i, lr) in batch.iter_mut().enumerate() {
                 let global = batch_off + i;
                 if let Some(mask) = needs
-                    && !mask.get(global).copied().unwrap_or(true) {
-                        continue;
-                    }
+                    && !mask.get(global).copied().unwrap_or(true)
+                {
+                    continue;
+                }
                 baq_read(lr, ref_names, fasta, redo);
             }
             counter.fetch_add(batch.len() as u64, Ordering::Relaxed);
@@ -129,13 +143,16 @@ pub fn apply_hmm_baq_to_reads_masked(
 /// of the alignment, as `sam_prob_realn` may look that far.
 pub fn baq_read(lr: &mut LiveRead, ref_names: &[String], fasta: &impl FastaLike, redo: bool) {
     if let Some(tag) = lr.bq_tag.take()
-        && !redo {
-            let (_, qual) = lr.seq_qual_mut();
-            if crate::bam::baq::apply_bq_tag(qual, &tag) {
-                return;
-            }
+        && !redo
+    {
+        let (_, qual) = lr.seq_qual_mut();
+        if crate::bam::baq::apply_bq_tag(qual, &tag) {
+            return;
         }
-    let Some(chr) = ref_names.get(lr.ref_id) else { return };
+    }
+    let Some(chr) = ref_names.get(lr.ref_id) else {
+        return;
+    };
     let span = ref_span(&lr.cigar_pairs);
     let ref_start = lr.ref_start;
     let pad = lr.seq().len() as u32 + 16;
@@ -154,8 +171,20 @@ pub fn baq_read(lr: &mut LiveRead, ref_names: &[String], fasta: &impl FastaLike,
 
 fn ref_span(cigar: &[(noodles_sam::alignment::record::cigar::op::Kind, u32)]) -> u32 {
     use noodles_sam::alignment::record::cigar::op::Kind;
-    cigar.iter().filter(|(k, _)| matches!(k, Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch | Kind::Deletion | Kind::Skip))
-        .map(|(_, l)| *l).sum()
+    cigar
+        .iter()
+        .filter(|(k, _)| {
+            matches!(
+                k,
+                Kind::Match
+                    | Kind::SequenceMatch
+                    | Kind::SequenceMismatch
+                    | Kind::Deletion
+                    | Kind::Skip
+            )
+        })
+        .map(|(_, l)| *l)
+        .sum()
 }
 
 pub trait FastaLike {
@@ -177,7 +206,9 @@ pub fn fasta_repository(fasta_path: &Path) -> Result<fasta::Repository> {
         .set_index(index)
         .build_from_path(fasta_path)
         .with_context(|| format!("open reference {}", fasta_path.display()))?;
-    Ok(fasta::Repository::new(fasta::repository::adapters::IndexedReader::new(reader)))
+    Ok(fasta::Repository::new(
+        fasta::repository::adapters::IndexedReader::new(reader),
+    ))
 }
 
 impl BamReader {
@@ -187,7 +218,11 @@ impl BamReader {
 
     /// Header only, for sample selection before any read is loaded.
     pub fn read_header_only(path: &Path, reference: Option<&Path>) -> Result<sam::Header> {
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         if ext == "cram" {
             let repo = match reference {
                 Some(r) => fasta_repository(r)?,
@@ -217,11 +252,23 @@ impl BamReader {
 
     /// [`open_with_reference`] with the sample of each read chosen by
     /// `resolver` (sample 0 for every read without one).
-    pub fn open_with_reference_resolved<P: AsRef<Path>>(p: P, reference: Option<&Path>, resolver: Option<&SampleResolver<'_>>) -> Result<Self> {
+    pub fn open_with_reference_resolved<P: AsRef<Path>>(
+        p: P,
+        reference: Option<&Path>,
+        resolver: Option<&SampleResolver<'_>>,
+    ) -> Result<Self> {
         let path = p.as_ref();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-        if ext == "cram" { return Self::open_cram(path, reference, None, resolver); }
-        if ext == "sam" { return Self::open_sam(path, None, resolver); }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if ext == "cram" {
+            return Self::open_cram(path, reference, None, resolver);
+        }
+        if ext == "sam" {
+            return Self::open_sam(path, None, resolver);
+        }
         let resolve: &SampleResolver<'_> = resolver.unwrap_or(&|_| Some(0));
         let f = File::open(path).with_context(|| format!("open BAM {:?}", path))?;
         // MultithreadedReader scales BGZF decompression across cores (~3-5× vs single-threaded).
@@ -234,7 +281,9 @@ impl BamReader {
         let mut records_buf: Vec<LiveRead> = Vec::with_capacity(64 * 1024);
         for r in inner.records() {
             let rec = r.context("read BAM record")?;
-            if let Some(lr) = build_live_from_bam_with(&rec, resolve) { records_buf.push(lr); }
+            if let Some(lr) = build_live_from_bam_with(&rec, resolve) {
+                records_buf.push(lr);
+            }
         }
         Ok(Self::build(records_buf, header, path))
     }
@@ -244,13 +293,21 @@ impl BamReader {
     }
 
     /// `region` is `chr`, `chr:pos` or `chr:beg-end` (1-based, inclusive).
-    pub fn open_with_region_and_reference<P: AsRef<Path>>(p: P, region: &str, reference: Option<&Path>) -> Result<Self> {
+    pub fn open_with_region_and_reference<P: AsRef<Path>>(
+        p: P,
+        region: &str,
+        reference: Option<&Path>,
+    ) -> Result<Self> {
         let (chrom, beg, end) = parse_region(region)?;
         Self::open_with_regions_and_reference(p, &[(chrom, beg, end)], reference)
     }
 
     /// Reads overlapping any of the (sorted, non-overlapping) regions, in position order.
-    pub fn open_with_regions_and_reference<P: AsRef<Path>>(p: P, regions: &[(String, u32, u32)], reference: Option<&Path>) -> Result<Self> {
+    pub fn open_with_regions_and_reference<P: AsRef<Path>>(
+        p: P,
+        regions: &[(String, u32, u32)],
+        reference: Option<&Path>,
+    ) -> Result<Self> {
         Self::open_with_regions_resolved(p, regions, reference, None)
     }
 
@@ -262,7 +319,11 @@ impl BamReader {
         resolver: Option<&SampleResolver<'_>>,
     ) -> Result<Self> {
         let path = p.as_ref();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         if ext == "cram" {
             return Self::open_cram(path, reference, Some(regions), resolver);
         }
@@ -271,22 +332,32 @@ impl BamReader {
         }
         let resolve: &SampleResolver<'_> = resolver.unwrap_or(&|_| Some(0));
         let mut ir = bam::io::indexed_reader::Builder::default()
-            .build_from_path(path).with_context(|| format!("open indexed BAM {:?}", path))?;
+            .build_from_path(path)
+            .with_context(|| format!("open indexed BAM {:?}", path))?;
         let header = ir.read_header().context("read header")?;
         let mut records_buf: Vec<LiveRead> = Vec::new();
         for (chrom, beg, end) in regions {
             let reg = make_region(chrom, *beg, *end);
-            let query = ir.query(&header, &reg).with_context(|| format!("query region {chrom}:{beg}-{end}"))?;
+            let query = ir
+                .query(&header, &reg)
+                .with_context(|| format!("query region {chrom}:{beg}-{end}"))?;
             for r in query.records() {
                 let rec = r.context("read indexed BAM record")?;
-                if let Some(lr) = build_live_from_bam_with(&rec, resolve) { records_buf.push(lr); }
+                if let Some(lr) = build_live_from_bam_with(&rec, resolve) {
+                    records_buf.push(lr);
+                }
             }
         }
         records_buf.sort_by_key(|lr| (lr.ref_id, lr.ref_start));
         Ok(Self::build(records_buf, header, path))
     }
 
-    fn open_cram(path: &Path, reference: Option<&Path>, regions: Option<&[(String, u32, u32)]>, resolver: Option<&SampleResolver<'_>>) -> Result<Self> {
+    fn open_cram(
+        path: &Path,
+        reference: Option<&Path>,
+        regions: Option<&[(String, u32, u32)]>,
+        resolver: Option<&SampleResolver<'_>>,
+    ) -> Result<Self> {
         let resolve: &SampleResolver<'_> = resolver.unwrap_or(&|_| Some(0));
         let repo = match reference {
             Some(r) => fasta_repository(r)?,
@@ -298,14 +369,20 @@ impl BamReader {
                 let mut ir = cram::io::indexed_reader::Builder::default()
                     .set_reference_sequence_repository(repo)
                     .build_from_path(path)
-                    .with_context(|| format!("open indexed CRAM {:?} (needs {:?}.crai)", path, path))?;
+                    .with_context(|| {
+                        format!("open indexed CRAM {:?} (needs {:?}.crai)", path, path)
+                    })?;
                 let header = ir.read_header().context("read CRAM header")?;
                 for (chrom, beg, end) in regions {
                     let reg = make_region(chrom, *beg, *end);
-                    let query = ir.query(&header, &reg).with_context(|| format!("query CRAM region {chrom}:{beg}-{end}"))?;
+                    let query = ir
+                        .query(&header, &reg)
+                        .with_context(|| format!("query CRAM region {chrom}:{beg}-{end}"))?;
                     for r in query {
                         let rb = r.context("read CRAM record")?;
-                        if let Some(lr) = build_live_from_cram_with(&rb, resolve) { records_buf.push(lr); }
+                        if let Some(lr) = build_live_from_cram_with(&rb, resolve) {
+                            records_buf.push(lr);
+                        }
                     }
                 }
                 records_buf.sort_by_key(|lr| (lr.ref_id, lr.ref_start));
@@ -325,7 +402,9 @@ impl BamReader {
                         ),
                         Err(e) => return Err(e).context("read CRAM record"),
                     };
-                    if let Some(lr) = build_live_from_cram_with(&rb, resolve) { records_buf.push(lr); }
+                    if let Some(lr) = build_live_from_cram_with(&rb, resolve) {
+                        records_buf.push(lr);
+                    }
                 }
                 header
             }
@@ -334,21 +413,36 @@ impl BamReader {
     }
 
     /// Plain SAM: no index, so regions are applied to the decoded records.
-    fn open_sam(path: &Path, regions: Option<&[(String, u32, u32)]>, resolver: Option<&SampleResolver<'_>>) -> Result<Self> {
+    fn open_sam(
+        path: &Path,
+        regions: Option<&[(String, u32, u32)]>,
+        resolver: Option<&SampleResolver<'_>>,
+    ) -> Result<Self> {
         let resolve: &SampleResolver<'_> = resolver.unwrap_or(&|_| Some(0));
         let f = File::open(path).with_context(|| format!("open SAM {:?}", path))?;
         let mut reader = sam::io::Reader::new(std::io::BufReader::with_capacity(1 << 20, f));
         let header = reader.read_header().context("read SAM header")?;
-        let names: Vec<String> = header.reference_sequences().keys().map(|k| std::str::from_utf8(k).unwrap_or("").to_string()).collect();
+        let names: Vec<String> = header
+            .reference_sequences()
+            .keys()
+            .map(|k| std::str::from_utf8(k).unwrap_or("").to_string())
+            .collect();
         let mut records_buf: Vec<LiveRead> = Vec::new();
         for r in reader.records() {
             let rec = r.context("read SAM record")?;
-            let rb = sam::alignment::RecordBuf::try_from_alignment_record(&header, &rec).context("decode SAM record")?;
-            let Some(lr) = build_live_from_cram_with(&rb, resolve) else { continue };
+            let rb = sam::alignment::RecordBuf::try_from_alignment_record(&header, &rec)
+                .context("decode SAM record")?;
+            let Some(lr) = build_live_from_cram_with(&rb, resolve) else {
+                continue;
+            };
             if let Some(regs) = regions {
                 let chrom = names.get(lr.ref_id).map(String::as_str).unwrap_or("");
-                let keep = regs.iter().any(|(c, b, e)| c == chrom && lr.ref_start < *e && lr.ref_end_cached >= *b);
-                if !keep { continue; }
+                let keep = regs
+                    .iter()
+                    .any(|(c, b, e)| c == chrom && lr.ref_start < *e && lr.ref_end_cached >= *b);
+                if !keep {
+                    continue;
+                }
             }
             records_buf.push(lr);
         }
@@ -358,10 +452,20 @@ impl BamReader {
 
     fn build(records_buf: Vec<LiveRead>, header: sam::Header, p: &Path) -> Self {
         let samples = extract_samples(&header);
-        let ref_names: Vec<String> = header.reference_sequences().keys()
-            .map(|k| std::str::from_utf8(k).unwrap_or("").to_string()).collect();
+        let ref_names: Vec<String> = header
+            .reference_sequences()
+            .keys()
+            .map(|k| std::str::from_utf8(k).unwrap_or("").to_string())
+            .collect();
         let ref_lengths = header_lengths(&header);
-        Self { records_buf, header, samples, ref_names, ref_lengths, source_path: p.to_path_buf() }
+        Self {
+            records_buf,
+            header,
+            samples,
+            ref_names,
+            ref_lengths,
+            source_path: p.to_path_buf(),
+        }
     }
 }
 
@@ -369,13 +473,23 @@ impl BamReader {
 fn parse_region(s: &str) -> Result<(String, u32, u32)> {
     let s = s.trim();
     if let Some((c, r)) = s.rsplit_once(':')
-        && r.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
-            let num = |t: &str| crate::util::parse_coordinate(t).ok_or_else(|| anyhow::anyhow!("bad region {s:?}"));
-            return match r.split_once('-') {
-                Some((b, e)) => Ok((c.to_string(), num(b)?.max(1), if e.is_empty() { u32::MAX } else { num(e)? })),
-                None => { let p = num(r)?; Ok((c.to_string(), p.max(1), p)) }
-            };
-        }
+        && r.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+    {
+        let num = |t: &str| {
+            crate::util::parse_coordinate(t).ok_or_else(|| anyhow::anyhow!("bad region {s:?}"))
+        };
+        return match r.split_once('-') {
+            Some((b, e)) => Ok((
+                c.to_string(),
+                num(b)?.max(1),
+                if e.is_empty() { u32::MAX } else { num(e)? },
+            )),
+            None => {
+                let p = num(r)?;
+                Ok((c.to_string(), p.max(1), p))
+            }
+        };
+    }
     Ok((s.to_string(), 1, u32::MAX))
 }
 
@@ -390,7 +504,9 @@ fn make_region(chrom: &str, beg: u32, end: u32) -> noodles_core::Region {
     }
 }
 
-pub fn extract_samples_helper(h: &sam::Header) -> Vec<String> { extract_samples(h) }
+pub fn extract_samples_helper(h: &sam::Header) -> Vec<String> {
+    extract_samples(h)
+}
 
 fn extract_samples(h: &sam::Header) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -398,7 +514,9 @@ fn extract_samples(h: &sam::Header) -> Vec<String> {
         for (k, v) in rg.other_fields().iter() {
             if k.as_ref() == b"SM" {
                 let s = std::str::from_utf8(v).unwrap_or("").to_string();
-                if !out.contains(&s) { out.push(s); }
+                if !out.contains(&s) {
+                    out.push(s);
+                }
             }
         }
     }

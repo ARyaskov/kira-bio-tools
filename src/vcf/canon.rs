@@ -243,7 +243,11 @@ impl RecordCanon {
         if let Some(t8) = t8 {
             let t9 = tabs.next();
             let fmt = &b[t8 + 1..t9.unwrap_or(b.len())];
-            let n_fields = if fmt.is_empty() { 0 } else { memchr_iter(b':', fmt).count() + 1 };
+            let n_fields = if fmt.is_empty() {
+                0
+            } else {
+                memchr_iter(b':', fmt).count() + 1
+            };
             let positions = self.float_positions(fmt);
             if let Some(t9) = t9 {
                 let mut start = t9 + 1;
@@ -295,7 +299,14 @@ impl RecordCanon {
 
 /// Re-render the fields at `positions` (ascending) of one sample column and
 /// pad it to `n_fields` fields with `.` the way htslib prints a short one.
-fn sample_edits(line: &str, start: usize, end: usize, positions: &[usize], n_fields: usize, edits: &mut Vec<Edit>) {
+fn sample_edits(
+    line: &str,
+    start: usize,
+    end: usize,
+    positions: &[usize],
+    n_fields: usize,
+    edits: &mut Vec<Edit>,
+) {
     let b = line.as_bytes();
     let (mut pi, mut idx, mut s) = (0usize, 0usize, start);
     loop {

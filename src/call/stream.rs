@@ -82,8 +82,7 @@ impl Default for CallConfig {
 impl CallConfig {
     /// Reject ploidy the callers cannot honour, rather than silently calling diploid.
     pub fn validate(&self) -> Result<()> {
-        let non_diploid =
-            self.ploidy != 2 || self.ploidy_regions.iter().any(|r| r.ploidy != 2);
+        let non_diploid = self.ploidy != 2 || self.ploidy_regions.iter().any(|r| r.ploidy != 2);
         if non_diploid && self.mode == CallMode::Consensus {
             bail!(
                 "call: the consensus caller (-c) models diploid samples only; use the multiallelic caller (-m) for ploidy != 2"
@@ -173,25 +172,44 @@ impl<W: Write> CallStream<W> {
             self.families = crate::call::pedigree::parse_ped(ped, &self.selected_names)
                 .map_err(|e| anyhow::anyhow!("read PED {}: {e}", ped.display()))?;
             if self.families.is_empty() {
-                bail!("call: -C trio: no complete trio among the selected samples in {}", ped.display());
+                bail!(
+                    "call: -C trio: no complete trio among the selected samples in {}",
+                    ped.display()
+                );
             }
         }
         self.groups = match &self.cfg.groups_path {
             None => None,
             Some(p) if p.as_os_str() == "-" => Some(
-                self.selected_names.iter().enumerate().map(|(i, n)| SampleGroup { name: n.clone(), sample_idxs: vec![i] }).collect(),
+                self.selected_names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| SampleGroup {
+                        name: n.clone(),
+                        sample_idxs: vec![i],
+                    })
+                    .collect(),
             ),
             Some(p) => {
                 let mut g = crate::call::pedigree::parse_groups(p, &self.selected_names)
                     .map_err(|e| anyhow::anyhow!("read groups {}: {e}", p.display()))?;
                 if g.is_empty() {
-                    bail!("call: -G {}: none of the selected samples belongs to a group", p.display());
+                    bail!(
+                        "call: -G {}: none of the selected samples belongs to a group",
+                        p.display()
+                    );
                 }
                 g.sort_by_key(|x| x.sample_idxs.iter().copied().min().unwrap_or(usize::MAX));
                 Some(g)
             }
         };
-        write_headers(&mut self.out, headers, &all_samples, &self.selected, &self.cfg)?;
+        write_headers(
+            &mut self.out,
+            headers,
+            &all_samples,
+            &self.selected,
+            &self.cfg,
+        )?;
         self.header_written = true;
         Ok(())
     }
@@ -202,8 +220,14 @@ impl<W: Write> CallStream<W> {
             bail!("CallStream::push before write_header");
         }
         let ploidies = self.ploidies_at(rec);
-        let site = SiteCtx { families: &self.families, groups: self.groups.as_deref(), hdr: &self.hdr };
-        let Some((line, is_ref)) = call_record(rec, &self.selected, &self.cfg, ploidies.as_deref(), &site)? else {
+        let site = SiteCtx {
+            families: &self.families,
+            groups: self.groups.as_deref(),
+            hdr: &self.hdr,
+        };
+        let Some((line, is_ref)) =
+            call_record(rec, &self.selected, &self.cfg, ploidies.as_deref(), &site)?
+        else {
             return Ok(false);
         };
         if let Some(ranges) = self.cfg.gvcf.clone() {
@@ -224,7 +248,9 @@ impl<W: Write> CallStream<W> {
             bail!("call: malformed record for gVCF blocking");
         }
         let chrom = cols[0];
-        let pos: u64 = cols[1].parse().map_err(|_| anyhow::anyhow!("call: bad POS {:?}", cols[1]))?;
+        let pos: u64 = cols[1]
+            .parse()
+            .map_err(|_| anyhow::anyhow!("call: bad POS {:?}", cols[1]))?;
         let mut can_collapse = is_ref;
         let mut needs_flush = !can_collapse;
         let mut dp_range = 0usize;
@@ -234,7 +260,10 @@ impl<W: Write> CallStream<W> {
             match per_sample_dp(&cols) {
                 Some(v) => {
                     min_dp = v.iter().copied().min().unwrap_or(0);
-                    dp_range = ranges.iter().position(|&t| min_dp < t).unwrap_or(ranges.len());
+                    dp_range = ranges
+                        .iter()
+                        .position(|&t| min_dp < t)
+                        .unwrap_or(ranges.len());
                     dps = v;
                     if dp_range == 0 {
                         needs_flush = true;
@@ -248,18 +277,18 @@ impl<W: Write> CallStream<W> {
             }
         }
         if let Some(b) = &self.gvcf_block
-            && (b.dp_range != dp_range || b.chrom != chrom || pos > b.end + 1) {
-                needs_flush = true;
+            && (b.dp_range != dp_range || b.chrom != chrom || pos > b.end + 1)
+        {
+            needs_flush = true;
+        }
+        if needs_flush && let Some(mut b) = self.gvcf_block.take() {
+            // An indel record at the block's last position keeps that
+            // position out of the block.
+            if b.chrom == chrom && pos == b.end {
+                b.end -= 1;
             }
-        if needs_flush
-            && let Some(mut b) = self.gvcf_block.take() {
-                // An indel record at the block's last position keeps that
-                // position out of the block.
-                if b.chrom == chrom && pos == b.end {
-                    b.end -= 1;
-                }
-                self.write_gvcf_block(&b)?;
-            }
+            self.write_gvcf_block(&b)?;
+        }
         if can_collapse {
             match &mut self.gvcf_block {
                 Some(b) => {
@@ -270,7 +299,10 @@ impl<W: Write> CallStream<W> {
                     b.end = pos;
                 }
                 None => {
-                    let gts: Vec<String> = cols[9..].iter().map(|s| s.split(':').next().unwrap_or(".").to_string()).collect();
+                    let gts: Vec<String> = cols[9..]
+                        .iter()
+                        .map(|s| s.split(':').next().unwrap_or(".").to_string())
+                        .collect();
                     self.gvcf_block = Some(GvcfBlock {
                         chrom: chrom.to_string(),
                         start: pos,
@@ -288,7 +320,11 @@ impl<W: Write> CallStream<W> {
         }
         let patched = (is_ref && min_dp > 0).then(|| {
             let mut c: Vec<String> = cols.iter().map(|s| s.to_string()).collect();
-            c[7] = if c[7] == "." { format!("MIN_DP={min_dp}") } else { format!("{};MIN_DP={min_dp}", c[7]) };
+            c[7] = if c[7] == "." {
+                format!("MIN_DP={min_dp}")
+            } else {
+                format!("{};MIN_DP={min_dp}", c[7])
+            };
             c.join("\t")
         });
         let line = patched.unwrap_or(line);
@@ -303,7 +339,10 @@ impl<W: Write> CallStream<W> {
             info.push_str(&format!("END={};", b.end));
         }
         info.push_str(&format!("MIN_DP={}", b.min_dp));
-        let mut s = format!("{}\t{}\t.\t{}\t{}\t.\t.\t{}\tGT:DP", b.chrom, b.start, b.ref_allele, b.alt, info);
+        let mut s = format!(
+            "{}\t{}\t.\t{}\t{}\t.\t.\t{}\tGT:DP",
+            b.chrom, b.start, b.ref_allele, b.alt, info
+        );
         for (gt, dp) in b.gts.iter().zip(&b.dps) {
             s.push('\t');
             s.push_str(gt);
@@ -377,7 +416,10 @@ struct GvcfBlock {
 /// FORMAT/DP of every sample column, `None` when any is absent.
 fn per_sample_dp(cols: &[&str]) -> Option<Vec<u32>> {
     let idx = cols[8].split(':').position(|k| k == "DP")?;
-    cols[9..].iter().map(|s| s.split(':').nth(idx).and_then(|v| v.parse::<u32>().ok())).collect()
+    cols[9..]
+        .iter()
+        .map(|s| s.split(':').nth(idx).and_then(|v| v.parse::<u32>().ok()))
+        .collect()
 }
 
 /// [`io::Write`] adapter feeding a [`CallStream`] line by line, so a VCF writer
@@ -508,9 +550,11 @@ fn select_samples(
         let mut out = Vec::new();
         for n in listed {
             if let Some(i) = idx_of(n)
-                && keep.contains(&i) && !out.contains(&i) {
-                    out.push(i);
-                }
+                && keep.contains(&i)
+                && !out.contains(&i)
+            {
+                out.push(i);
+            }
         }
         out
     };
@@ -558,7 +602,11 @@ fn select_samples(
 
 fn sample_name_in_line(line: &str) -> Option<String> {
     let parts: Vec<&str> = line.split_whitespace().collect();
-    let name = if parts.len() >= 5 { parts.get(1) } else { parts.first() };
+    let name = if parts.len() >= 5 {
+        parts.get(1)
+    } else {
+        parts.first()
+    };
     name.filter(|n| !n.is_empty()).map(|n| n.to_string())
 }
 
@@ -695,7 +743,12 @@ fn call_record_consensus(
         .map(|(i, _)| i)
         .collect();
 
-    let format_keys = rec.format.as_deref().unwrap_or("").split(':').collect::<Vec<_>>();
+    let format_keys = rec
+        .format
+        .as_deref()
+        .unwrap_or("")
+        .split(':')
+        .collect::<Vec<_>>();
     let pl_idx = format_keys.iter().position(|k| *k == "PL");
     let ad_idx = format_keys.iter().position(|k| *k == "AD");
 
@@ -736,11 +789,7 @@ fn call_record_consensus(
     }
 
     let f = em_alt_freq(&gls);
-    let prior = [
-        (1.0 - f) * (1.0 - f),
-        2.0 * f * (1.0 - f),
-        f * f,
-    ];
+    let prior = [(1.0 - f) * (1.0 - f), 2.0 * f * (1.0 - f), f * f];
 
     let mut ac = 0usize;
     let mut an = 0usize;
@@ -923,10 +972,19 @@ fn call_record_mcall(
 
     // Every ALT takes part in the likelihoods; a trailing `<*>` is the unseen
     // allele, which bcftools never emits.
-    let raw_alts: Vec<String> = rec.alt.split(',').map(str::trim).filter(|a| !a.is_empty() && *a != ".").map(String::from).collect();
+    let raw_alts: Vec<String> = rec
+        .alt
+        .split(',')
+        .map(str::trim)
+        .filter(|a| !a.is_empty() && *a != ".")
+        .map(String::from)
+        .collect();
     let n_als = 1 + raw_alts.len();
     let n_gt = n_als * (n_als + 1) / 2;
-    let unseen = raw_alts.iter().position(|a| is_unseen_allele(a)).map(|i| i + 1);
+    let unseen = raw_alts
+        .iter()
+        .position(|a| is_unseen_allele(a))
+        .map(|i| i + 1);
 
     let format_keys: Vec<&str> = rec.format.as_deref().unwrap_or("").split(':').collect();
     let pl_idx = format_keys.iter().position(|k| *k == "PL");
@@ -948,7 +1006,10 @@ fn call_record_mcall(
             }
             continue;
         }
-        let parsed: Vec<i32> = pl_str.split(',').map(|s| s.parse::<i32>().unwrap_or(PL_MISSING)).collect();
+        let parsed: Vec<i32> = pl_str
+            .split(',')
+            .map(|s| s.parse::<i32>().unwrap_or(PL_MISSING))
+            .collect();
         let ploidy = sample_ploidy(cfg, ploidies, out_i);
         for v in row.iter_mut() {
             *v = PL_VECTOR_END;
@@ -970,15 +1031,31 @@ fn call_record_mcall(
         }
     }
 
-    let is_indel = rec.ref_allele.len() > 1 || raw_alts.iter().any(|a| !a.starts_with('<') && a.len() != rec.ref_allele.len());
+    let is_indel = rec.ref_allele.len() > 1
+        || raw_alts
+            .iter()
+            .any(|a| !a.starts_with('<') && a.len() != rec.ref_allele.len());
     let info_items = split_info(&rec.info);
     // QS is a Float tag: single precision, like bcftools' qsum.
-    let qs = info_value(&info_items, "QS").map(|v| v.split(',').map(|s| s.trim().parse::<f32>().unwrap_or(0.0) as f64).collect::<Vec<f64>>());
-    let prior_an_ac = cfg.prior_freqs.as_ref().and_then(|spec| prior_counts(spec, &info_items, n_als, n_smpl));
-    let sample_af = site_ctx.groups.map(|_| group_fractions(rec, selected, &format_keys, &cfg.group_tag, n_als));
+    let qs = info_value(&info_items, "QS").map(|v| {
+        v.split(',')
+            .map(|s| s.trim().parse::<f32>().unwrap_or(0.0) as f64)
+            .collect::<Vec<f64>>()
+    });
+    let prior_an_ac = cfg
+        .prior_freqs
+        .as_ref()
+        .and_then(|spec| prior_counts(spec, &info_items, n_als, n_smpl));
+    let sample_af = site_ctx
+        .groups
+        .map(|_| group_fractions(rec, selected, &format_keys, &cfg.group_tag, n_als));
     // bcftools sizes the Watterson prior as if every sample had the ploidy
     // file's maximum ploidy.
-    let max_ploidy = cfg.ploidy_regions.iter().map(|r| r.ploidy).fold(cfg.ploidy, u8::max) as usize;
+    let max_ploidy = cfg
+        .ploidy_regions
+        .iter()
+        .map(|r| r.ploidy)
+        .fold(cfg.ploidy, u8::max) as usize;
     let opts = CallerOpts {
         theta: cfg.theta,
         indel_theta: cfg.theta,
@@ -996,21 +1073,55 @@ fn call_record_mcall(
         ..CallerOpts::default()
     };
     let caller = Caller::new(opts, n_smpl);
-    let mut site = CallSite { n_samples: n_smpl, n_alleles: n_als, pls, is_indel, depths: None, qs, unseen, sample_af, prior_an_ac };
+    let mut site = CallSite {
+        n_samples: n_smpl,
+        n_alleles: n_als,
+        pls,
+        is_indel,
+        depths: None,
+        qs,
+        unseen,
+        sample_af,
+        prior_an_ac,
+    };
 
     let result = caller.call_site(&mut site);
     match result {
         CallResult::Skip => Ok(None),
-        CallResult::Called { alleles_kept, is_variant, qual, gts, gqs, gps, pls: pls_sub, ac, an } => {
-            let out_alts: Vec<String> = alleles_kept.iter().skip(1).filter_map(|&i| raw_alts.get((i - 1) as usize).cloned()).collect();
-            let alt_field = if out_alts.is_empty() { ".".to_string() } else { out_alts.join(",") };
+        CallResult::Called {
+            alleles_kept,
+            is_variant,
+            qual,
+            gts,
+            gqs,
+            gps,
+            pls: pls_sub,
+            ac,
+            an,
+        } => {
+            let out_alts: Vec<String> = alleles_kept
+                .iter()
+                .skip(1)
+                .filter_map(|&i| raw_alts.get((i - 1) as usize).cloned())
+                .collect();
+            let alt_field = if out_alts.is_empty() {
+                ".".to_string()
+            } else {
+                out_alts.join(",")
+            };
             let n_new = alleles_kept.len();
-            let map_vec: Vec<Option<usize>> = (0..n_als).map(|a| alleles_kept.iter().position(|&k| k as usize == a)).collect();
+            let map_vec: Vec<Option<usize>> = (0..n_als)
+                .map(|a| alleles_kept.iter().position(|&k| k as usize == a))
+                .collect();
             let map: &AlleleMap = &map_vec;
 
             // bcftools trims Number=R tags only (`mcall_trim_numberR`); A and
             // G tags other than PL keep their input values.
-            let info_remapped = if n_new != n_als { remap_info_r(&rec.info, site_ctx.hdr, n_als, n_new, map) } else { rec.info.clone() };
+            let info_remapped = if n_new != n_als {
+                remap_info_r(&rec.info, site_ctx.hdr, n_als, n_new, map)
+            } else {
+                rec.info.clone()
+            };
             let info = rebuild_info(&info_remapped, &ac, an);
 
             // FORMAT: GT first, the input tags subset to the kept alleles (PL
@@ -1030,34 +1141,70 @@ fn call_record_mcall(
             if cfg.emit_gq && !fmt_keys.contains(&"GQ") {
                 fmt_keys.push("GQ");
             }
-            let numbers: Vec<FieldNumber> = format_keys.iter().map(|k| site_ctx.hdr.format_number(k)).collect();
+            let numbers: Vec<FieldNumber> = format_keys
+                .iter()
+                .map(|k| site_ctx.hdr.format_number(k))
+                .collect();
 
             let mut sample_out: Vec<String> = Vec::with_capacity(n_smpl);
             for (i, gt) in gts.iter().enumerate() {
-                let sval = rec.samples.get(selected[i]).map(|s| s.as_str()).unwrap_or(".");
+                let sval = rec
+                    .samples
+                    .get(selected[i])
+                    .map(|s| s.as_str())
+                    .unwrap_or(".");
                 let parts: Vec<&str> = sval.split(':').collect();
                 let ploidy = sample_ploidy(cfg, ploidies, i);
                 let gt_field = match gt {
                     Some((a, b)) => {
-                        let pa = alleles_kept.iter().position(|x| x == a).map(|p| p.to_string()).unwrap_or_else(|| ".".into());
-                        let pb = alleles_kept.iter().position(|x| x == b).map(|p| p.to_string()).unwrap_or_else(|| ".".into());
+                        let pa = alleles_kept
+                            .iter()
+                            .position(|x| x == a)
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| ".".into());
+                        let pb = alleles_kept
+                            .iter()
+                            .position(|x| x == b)
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| ".".into());
                         // Haploid samples get one allele, not a collapsed homozygote.
                         render_gt(&pa, &pb, ploidy)
                     }
-                    None => if ploidy == 2 { "./.".to_string() } else { ".".to_string() },
+                    None => {
+                        if ploidy == 2 {
+                            "./.".to_string()
+                        } else {
+                            ".".to_string()
+                        }
+                    }
                 };
                 let mut fields = vec![gt_field];
                 for key in fmt_keys.iter().skip(1) {
                     let v = match *key {
-                        "PL" => pls_sub[i].iter().map(|&p| if p == PL_MISSING { ".".to_string() } else { p.to_string() }).collect::<Vec<_>>().join(","),
+                        "PL" => pls_sub[i]
+                            .iter()
+                            .map(|&p| {
+                                if p == PL_MISSING {
+                                    ".".to_string()
+                                } else {
+                                    p.to_string()
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(","),
                         "GQ" if cfg.emit_gq && !format_keys.contains(&"GQ") => gqs[i].to_string(),
-                        "GP" if cfg.emit_gp && !format_keys.contains(&"GP") => gps[i].iter().map(|p| crate::util::fmt_g(*p as f32 as f64)).collect::<Vec<_>>().join(","),
+                        "GP" if cfg.emit_gp && !format_keys.contains(&"GP") => gps[i]
+                            .iter()
+                            .map(|p| crate::util::fmt_g(*p as f32 as f64))
+                            .collect::<Vec<_>>()
+                            .join(","),
                         _ => {
                             let idx = format_keys.iter().position(|k| k == key);
                             let raw = idx.and_then(|j| parts.get(j).copied()).unwrap_or(".");
                             match idx {
                                 Some(j) if n_new != n_als && numbers[j] == FieldNumber::R => {
-                                    remap_value(raw, numbers[j], n_als, n_new, map).unwrap_or_else(|| raw.to_string())
+                                    remap_value(raw, numbers[j], n_als, n_new, map)
+                                        .unwrap_or_else(|| raw.to_string())
                                 }
                                 _ => raw.to_string(),
                             }
@@ -1101,7 +1248,13 @@ fn legacy_out(r: Result<Option<String>>) -> Result<Option<(String, bool)>> {
 }
 
 /// `remap_info` restricted to Number=R tags.
-fn remap_info_r(info: &str, hdr: &HeaderInfo, n_old: usize, n_new: usize, map: &crate::vcf::alleles::AlleleMap) -> String {
+fn remap_info_r(
+    info: &str,
+    hdr: &HeaderInfo,
+    n_old: usize,
+    n_new: usize,
+    map: &crate::vcf::alleles::AlleleMap,
+) -> String {
     use crate::vcf::alleles::{remap_value, split_info};
     use crate::vcf::header::FieldNumber;
     if info == "." || info.is_empty() {
@@ -1110,16 +1263,22 @@ fn remap_info_r(info: &str, hdr: &HeaderInfo, n_old: usize, n_new: usize, map: &
     let mut parts: Vec<String> = Vec::new();
     for (k, v) in split_info(info) {
         match v {
-            Some(v) if hdr.info_number(k) == FieldNumber::R => match remap_value(v, FieldNumber::R, n_old, n_new, map) {
-                Some(nv) if nv.is_empty() => {}
-                Some(nv) => parts.push(format!("{k}={nv}")),
-                None => parts.push(format!("{k}={v}")),
-            },
+            Some(v) if hdr.info_number(k) == FieldNumber::R => {
+                match remap_value(v, FieldNumber::R, n_old, n_new, map) {
+                    Some(nv) if nv.is_empty() => {}
+                    Some(nv) => parts.push(format!("{k}={nv}")),
+                    None => parts.push(format!("{k}={v}")),
+                }
+            }
             Some(v) => parts.push(format!("{k}={v}")),
             None => parts.push(k.to_string()),
         }
     }
-    if parts.is_empty() { ".".to_string() } else { parts.join(";") }
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join(";")
+    }
 }
 
 /// bcftools' placeholder for "any other allele": `<*>`, the older `<X>`
@@ -1135,8 +1294,17 @@ fn info_value<'a>(items: &[(&'a str, Option<&'a str>)], key: &str) -> Option<&'a
 /// `-F AN,AC` panel counts. A plain AF tag (`--prior-af`) is turned into
 /// counts over as many pseudo-alleles as the call set carries, so the
 /// panel weighs as much as the data.
-fn prior_counts(spec: &PriorFreqsSpec, items: &[(&str, Option<&str>)], n_als: usize, n_smpl: usize) -> Option<(f64, Vec<f64>)> {
-    let floats = |v: &str| -> Vec<f64> { v.split(',').map(|s| s.trim().parse::<f64>().unwrap_or(0.0)).collect() };
+fn prior_counts(
+    spec: &PriorFreqsSpec,
+    items: &[(&str, Option<&str>)],
+    n_als: usize,
+    n_smpl: usize,
+) -> Option<(f64, Vec<f64>)> {
+    let floats = |v: &str| -> Vec<f64> {
+        v.split(',')
+            .map(|s| s.trim().parse::<f64>().unwrap_or(0.0))
+            .collect()
+    };
     match spec {
         PriorFreqsSpec::AnAc { an, ac } => {
             let an = info_value(items, an)?.trim().parse::<f64>().ok()?;
@@ -1156,7 +1324,13 @@ fn prior_counts(spec: &PriorFreqsSpec, items: &[(&str, Option<&str>)], n_als: us
 
 /// Per selected sample: allele fractions from the group tag (FORMAT/AD by
 /// default), zeros when the tag is missing or empty.
-fn group_fractions(rec: &VcfRecord, selected: &[usize], format_keys: &[&str], tag: &str, n_als: usize) -> Vec<Vec<f64>> {
+fn group_fractions(
+    rec: &VcfRecord,
+    selected: &[usize],
+    format_keys: &[&str],
+    tag: &str,
+    n_als: usize,
+) -> Vec<Vec<f64>> {
     let idx = format_keys.iter().position(|k| *k == tag);
     selected
         .iter()
@@ -1164,9 +1338,14 @@ fn group_fractions(rec: &VcfRecord, selected: &[usize], format_keys: &[&str], ta
             let mut af = vec![0.0f64; n_als];
             let Some(j) = idx else { return af };
             let sval = rec.samples.get(si).map(|s| s.as_str()).unwrap_or(".");
-            let Some(raw) = sval.split(':').nth(j) else { return af };
+            let Some(raw) = sval.split(':').nth(j) else {
+                return af;
+            };
             // Integer counts over a float sum, as in mcall.c.
-            let vals: Vec<f32> = raw.split(',').map(|s| s.trim().parse::<f32>().unwrap_or(0.0)).collect();
+            let vals: Vec<f32> = raw
+                .split(',')
+                .map(|s| s.trim().parse::<f32>().unwrap_or(0.0))
+                .collect();
             let sum: f32 = vals.iter().sum();
             if sum > 0.0 {
                 for (a, v) in vals.iter().enumerate().take(n_als) {
@@ -1183,13 +1362,25 @@ fn group_fractions(rec: &VcfRecord, selected: &[usize], format_keys: &[&str], ta
 /// MQ derived from I16.
 fn rebuild_info(info: &str, ac: &[u32], an: u32) -> String {
     use crate::vcf::alleles::split_info;
-    let ac_s = (ac.len() > 1).then(|| ac[1..].iter().map(u32::to_string).collect::<Vec<_>>().join(","));
+    let ac_s = (ac.len() > 1).then(|| {
+        ac[1..]
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    });
     let mut parts: Vec<String> = Vec::new();
     let mut i16: Option<Vec<f64>> = None;
     let (mut had_ac, mut had_an) = (false, false);
     for (k, v) in split_info(info) {
         match k {
-            "I16" => i16 = v.map(|v| v.split(',').map(|s| s.trim().parse::<f64>().unwrap_or(0.0)).collect()),
+            "I16" => {
+                i16 = v.map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().parse::<f64>().unwrap_or(0.0))
+                        .collect()
+                })
+            }
             "QS" => {}
             "AC" => {
                 if let Some(s) = &ac_s {
@@ -1214,12 +1405,23 @@ fn rebuild_info(info: &str, ac: &[u32], an: u32) -> String {
         parts.push(format!("AN={an}"));
     }
     if let Some(v) = i16.filter(|v| v.len() >= 11) {
-        parts.push(format!("DP4={},{},{},{}", v[0] as i64, v[1] as i64, v[2] as i64, v[3] as i64));
+        parts.push(format!(
+            "DP4={},{},{},{}",
+            v[0] as i64, v[1] as i64, v[2] as i64, v[3] as i64
+        ));
         let n = v[0] + v[1] + v[2] + v[3];
-        let mq = if n > 0.0 { ((v[8] + v[10]) / n) as i64 } else { 0 };
+        let mq = if n > 0.0 {
+            ((v[8] + v[10]) / n) as i64
+        } else {
+            0
+        };
         parts.push(format!("MQ={mq}"));
     }
-    if parts.is_empty() { ".".to_string() } else { parts.join(";") }
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join(";")
+    }
 }
 
 fn call_record_legacy(
@@ -1331,9 +1533,7 @@ fn call_record_legacy(
         }
 
         let gt = match (call.allele0, call.allele1) {
-            (Some(a), Some(b)) if ploidy != 2 => {
-                render_gt(&a.to_string(), &b.to_string(), ploidy)
-            }
+            (Some(a), Some(b)) if ploidy != 2 => render_gt(&a.to_string(), &b.to_string(), ploidy),
             _ if ploidy == 0 => ".".to_string(),
             _ => call.gt.clone(),
         };

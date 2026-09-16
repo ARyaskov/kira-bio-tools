@@ -34,7 +34,12 @@ pub struct BcfWriter {
 }
 
 impl BcfWriter {
-    pub fn create<P: AsRef<Path>>(p: P, compressed: bool, level: u32, headers: &[String]) -> Result<Self> {
+    pub fn create<P: AsRef<Path>>(
+        p: P,
+        compressed: bool,
+        level: u32,
+        headers: &[String],
+    ) -> Result<Self> {
         let path = p.as_ref();
         let f = File::create(path).with_context(|| format!("create {:?}", path))?;
         Self::from_writer(Box::new(f), compressed, level, headers, false)
@@ -50,12 +55,23 @@ impl BcfWriter {
         streaming: bool,
     ) -> Result<Self> {
         let inner = if compressed {
-            let buf = if streaming { STREAM_BUFFER_SIZE } else { FILE_BUFFER_SIZE };
-            BcfOut::Bgzf(BgzfWriter::from_writer_buffered(w, flate2::Compression::new(level.min(9)), buf)?)
+            let buf = if streaming {
+                STREAM_BUFFER_SIZE
+            } else {
+                FILE_BUFFER_SIZE
+            };
+            BcfOut::Bgzf(BgzfWriter::from_writer_buffered(
+                w,
+                flate2::Compression::new(level.min(9)),
+                buf,
+            )?)
         } else {
             BcfOut::Plain(BufWriter::with_capacity(1 << 20, w))
         };
-        let mut out = Self { inner, dict: parse_header_to_dict(headers) };
+        let mut out = Self {
+            inner,
+            dict: parse_header_to_dict(headers),
+        };
         out.write_header()?;
         Ok(out)
     }
@@ -72,7 +88,9 @@ impl BcfWriter {
     }
 
     pub fn write_vcf_line(&mut self, line: &str) -> Result<()> {
-        if line.is_empty() || line.as_bytes()[0] == b'#' { return Ok(()); }
+        if line.is_empty() || line.as_bytes()[0] == b'#' {
+            return Ok(());
+        }
         encode_record(&mut self.inner, line, &self.dict)
     }
 

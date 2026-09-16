@@ -58,16 +58,17 @@ fn load_field_metadata(ani: &AniIndex, debug: bool) -> Result<HashMap<String, Fi
         }
 
         if let Some(key) = extract_info_key(&line)
-            && let Some(number) = extract_info_number(&line) {
-                metadata.insert(key.clone(), number);
+            && let Some(number) = extract_info_number(&line)
+        {
+            metadata.insert(key.clone(), number);
 
-                if debug {
-                    eprintln!(
-                        "[DEBUG] Loaded metadata from header: {} -> {:?}",
-                        key, number
-                    );
-                }
+            if debug {
+                eprintln!(
+                    "[DEBUG] Loaded metadata from header: {} -> {:?}",
+                    key, number
+                );
             }
+        }
     }
 
     if debug {
@@ -194,18 +195,13 @@ pub fn infer_field_type(_key: &str) -> &'static str {
 /// FORMAT-side annotations. Previously only `##INFO=` lines were parsed,
 /// which forced FORMAT annotations through the (now-removed) letter
 /// heuristic.
-pub fn load_format_metadata(
-    ani: &AniIndex,
-    debug: bool,
-) -> Result<HashMap<String, FieldNumber>> {
+pub fn load_format_metadata(ani: &AniIndex, debug: bool) -> Result<HashMap<String, FieldNumber>> {
     let mut metadata = HashMap::new();
     for line in iter_ani_header_lines(ani) {
         if !line.starts_with("##FORMAT=") {
             continue;
         }
-        if let (Some(key), Some(number)) =
-            (extract_info_key(&line), extract_info_number(&line))
-        {
+        if let (Some(key), Some(number)) = (extract_info_key(&line), extract_info_number(&line)) {
             if debug {
                 eprintln!("[DEBUG] FORMAT meta: {key} -> {number:?}");
             }

@@ -142,8 +142,7 @@ impl WindowSpiller {
     fn push_unplaced(&mut self, header: &Header, rec: &RecordBuf) -> Result<()> {
         if self.unplaced.is_none() {
             let path = self.dir.join("w_unplaced.bam");
-            let file =
-                File::create(&path).with_context(|| format!("create {}", path.display()))?;
+            let file = File::create(&path).with_context(|| format!("create {}", path.display()))?;
             let mut w = bam::io::Writer::new(BufWriter::with_capacity(1 << 16, file));
             w.write_header(header).context("write spill header")?;
             self.unplaced = Some(w);

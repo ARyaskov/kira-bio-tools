@@ -168,7 +168,9 @@ pub fn push_g(out: &mut String, v: f64) {
         return;
     }
     // Six significant digits: rint(d * 10^k), k by magnitude, as kputd does.
-    const LIMIT: [f64; 9] = [0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0];
+    const LIMIT: [f64; 9] = [
+        0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0,
+    ];
     const SCALE: [f64; 10] = [1e9, 1e8, 1e7, 1e6, 1e5, 1e4, 1e3, 1e2, 1e1, 1.0];
     let idx = LIMIT.iter().position(|&l| d < l).unwrap_or(9);
     let k = 9 - idx;
@@ -179,7 +181,11 @@ pub fn push_g(out: &mut String, v: f64) {
         out.push_str(digits);
         return;
     }
-    let (int_part, frac) = if digits.len() > k { digits.split_at(digits.len() - k) } else { ("", digits) };
+    let (int_part, frac) = if digits.len() > k {
+        digits.split_at(digits.len() - k)
+    } else {
+        ("", digits)
+    };
     out.push_str(if int_part.is_empty() { "0" } else { int_part });
     let frac = frac.trim_end_matches('0');
     if frac.is_empty() {
@@ -199,9 +205,17 @@ fn push_percent_g(out: &mut String, d: f64) {
     let exp: i32 = exp.parse().unwrap_or(0);
     if (-4..6).contains(&exp) {
         let s = format!("{:.*}", (5 - exp) as usize, d);
-        out.push_str(if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.') } else { &s });
+        out.push_str(if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            &s
+        });
     } else {
-        out.push_str(if mant.contains('.') { mant.trim_end_matches('0').trim_end_matches('.') } else { mant });
+        out.push_str(if mant.contains('.') {
+            mant.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            mant
+        });
         out.push('e');
         out.push(if exp < 0 { '-' } else { '+' });
         let e = exp.unsigned_abs();
@@ -270,25 +284,49 @@ impl Region {
         }
         // The last ':' separates the range so contig names may contain ':'.
         let Some(colon) = s.rfind(':') else {
-            return Some(Region { chr: s.to_string(), start: None, end: None });
+            return Some(Region {
+                chr: s.to_string(),
+                start: None,
+                end: None,
+            });
         };
         let (chr, range) = (&s[..colon], &s[colon + 1..]);
         if chr.is_empty() {
             return None;
         }
         if range.is_empty() {
-            return Some(Region { chr: chr.to_string(), start: None, end: None });
+            return Some(Region {
+                chr: chr.to_string(),
+                start: None,
+                end: None,
+            });
         }
         match range.split_once('-') {
             Some((b, e)) => {
-                let start = if b.is_empty() { 1 } else { parse_coordinate(b)? };
-                let end = if e.is_empty() { u32::MAX } else { parse_coordinate(e)? };
-                Some(Region { chr: chr.to_string(), start: Some(start.max(1)), end: Some(end) })
+                let start = if b.is_empty() {
+                    1
+                } else {
+                    parse_coordinate(b)?
+                };
+                let end = if e.is_empty() {
+                    u32::MAX
+                } else {
+                    parse_coordinate(e)?
+                };
+                Some(Region {
+                    chr: chr.to_string(),
+                    start: Some(start.max(1)),
+                    end: Some(end),
+                })
             }
             None => {
                 let pos = parse_coordinate(range)?;
                 let end = if one_coord { pos } else { u32::MAX };
-                Some(Region { chr: chr.to_string(), start: Some(pos.max(1)), end: Some(end) })
+                Some(Region {
+                    chr: chr.to_string(),
+                    start: Some(pos.max(1)),
+                    end: Some(end),
+                })
             }
         }
     }
@@ -560,8 +598,19 @@ pub fn now_string() -> String {
     let mo = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if mo <= 2 { y + 1 } else { y };
     const WD: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-    const MON: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    format!("{} {} {:2} {:02}:{:02}:{:02} {}", WD[days.rem_euclid(7) as usize], MON[(mo - 1) as usize], d, h, m, s, y)
+    const MON: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    format!(
+        "{} {} {:2} {:02}:{:02}:{:02} {}",
+        WD[days.rem_euclid(7) as usize],
+        MON[(mo - 1) as usize],
+        d,
+        h,
+        m,
+        s,
+        y
+    )
 }
 
 /// `erfc` as in fdlibm `s_erf.c` (the algorithm behind glibc and msvcrt).
@@ -659,8 +708,10 @@ pub fn erfc(x: f64) -> f64 {
     }
     if ix < 0x3ff4_0000 {
         let s = x.abs() - 1.0;
-        let p = PA[0] + s * (PA[1] + s * (PA[2] + s * (PA[3] + s * (PA[4] + s * (PA[5] + s * PA[6])))));
-        let q = 1.0 + s * (QA[0] + s * (QA[1] + s * (QA[2] + s * (QA[3] + s * (QA[4] + s * QA[5])))));
+        let p =
+            PA[0] + s * (PA[1] + s * (PA[2] + s * (PA[3] + s * (PA[4] + s * (PA[5] + s * PA[6])))));
+        let q =
+            1.0 + s * (QA[0] + s * (QA[1] + s * (QA[2] + s * (QA[3] + s * (QA[4] + s * QA[5])))));
         if hx >= 0 {
             let z = 1.0 - ERX;
             return z - p / q;
@@ -673,14 +724,25 @@ pub fn erfc(x: f64) -> f64 {
         let s = 1.0 / (ax * ax);
         let (r, ss);
         if ix < 0x4006_db6d {
-            r = RA[0] + s * (RA[1] + s * (RA[2] + s * (RA[3] + s * (RA[4] + s * (RA[5] + s * (RA[6] + s * RA[7]))))));
-            ss = 1.0 + s * (SA[0] + s * (SA[1] + s * (SA[2] + s * (SA[3] + s * (SA[4] + s * (SA[5] + s * (SA[6] + s * SA[7])))))));
+            r = RA[0]
+                + s * (RA[1]
+                    + s * (RA[2]
+                        + s * (RA[3] + s * (RA[4] + s * (RA[5] + s * (RA[6] + s * RA[7]))))));
+            ss = 1.0
+                + s * (SA[0]
+                    + s * (SA[1]
+                        + s * (SA[2]
+                            + s * (SA[3] + s * (SA[4] + s * (SA[5] + s * (SA[6] + s * SA[7])))))));
         } else {
             if hx < 0 && ix >= 0x4018_0000 {
                 return 2.0 - TINY;
             }
-            r = RB[0] + s * (RB[1] + s * (RB[2] + s * (RB[3] + s * (RB[4] + s * (RB[5] + s * RB[6])))));
-            ss = 1.0 + s * (SB[0] + s * (SB[1] + s * (SB[2] + s * (SB[3] + s * (SB[4] + s * (SB[5] + s * SB[6]))))));
+            r = RB[0]
+                + s * (RB[1] + s * (RB[2] + s * (RB[3] + s * (RB[4] + s * (RB[5] + s * RB[6])))));
+            ss = 1.0
+                + s * (SB[0]
+                    + s * (SB[1]
+                        + s * (SB[2] + s * (SB[3] + s * (SB[4] + s * (SB[5] + s * SB[6]))))));
         }
         let z = f64::from_bits(ax.to_bits() & 0xffff_ffff_0000_0000);
         let rr = (-z * z - 0.5625).exp() * ((z - ax) * (z + ax) + r / ss).exp();
@@ -701,7 +763,13 @@ pub fn phred_score(prob: f64) -> f64 {
 /// C `%.*e`: mantissa with `prec` decimals and a signed two-digit exponent.
 pub fn fmt_e(v: f64, prec: usize) -> String {
     if !v.is_finite() {
-        return if v.is_nan() { "nan".into() } else if v > 0.0 { "inf".into() } else { "-inf".into() };
+        return if v.is_nan() {
+            "nan".into()
+        } else if v > 0.0 {
+            "inf".into()
+        } else {
+            "-inf".into()
+        };
     }
     let s = format!("{:.*e}", prec, v);
     let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
@@ -713,12 +781,15 @@ pub fn fmt_e(v: f64, prec: usize) -> String {
 pub fn open_text_maybe_gz(path: &Path) -> anyhow::Result<Box<dyn std::io::BufRead>> {
     use anyhow::Context as _;
     use std::io::Read as _;
-    let mut f = std::fs::File::open(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut f =
+        std::fs::File::open(path).with_context(|| format!("Failed to read {}", path.display()))?;
     let mut magic = [0u8; 2];
     let n = f.read(&mut magic)?;
     let f = std::fs::File::open(path)?;
     if n == 2 && magic == [0x1f, 0x8b] {
-        Ok(Box::new(std::io::BufReader::new(flate2::read::MultiGzDecoder::new(f))))
+        Ok(Box::new(std::io::BufReader::new(
+            flate2::read::MultiGzDecoder::new(f),
+        )))
     } else {
         Ok(Box::new(std::io::BufReader::new(f)))
     }

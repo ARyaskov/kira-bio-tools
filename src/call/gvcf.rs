@@ -27,7 +27,9 @@ impl GvcfBlocker {
     pub fn new(bins: Vec<u32>) -> Self {
         let mut b = bins;
         b.sort();
-        if b.is_empty() { b.push(0); }
+        if b.is_empty() {
+            b.push(0);
+        }
         Self { bins: b, cur: None }
     }
 
@@ -43,9 +45,16 @@ impl GvcfBlocker {
         out: &mut W,
     ) -> Result<()> {
         let bin = self.dp_bin(dp);
-        let (bin_lo, bin_hi) = (self.bins[bin], self.bins.get(bin + 1).copied().unwrap_or(u32::MAX));
-        let should_extend = self.cur.as_ref()
-            .map(|c| c.chrom == chrom && c.end + 1 == pos && c.bin_lo == bin_lo && c.bin_hi == bin_hi)
+        let (bin_lo, bin_hi) = (
+            self.bins[bin],
+            self.bins.get(bin + 1).copied().unwrap_or(u32::MAX),
+        );
+        let should_extend = self
+            .cur
+            .as_ref()
+            .map(|c| {
+                c.chrom == chrom && c.end + 1 == pos && c.bin_lo == bin_lo && c.bin_hi == bin_hi
+            })
             .unwrap_or(false);
         if should_extend {
             let c = self.cur.as_mut().unwrap();
@@ -57,10 +66,13 @@ impl GvcfBlocker {
             self.flush(out)?;
             self.cur = Some(GvcfBlock {
                 chrom: chrom.to_string(),
-                start: pos, end: pos,
-                bin_lo, bin_hi,
+                start: pos,
+                end: pos,
+                bin_lo,
+                bin_hi,
                 ref_base: ref_base.to_string(),
-                min_dp: dp, min_qual: qual,
+                min_dp: dp,
+                min_qual: qual,
                 n_sites: 1,
             });
         }
@@ -70,8 +82,17 @@ impl GvcfBlocker {
     /// Force flush of current block (called on chromosome change or end-of-stream).
     pub fn flush<W: Write>(&mut self, out: &mut W) -> Result<()> {
         if let Some(b) = self.cur.take() {
-            writeln!(out, "{}\t{}\t.\t{}\t<NON_REF>\t{}\t.\tEND={};MIN_DP={};BIN={}",
-                b.chrom, b.start, b.ref_base, format_qual(b.min_qual), b.end, b.min_dp, b.bin_lo)?;
+            writeln!(
+                out,
+                "{}\t{}\t.\t{}\t<NON_REF>\t{}\t.\tEND={};MIN_DP={};BIN={}",
+                b.chrom,
+                b.start,
+                b.ref_base,
+                format_qual(b.min_qual),
+                b.end,
+                b.min_dp,
+                b.bin_lo
+            )?;
         }
         Ok(())
     }
@@ -84,14 +105,22 @@ impl GvcfBlocker {
     fn dp_bin(&self, dp: u32) -> usize {
         let mut idx = 0;
         for (i, &b) in self.bins.iter().enumerate() {
-            if dp >= b { idx = i; } else { break; }
+            if dp >= b {
+                idx = i;
+            } else {
+                break;
+            }
         }
         idx
     }
 }
 
 fn format_qual(q: f64) -> String {
-    if q.is_finite() { format!("{:.2}", q) } else { ".".into() }
+    if q.is_finite() {
+        format!("{:.2}", q)
+    } else {
+        ".".into()
+    }
 }
 
 #[cfg(test)]

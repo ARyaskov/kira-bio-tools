@@ -2,7 +2,6 @@
 //! bounded channel; the pileup engine pulls, so no BAM is ever fully in RAM.
 
 use crate::bam::pileup::{LiveRead, build_live_from_bam_with};
-use std::sync::Arc;
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, bounded};
 use noodles_bam as bam;
@@ -10,6 +9,7 @@ use noodles_sam as sam;
 use std::fs::File;
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 const CHANNEL_DEPTH: usize = 4096;
@@ -35,7 +35,12 @@ impl StreamingBam {
     }
 
     /// `workers` BGZF decompression threads feed the decoder.
-    pub fn open_with<P: AsRef<Path>>(p: P, sample_idx: usize, workers: usize, hook: Option<ReadHook>) -> Result<Self> {
+    pub fn open_with<P: AsRef<Path>>(
+        p: P,
+        sample_idx: usize,
+        workers: usize,
+        hook: Option<ReadHook>,
+    ) -> Result<Self> {
         Self::open_with_resolver(p, Arc::new(move |_| Some(sample_idx)), workers, hook)
     }
 
@@ -48,7 +53,10 @@ impl StreamingBam {
     ) -> Result<Self> {
         let path = p.as_ref().to_path_buf();
         let f = File::open(&path).with_context(|| format!("open BAM {:?}", path))?;
-        let bgzf = noodles_bgzf::io::MultithreadedReader::with_worker_count(NonZeroUsize::new(workers.max(1)).unwrap(), f);
+        let bgzf = noodles_bgzf::io::MultithreadedReader::with_worker_count(
+            NonZeroUsize::new(workers.max(1)).unwrap(),
+            f,
+        );
         let mut reader = bam::io::Reader::from(bgzf);
         let header = reader.read_header().context("read BAM header")?;
         let samples = crate::bam::reader::extract_samples_helper(&header);
@@ -57,7 +65,11 @@ impl StreamingBam {
             .keys()
             .map(|k| String::from_utf8_lossy(k).into_owned())
             .collect();
-        let ref_lengths: Vec<u64> = header.reference_sequences().values().map(|s| usize::from(s.length()) as u64).collect();
+        let ref_lengths: Vec<u64> = header
+            .reference_sequences()
+            .values()
+            .map(|s| usize::from(s.length()) as u64)
+            .collect();
         let names = ref_names.clone();
 
         let (tx, rx) = bounded::<LiveRead>(CHANNEL_DEPTH);
@@ -65,12 +77,16 @@ impl StreamingBam {
             .name(format!("bam-stream-{}", path.display()))
             .spawn(move || -> Result<()> {
                 for r in reader.records() {
-                    let rec = r.with_context(|| format!("read BAM record from {}", path.display()))?;
-                    let Some(mut lr) = build_live_from_bam_with(&rec, &|rg| resolver(rg)) else { continue };
+                    let rec =
+                        r.with_context(|| format!("read BAM record from {}", path.display()))?;
+                    let Some(mut lr) = build_live_from_bam_with(&rec, &|rg| resolver(rg)) else {
+                        continue;
+                    };
                     if let Some(h) = hook.as_mut()
-                        && !h(&mut lr, &names) {
-                            continue;
-                        }
+                        && !h(&mut lr, &names)
+                    {
+                        continue;
+                    }
                     if tx.send(lr).is_err() {
                         break;
                     }
@@ -79,6 +95,13 @@ impl StreamingBam {
             })
             .context("spawn bam stream thread")?;
 
-        Ok(Self { header, samples, ref_names, ref_lengths, rx, handle: Some(handle) })
+        Ok(Self {
+            header,
+            samples,
+            ref_names,
+            ref_lengths,
+            rx,
+            handle: Some(handle),
+        })
     }
 }

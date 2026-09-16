@@ -1,7 +1,7 @@
 use crate::annotate::postproc::{
-    HeaderOptions, LineAction, OutputKind, PostProcessor, Predicate, RegionFilter,
-    apply_to_header, parse_output_type, parse_samples_cli, read_samples_file,
-    resolve_samples_keep, version_header_line,
+    HeaderOptions, LineAction, OutputKind, PostProcessor, Predicate, RegionFilter, apply_to_header,
+    parse_output_type, parse_samples_cli, read_samples_file, resolve_samples_keep,
+    version_header_line,
 };
 use crate::cli::args::ViewArgs;
 use crate::csi::{IndexKind, build_index, find_index_for};
@@ -63,7 +63,11 @@ pub fn cmd_view(args: ViewArgs) -> Result<()> {
         .map(parse_output_type)
         .transpose()?
         .unwrap_or(OutputKind::Vcf);
-    let level = if args.compression_level >= 0 { Some(args.compression_level as u32) } else { None };
+    let level = if args.compression_level >= 0 {
+        Some(args.compression_level as u32)
+    } else {
+        None
+    };
 
     let version = version_header_line();
     let opts = HeaderOptions {
@@ -124,19 +128,28 @@ pub fn cmd_view(args: ViewArgs) -> Result<()> {
             .bcf_dict()
             .map(|d| {
                 let max = d.contig_idx.values().copied().max().map_or(0, |m| m + 1);
-                (0..max).map(|rid| d.contig_name(rid).map(str::to_string)).collect()
+                (0..max)
+                    .map(|rid| d.contig_name(rid).map(str::to_string))
+                    .collect()
             })
             .unwrap_or_default();
-        let contig_name = |rid: i32| -> Option<String> { contig_names.get(rid.max(0) as usize).cloned().flatten() };
+        let contig_name = |rid: i32| -> Option<String> {
+            contig_names.get(rid.max(0) as usize).cloned().flatten()
+        };
         let passes = |shared: &[u8]| -> bool {
-            let Some(m) = crate::bcf::record::record_meta(shared) else { return false };
-            let Some(chr) = contig_name(m.rid) else { return false };
+            let Some(m) = crate::bcf::record::record_meta(shared) else {
+                return false;
+            };
+            let Some(chr) = contig_name(m.rid) else {
+                return false;
+            };
             let pos1 = m.pos.max(0) as u32 + 1;
             let rlen = m.rlen.max(0) as u32;
             if let Some(tf) = &target_filter
-                && tf.span_passes(&chr, pos1, rlen, args.targets_overlap) == targets_inverse {
-                    return false;
-                }
+                && tf.span_passes(&chr, pos1, rlen, args.targets_overlap) == targets_inverse
+            {
+                return false;
+            }
             true
         };
         if let Some(rf) = indexed {
@@ -149,9 +162,18 @@ pub fn cmd_view(args: ViewArgs) -> Result<()> {
         } else {
             while let Some((shared, indiv)) = reader.read_raw_bcf()? {
                 if let Some(rf) = &region_filter {
-                    let Some(m) = crate::bcf::record::record_meta(&shared) else { continue };
-                    let Some(chr) = contig_name(m.rid) else { continue };
-                    if !rf.span_passes(&chr, m.pos.max(0) as u32 + 1, m.rlen.max(0) as u32, args.regions_overlap) {
+                    let Some(m) = crate::bcf::record::record_meta(&shared) else {
+                        continue;
+                    };
+                    let Some(chr) = contig_name(m.rid) else {
+                        continue;
+                    };
+                    if !rf.span_passes(
+                        &chr,
+                        m.pos.max(0) as u32 + 1,
+                        m.rlen.max(0) as u32,
+                        args.regions_overlap,
+                    ) {
                         continue;
                     }
                 }
@@ -173,9 +195,10 @@ pub fn cmd_view(args: ViewArgs) -> Result<()> {
                 continue;
             }
             if let Some(rf) = &region_filter
-                && !rf.line_passes_mode(&line, args.regions_overlap) {
-                    continue;
-                }
+                && !rf.line_passes_mode(&line, args.regions_overlap)
+            {
+                continue;
+            }
             if let Some(out_line) = process_view_record(&line, &ctx) {
                 sink.write_line(&out_line)?;
             }
@@ -185,9 +208,14 @@ pub fn cmd_view(args: ViewArgs) -> Result<()> {
 
     if let (Some(kind_s), Some(out)) = (args.write_index.as_deref(), args.output.as_deref()) {
         if matches!(kind, OutputKind::VcfGz(_) | OutputKind::Bcf(_)) && out != Path::new("-") {
-            let (ikind, ext) = if kind_s == "tbi" { (IndexKind::Tbi, "tbi") } else { (IndexKind::Csi, "csi") };
+            let (ikind, ext) = if kind_s == "tbi" {
+                (IndexKind::Tbi, "tbi")
+            } else {
+                (IndexKind::Csi, "csi")
+            };
             let idx = std::path::PathBuf::from(format!("{}.{}", out.display(), ext));
-            build_index(out, &idx, ikind, None).with_context(|| format!("-W: write index {}", idx.display()))?;
+            build_index(out, &idx, ikind, None)
+                .with_context(|| format!("-W: write index {}", idx.display()))?;
         } else {
             eprintln!("[view] -W: an index needs BGZF or BCF output to a file; skipped");
         }
@@ -225,9 +253,10 @@ fn process_view_record(line: &str, ctx: &RecordCtx<'_>) -> Option<String> {
     }
 
     if let Some(af) = ctx.apply_filters
-        && !filter_passes_apply(cols[6], af) {
-            return None;
-        }
+        && !filter_passes_apply(cols[6], af)
+    {
+        return None;
+    }
     if args.known && cols[2] == "." {
         return None;
     }
@@ -235,27 +264,35 @@ fn process_view_record(line: &str, ctx: &RecordCtx<'_>) -> Option<String> {
         return None;
     }
     if let Some(t) = ctx.type_filter
-        && !t.passes(cols[3], cols[4]) {
-            return None;
-        }
+        && !t.passes(cols[3], cols[4])
+    {
+        return None;
+    }
 
-    let n_alleles = 1 + if cols[4] == "." || cols[4].is_empty() { 0 } else { cols[4].split(',').count() as u32 };
+    let n_alleles = 1 + if cols[4] == "." || cols[4].is_empty() {
+        0
+    } else {
+        cols[4].split(',').count() as u32
+    };
     if let Some(min) = args.min_alleles
-        && n_alleles < min {
-            return None;
-        }
+        && n_alleles < min
+    {
+        return None;
+    }
     if let Some(max) = args.max_alleles
-        && n_alleles > max {
-            return None;
-        }
+        && n_alleles > max
+    {
+        return None;
+    }
 
     let samples_slice: &[&str] = if cols.len() > 9 { &cols[9..] } else { &[] };
     let format_str: &str = if cols.len() > 8 { cols[8] } else { "" };
 
     if let Some(f) = ctx.gt_filter
-        && !f.passes(format_str, samples_slice, ctx.samples_keep) {
-            return None;
-        }
+        && !f.passes(format_str, samples_slice, ctx.samples_keep)
+    {
+        return None;
+    }
     if args.phased && !any_phased(format_str, samples_slice) {
         return None;
     }
@@ -269,9 +306,16 @@ fn process_view_record(line: &str, ctx: &RecordCtx<'_>) -> Option<String> {
         return None;
     }
     if let Some(f) = ctx.ac_filter
-        && !f.passes(format_str, samples_slice, ctx.samples_keep, cols[7], n_alleles as usize) {
-            return None;
-        }
+        && !f.passes(
+            format_str,
+            samples_slice,
+            ctx.samples_keep,
+            cols[7],
+            n_alleles as usize,
+        )
+    {
+        return None;
+    }
     if args.private && !is_private(format_str, samples_slice) {
         return None;
     }
@@ -294,7 +338,12 @@ fn process_view_record(line: &str, ctx: &RecordCtx<'_>) -> Option<String> {
     }
 
     if args.trim_alt_alleles || args.trim_unseen_allele {
-        out_line = trim_alt_alleles(&out_line, ctx.hdr, args.trim_alt_alleles, args.trim_unseen_allele);
+        out_line = trim_alt_alleles(
+            &out_line,
+            ctx.hdr,
+            args.trim_alt_alleles,
+            args.trim_unseen_allele,
+        );
     }
     Some(out_line)
 }
@@ -382,7 +431,10 @@ impl TypeFilter {
         let p = |s: &str| -> Result<u32> {
             parse_type_mask(s).ok_or_else(|| anyhow::anyhow!("unknown variant type in {s:?}"))
         };
-        Ok(Some(Self { incl: inc.map(p).transpose()?, excl: exc.map(p).transpose()? }))
+        Ok(Some(Self {
+            incl: inc.map(p).transpose()?,
+            excl: exc.map(p).transpose()?,
+        }))
     }
 
     fn matches(mask: u32, ty: u32) -> bool {
@@ -396,13 +448,15 @@ impl TypeFilter {
     fn passes(&self, refa: &str, alt: &str) -> bool {
         let ty = record_type(refa, alt);
         if let Some(i) = self.incl
-            && !Self::matches(i, ty) {
-                return false;
-            }
+            && !Self::matches(i, ty)
+        {
+            return false;
+        }
         if let Some(e) = self.excl
-            && Self::matches(e, ty) {
-                return false;
-            }
+            && Self::matches(e, ty)
+        {
+            return false;
+        }
         true
     }
 }
@@ -449,7 +503,9 @@ impl GenotypeFilter {
             let cls = gt_class(gt);
             let hit = matches!(
                 (self.mode, cls),
-                (GtMode::Hom, GtClass::Hom) | (GtMode::Het, GtClass::Het) | (GtMode::Miss, GtClass::Miss)
+                (GtMode::Hom, GtClass::Hom)
+                    | (GtMode::Het, GtClass::Het)
+                    | (GtMode::Miss, GtClass::Miss)
             );
             if hit {
                 any = true;
@@ -472,21 +528,38 @@ fn gt_class(gt: &str) -> GtClass {
         return GtClass::Miss;
     }
     let first = alleles[0];
-    if alleles.iter().all(|a| *a == first) { GtClass::Hom } else { GtClass::Het }
+    if alleles.iter().all(|a| *a == first) {
+        GtClass::Hom
+    } else {
+        GtClass::Het
+    }
 }
 
 fn any_phased(format: &str, samples: &[&str]) -> bool {
-    let Some(gt_idx) = format.split(':').position(|k| k == "GT") else { return false };
-    samples.iter().any(|s| s.split(':').nth(gt_idx).unwrap_or("").contains('|'))
+    let Some(gt_idx) = format.split(':').position(|k| k == "GT") else {
+        return false;
+    };
+    samples
+        .iter()
+        .any(|s| s.split(':').nth(gt_idx).unwrap_or("").contains('|'))
 }
 
 fn any_uncalled(format: &str, samples: &[&str]) -> bool {
-    let Some(gt_idx) = format.split(':').position(|k| k == "GT") else { return false };
-    samples.iter().any(|s| matches!(gt_class(s.split(':').nth(gt_idx).unwrap_or(".")), GtClass::Miss))
+    let Some(gt_idx) = format.split(':').position(|k| k == "GT") else {
+        return false;
+    };
+    samples.iter().any(|s| {
+        matches!(
+            gt_class(s.split(':').nth(gt_idx).unwrap_or(".")),
+            GtClass::Miss
+        )
+    })
 }
 
 fn is_private(format: &str, samples: &[&str]) -> bool {
-    let Some(gt_idx) = format.split(':').position(|k| k == "GT") else { return false };
+    let Some(gt_idx) = format.split(':').position(|k| k == "GT") else {
+        return false;
+    };
     let mut non_ref = 0usize;
     for s in samples {
         let gt = s.split(':').nth(gt_idx).unwrap_or(".");
@@ -536,11 +609,19 @@ impl AcAfFilter {
         }
         let p_u32 = |s: &str| -> Result<(u32, AcMode)> {
             let (v, m) = split(s);
-            Ok((v.parse().with_context(|| format!("bad allele count {v:?}"))?, AcMode::parse(m)?))
+            Ok((
+                v.parse()
+                    .with_context(|| format!("bad allele count {v:?}"))?,
+                AcMode::parse(m)?,
+            ))
         };
         let p_f64 = |s: &str| -> Result<(f64, AcMode)> {
             let (v, m) = split(s);
-            Ok((v.parse().with_context(|| format!("bad allele frequency {v:?}"))?, AcMode::parse(m)?))
+            Ok((
+                v.parse()
+                    .with_context(|| format!("bad allele frequency {v:?}"))?,
+                AcMode::parse(m)?,
+            ))
         };
         let min_ac = a.min_ac.as_deref().map(p_u32).transpose()?;
         let max_ac = a.max_ac.as_deref().map(p_u32).transpose()?;
@@ -549,12 +630,23 @@ impl AcAfFilter {
         if min_ac.is_none() && max_ac.is_none() && min_af.is_none() && max_af.is_none() {
             return Ok(None);
         }
-        Ok(Some(Self { min_ac, max_ac, min_af, max_af }))
+        Ok(Some(Self {
+            min_ac,
+            max_ac,
+            min_af,
+            max_af,
+        }))
     }
 
     /// Allele counts per allele (index 0 = REF) and AN, from genotypes when
     /// present, else from INFO/AC and INFO/AN.
-    fn counts(format: &str, samples: &[&str], keep: Option<&[usize]>, info: &str, n_alleles: usize) -> (Vec<u32>, u32) {
+    fn counts(
+        format: &str,
+        samples: &[&str],
+        keep: Option<&[usize]>,
+        info: &str,
+        n_alleles: usize,
+    ) -> (Vec<u32>, u32) {
         let mut ac = vec![0u32; n_alleles.max(1)];
         let mut an = 0u32;
         let gt_idx = format.split(':').position(|k| k == "GT");
@@ -577,7 +669,10 @@ impl AcAfFilter {
         let mut alt_counts: Vec<u32> = Vec::new();
         for kv in info.split(';') {
             if let Some(v) = kv.strip_prefix("AC=") {
-                alt_counts = v.split(',').map(|s| s.parse::<u32>().unwrap_or(0)).collect();
+                alt_counts = v
+                    .split(',')
+                    .map(|s| s.parse::<u32>().unwrap_or(0))
+                    .collect();
             } else if let Some(v) = kv.strip_prefix("AN=") {
                 an = v.parse().unwrap_or(0);
             }
@@ -609,27 +704,42 @@ impl AcAfFilter {
         }
     }
 
-    fn passes(&self, format: &str, samples: &[&str], keep: Option<&[usize]>, info: &str, n_alleles: usize) -> bool {
+    fn passes(
+        &self,
+        format: &str,
+        samples: &[&str],
+        keep: Option<&[usize]>,
+        info: &str,
+        n_alleles: usize,
+    ) -> bool {
         let (ac, an) = Self::counts(format, samples, keep, info, n_alleles);
         let af = |mode: AcMode| -> f64 {
-            if an > 0 { Self::select(&ac, mode) as f64 / an as f64 } else { 0.0 }
+            if an > 0 {
+                Self::select(&ac, mode) as f64 / an as f64
+            } else {
+                0.0
+            }
         };
         if let Some((v, m)) = self.min_ac
-            && Self::select(&ac, m) < v {
-                return false;
-            }
+            && Self::select(&ac, m) < v
+        {
+            return false;
+        }
         if let Some((v, m)) = self.max_ac
-            && Self::select(&ac, m) > v {
-                return false;
-            }
+            && Self::select(&ac, m) > v
+        {
+            return false;
+        }
         if let Some((v, m)) = self.min_af
-            && af(m) < v {
-                return false;
-            }
+            && af(m) < v
+        {
+            return false;
+        }
         if let Some((v, m)) = self.max_af
-            && af(m) > v {
-                return false;
-            }
+            && af(m) > v
+        {
+            return false;
+        }
         true
     }
 }
@@ -642,7 +752,9 @@ fn filter_passes_apply(filter_col: &str, allowed: &[String]) -> bool {
     if filter_col == "." || filter_col.is_empty() {
         return allowed.iter().any(|a| a == ".");
     }
-    filter_col.split(';').any(|t| allowed.iter().any(|a| a == t))
+    filter_col
+        .split(';')
+        .any(|t| allowed.iter().any(|a| a == t))
 }
 
 /// Recompute INFO/AC and INFO/AN from the genotypes present on the line
@@ -655,8 +767,14 @@ fn update_ac_an(line: &str, hdr: &HeaderInfo) -> String {
     if cols.len() < 10 {
         return line.to_string();
     }
-    let Some(gi) = cols[8].split(':').position(|k| k == "GT") else { return line.to_string() };
-    let n_alt = if cols[4] == "." { 0 } else { cols[4].split(',').count() };
+    let Some(gi) = cols[8].split(':').position(|k| k == "GT") else {
+        return line.to_string();
+    };
+    let n_alt = if cols[4] == "." {
+        0
+    } else {
+        cols[4].split(',').count()
+    };
     let mut ac = vec![0u32; n_alt + 1];
     let mut an = 0u32;
     for s in &cols[9..] {
@@ -674,7 +792,11 @@ fn update_ac_an(line: &str, hdr: &HeaderInfo) -> String {
         .collect();
     let has_ac = items.iter().any(|(k, _)| k == "AC");
     let has_an = items.iter().any(|(k, _)| k == "AN");
-    let ac_val = ac[1..].iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let ac_val = ac[1..]
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
     for (k, v) in items.iter_mut() {
         if k == "AC" && n_alt > 0 {
             *v = Some(ac_val.clone());
@@ -708,7 +830,11 @@ fn trim_alt_alleles(line: &str, hdr: &HeaderInfo, trim_all: bool, trim_unseen: b
     }
     let alts: Vec<&str> = cols[4].split(',').collect();
     let format_str = if cols.len() > 8 { cols[8] } else { "" };
-    let samples: Vec<&str> = if cols.len() > 9 { cols[9..].to_vec() } else { Vec::new() };
+    let samples: Vec<&str> = if cols.len() > 9 {
+        cols[9..].to_vec()
+    } else {
+        Vec::new()
+    };
     let gt_idx = format_str.split(':').position(|k| k == "GT");
     let mut used = vec![false; alts.len() + 1];
     used[0] = true;
@@ -751,8 +877,15 @@ fn trim_alt_alleles(line: &str, hdr: &HeaderInfo, trim_all: bool, trim_unseen: b
     }
     let n_new = new_alts.len() + 1;
     let info = remap_info(cols[7], hdr, n_old, n_new, &map);
-    let alt_field = if new_alts.is_empty() { ".".to_string() } else { new_alts.join(",") };
-    let mut out = format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", cols[0], cols[1], cols[2], cols[3], alt_field, cols[5], cols[6], info);
+    let alt_field = if new_alts.is_empty() {
+        ".".to_string()
+    } else {
+        new_alts.join(",")
+    };
+    let mut out = format!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        cols[0], cols[1], cols[2], cols[3], alt_field, cols[5], cols[6], info
+    );
     if !format_str.is_empty() {
         out.push('\t');
         out.push_str(format_str);

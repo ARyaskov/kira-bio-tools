@@ -50,7 +50,10 @@ pub fn cmd_solid(args: SolidArgs) -> Result<()> {
             Index::load(&p).context("load index")?
         }
         None => {
-            eprintln!("[KIRA_SOLID] building index in memory from {}", args.aligner_ref.display());
+            eprintln!(
+                "[KIRA_SOLID] building index in memory from {}",
+                args.aligner_ref.display()
+            );
             let reference = read_reference(&args.aligner_ref).context("load reference")?;
             Index::build(reference, IndexConfig::default())
         }
@@ -68,7 +71,15 @@ pub fn cmd_solid(args: SolidArgs) -> Result<()> {
         .unwrap_or_else(|| "sample".to_string());
 
     if args.window_mb > 0 {
-        return run_windowed(&args, aligner, index, &reads, &mp_args, &sample, call_cfg.as_ref());
+        return run_windowed(
+            &args,
+            aligner,
+            index,
+            &reads,
+            &mp_args,
+            &sample,
+            call_cfg.as_ref(),
+        );
     }
 
     // ── 2. Align → records, batch by batch, no SAM text ─────────────────────
@@ -132,7 +143,8 @@ pub fn cmd_solid(args: SolidArgs) -> Result<()> {
     let bam = BamReader::from_parts(live, header, vec![sample], ref_names);
 
     // ── 7. mpileup (→ call) → VCF (the only disk write) ─────────────────────
-    let mut out = BufWriter::with_capacity(1 << 20, File::create(&args.output).context("create VCF")?);
+    let mut out =
+        BufWriter::with_capacity(1 << 20, File::create(&args.output).context("create VCF")?);
     let t = std::time::Instant::now();
     run_pileup(vec![bam], &mp_args, call_cfg.as_ref(), &mut out)?;
     out.flush().context("flush VCF")?;
@@ -179,8 +191,9 @@ fn build_call_config(args: &SolidArgs) -> Result<Option<CallConfig>> {
         }
     }
     let ploidy_regions = match &args.call_ploidy_file {
-        Some(p) => parse_ploidy_file(p)
-            .with_context(|| format!("--call-ploidy-file {}", p.display()))?,
+        Some(p) => {
+            parse_ploidy_file(p).with_context(|| format!("--call-ploidy-file {}", p.display()))?
+        }
         None => Vec::new(),
     };
     let cfg = CallConfig {
@@ -273,10 +286,7 @@ fn run_windowed(
 ) -> Result<()> {
     use super::solid_windows::{WindowSpiller, resolve_tmpdir};
 
-    let window_len: u32 = args
-        .window_mb
-        .saturating_mul(1_000_000)
-        .max(1_000_000);
+    let window_len: u32 = args.window_mb.saturating_mul(1_000_000).max(1_000_000);
     let tmp_root = resolve_tmpdir(args.window_tmpdir.as_deref(), &args.output);
     let scratch = tmp_root.join(format!("kira-solid-win-{}", std::process::id()));
     std::fs::create_dir_all(&scratch)

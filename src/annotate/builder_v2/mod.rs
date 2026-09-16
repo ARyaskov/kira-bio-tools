@@ -10,8 +10,8 @@ pub use pool::StringPool;
 pub use tab_processing::process_tab_line_multiallelic;
 pub use vcf_processing::process_vcf_line_multiallelic_simd;
 
-use anyhow::Result;
 use crate::fx::FxHashMap;
+use anyhow::Result;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -313,9 +313,7 @@ fn print_final_stats(
     );
     let hits = pool.intern_hits();
     let saved_mb = pool.intern_bytes_saved() as f64 / (1024.0 * 1024.0);
-    eprintln!(
-        "  Intern hits:        {hits} ({saved_mb:.1} MB saved before deflate)"
-    );
+    eprintln!("  Intern hits:        {hits} ({saved_mb:.1} MB saved before deflate)");
     eprintln!("  Parse time: {:.3}s", start.elapsed().as_secs_f64());
 }
 
@@ -346,10 +344,11 @@ fn infer_number_from_data(
         value_counts.push(num_values);
 
         if let Some(alt_idx) = alt_idx
-            && let Some(alt) = parts.get(alt_idx) {
-                let num_alts = alt.split(',').count();
-                alt_counts.push(num_alts);
-            }
+            && let Some(alt) = parts.get(alt_idx)
+        {
+            let num_alts = alt.split(',').count();
+            alt_counts.push(num_alts);
+        }
     }
 
     if value_counts.is_empty() {
@@ -412,9 +411,10 @@ fn extract_info_metadata(headers: &[String]) -> HashMap<String, FieldNumber> {
             continue;
         }
         if let Some(key) = extract_info_key(h)
-            && let Some(number) = extract_info_number(h) {
-                meta.insert(key, number);
-            }
+            && let Some(number) = extract_info_number(h)
+        {
+            meta.insert(key, number);
+        }
     }
     meta
 }
@@ -426,9 +426,10 @@ fn extract_format_metadata(headers: &[String]) -> HashMap<String, FieldNumber> {
             continue;
         }
         if let Some(key) = extract_info_key(h)
-            && let Some(number) = extract_info_number(h) {
-                meta.insert(key, number);
-            }
+            && let Some(number) = extract_info_number(h)
+        {
+            meta.insert(key, number);
+        }
     }
     meta
 }

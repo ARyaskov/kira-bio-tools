@@ -73,7 +73,9 @@ pub struct PileupSite {
 }
 
 impl PileupSite {
-    pub fn total_depth(&self) -> u32 { self.per_sample.iter().map(|s| s.depth).sum() }
+    pub fn total_depth(&self) -> u32 {
+        self.per_sample.iter().map(|s| s.depth).sum()
+    }
 
     pub fn aggregated(&self) -> SampleSiteCounts {
         let mut a = SampleSiteCounts::default();
@@ -87,10 +89,20 @@ impl PileupSite {
             a.mq_sum += s.mq_sum;
             a.n_softclip += s.n_softclip;
             for (seq, c, f) in &s.ins_alleles {
-                if let Some(e) = a.ins_alleles.iter_mut().find(|(s, _, _)| s == seq) { e.1 += c; e.2 += f; } else { a.ins_alleles.push((seq.clone(), *c, *f)); }
+                if let Some(e) = a.ins_alleles.iter_mut().find(|(s, _, _)| s == seq) {
+                    e.1 += c;
+                    e.2 += f;
+                } else {
+                    a.ins_alleles.push((seq.clone(), *c, *f));
+                }
             }
             for (len, c, f) in &s.del_alleles {
-                if let Some(e) = a.del_alleles.iter_mut().find(|(l, _, _)| l == len) { e.1 += c; e.2 += f; } else { a.del_alleles.push((*len, *c, *f)); }
+                if let Some(e) = a.del_alleles.iter_mut().find(|(l, _, _)| l == len) {
+                    e.1 += c;
+                    e.2 += f;
+                } else {
+                    a.del_alleles.push((*len, *c, *f));
+                }
             }
         }
         a
@@ -100,7 +112,8 @@ impl PileupSite {
     fn reset(&mut self, ref_id: usize, pos: u32, n_samples: usize) {
         self.ref_id = ref_id;
         self.pos = pos;
-        self.per_sample.resize_with(n_samples, SampleSiteCounts::default);
+        self.per_sample
+            .resize_with(n_samples, SampleSiteCounts::default);
         for s in &mut self.per_sample {
             s.clear();
         }
@@ -109,12 +122,21 @@ impl PileupSite {
 
 #[inline]
 fn base_to_idx(b: u8) -> Option<usize> {
-    match b { b'A' | b'a' => Some(0), b'C' | b'c' => Some(1), b'G' | b'g' => Some(2), b'T' | b't' => Some(3), _ => None }
+    match b {
+        b'A' | b'a' => Some(0),
+        b'C' | b'c' => Some(1),
+        b'G' | b'g' => Some(2),
+        b'T' | b't' => Some(3),
+        _ => None,
+    }
 }
 
 #[inline]
 fn is_aligned(k: Kind) -> bool {
-    matches!(k, Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch)
+    matches!(
+        k,
+        Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch
+    )
 }
 
 /// One aligned read. Bases and qualities share one allocation; the CIGAR
@@ -152,11 +174,31 @@ pub struct LiveRead {
 
 impl LiveRead {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(seq: &[u8], qual: &[u8], cigar: CigarOps, ref_start: u32, ref_id: usize, mapq: u8, sample_idx: usize, flags: u16) -> Self {
+    pub fn new(
+        seq: &[u8],
+        qual: &[u8],
+        cigar: CigarOps,
+        ref_start: u32,
+        ref_id: usize,
+        mapq: u8,
+        sample_idx: usize,
+        flags: u16,
+    ) -> Self {
         let mut data = Vec::with_capacity(seq.len() * 2);
         data.extend_from_slice(seq);
         push_quals(&mut data, qual.iter().copied(), seq.len());
-        Self::from_parts(data, seq.len(), cigar, ref_start, ref_id, mapq, sample_idx, flags, 0, u32::MAX)
+        Self::from_parts(
+            data,
+            seq.len(),
+            cigar,
+            ref_start,
+            ref_id,
+            mapq,
+            sample_idx,
+            flags,
+            0,
+            u32::MAX,
+        )
     }
 
     /// Attach mate information (see [`LiveRead::qname_hash`], [`LiveRead::mate_pos`]).
@@ -177,7 +219,18 @@ impl LiveRead {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn from_parts(data: Vec<u8>, len: usize, cigar: CigarOps, ref_start: u32, ref_id: usize, mapq: u8, sample_idx: usize, flags: u16, qname_hash: u64, mate_pos: u32) -> Self {
+    fn from_parts(
+        data: Vec<u8>,
+        len: usize,
+        cigar: CigarOps,
+        ref_start: u32,
+        ref_id: usize,
+        mapq: u8,
+        sample_idx: usize,
+        flags: u16,
+        qname_hash: u64,
+        mate_pos: u32,
+    ) -> Self {
         let has_softclip = cigar.iter().any(|(k, _)| *k == Kind::SoftClip);
         let ref_end_cached = compute_ref_end(ref_start, &cigar);
         Self {
@@ -224,10 +277,14 @@ impl LiveRead {
     }
 
     #[inline]
-    pub fn seq(&self) -> &[u8] { &self.data[..self.len as usize] }
+    pub fn seq(&self) -> &[u8] {
+        &self.data[..self.len as usize]
+    }
 
     #[inline]
-    pub fn qual(&self) -> &[u8] { &self.data[self.len as usize..] }
+    pub fn qual(&self) -> &[u8] {
+        &self.data[self.len as usize..]
+    }
 
     /// Bases and mutable qualities (BAQ rewrites qualities in place).
     #[inline]
@@ -262,12 +319,16 @@ impl LiveRead {
         while let Some(&(kind, len)) = self.cigar_pairs.get(self.cur_op as usize) {
             match kind {
                 Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch => {
-                    if ref_pos < self.cur_r + len { return; }
+                    if ref_pos < self.cur_r + len {
+                        return;
+                    }
                     self.cur_r += len;
                     self.cur_q += len;
                 }
                 Kind::Deletion | Kind::Skip => {
-                    if ref_pos < self.cur_r + len { return; }
+                    if ref_pos < self.cur_r + len {
+                        return;
+                    }
                     self.cur_r += len;
                 }
                 Kind::Insertion | Kind::SoftClip => self.cur_q += len,
@@ -434,8 +495,16 @@ pub fn tweak_overlap_quality(a: &mut LiveRead, b: &mut LiveRead) {
             bd[lb + qb] = (0.8 * qual_b as f64) as u8;
             ad[la + qa] = 0;
         } else {
-            ad[la + qa] = if a_keeps { (0.8 * qual_a as f64) as u8 } else { 0 };
-            bd[lb + qb] = if a_keeps { 0 } else { (0.8 * qual_b as f64) as u8 };
+            ad[la + qa] = if a_keeps {
+                (0.8 * qual_a as f64) as u8
+            } else {
+                0
+            };
+            bd[lb + qb] = if a_keeps {
+                0
+            } else {
+                (0.8 * qual_b as f64) as u8
+            };
         }
         i += 1;
         j += 1;
@@ -448,10 +517,12 @@ pub fn tweak_overlap_quality(a: &mut LiveRead, b: &mut LiveRead) {
 /// the same contig take part.
 fn push_live(live: &mut VecDeque<LiveRead>, mut lr: LiveRead, overlaps: bool) {
     if overlaps && lr.flags & 0x2 != 0 && lr.mate_pos != u32::MAX && lr.mate_pos <= lr.ref_start {
-        let mate = live
-            .iter_mut()
-            .rev()
-            .find(|m| m.sample_idx == lr.sample_idx && m.qname_hash == lr.qname_hash && m.ref_start == lr.mate_pos && m.mate_pos == lr.ref_start);
+        let mate = live.iter_mut().rev().find(|m| {
+            m.sample_idx == lr.sample_idx
+                && m.qname_hash == lr.qname_hash
+                && m.ref_start == lr.mate_pos
+                && m.mate_pos == lr.ref_start
+        });
         if let Some(mate) = mate {
             tweak_overlap_quality(mate, &mut lr);
         }
@@ -529,7 +600,11 @@ pub fn khash_qname_hash(name: &[u8]) -> u64 {
         if c == 0 {
             break;
         }
-        h = if i == 0 { c as u32 } else { (h << 5).wrapping_sub(h).wrapping_add(c as u32) };
+        h = if i == 0 {
+            c as u32
+        } else {
+            (h << 5).wrapping_sub(h).wrapping_add(c as u32)
+        };
     }
     let mut key = h;
     key = key.wrapping_add(!(key << 15));
@@ -563,7 +638,13 @@ pub fn adjusted_baseq(qual: &[u8], qi: usize, delta: Option<u8>, max: Option<u8>
 /// Record one read's observation at `cur_pos` into `site`. `read_idx` is
 /// the read's index in the live slice `emit` receives.
 #[inline]
-fn observe(lr: &mut LiveRead, read_idx: u32, cur_pos: u32, opts: &EngineOpts, site: &mut PileupSite) {
+fn observe(
+    lr: &mut LiveRead,
+    read_idx: u32,
+    cur_pos: u32,
+    opts: &EngineOpts,
+    site: &mut PileupSite,
+) {
     lr.seek(cur_pos);
     if let Some((b, q_raw, qi)) = lr.base_at_cursor(cur_pos) {
         let s = &mut site.per_sample[lr.sample_idx];
@@ -578,12 +659,19 @@ fn observe(lr: &mut LiveRead, read_idx: u32, cur_pos: u32, opts: &EngineOpts, si
                 Some(i) => {
                     s.base_counts[i] += 1;
                     s.base_quals[i] += q as u32;
-                    if !lr.is_reverse() { s.fwd_counts[i] += 1; }
-                    if lr.has_softclip { s.n_softclip += 1; }
+                    if !lr.is_reverse() {
+                        s.fwd_counts[i] += 1;
+                    }
+                    if lr.has_softclip {
+                        s.n_softclip += 1;
+                    }
                     s.mq_sum += lr.mapq as u64;
                     // Base index in the low nibble, strand in bit 4 (see
                     // `errmod::pack_base`); quality capped by MAPQ and `capQ` (60).
-                    s.obs.push(((i as u8) | ((lr.is_reverse() as u8) << 4), q.min(lr.mapq.min(60))));
+                    s.obs.push((
+                        (i as u8) | ((lr.is_reverse() as u8) << 4),
+                        q.min(lr.mapq.min(60)),
+                    ));
                     s.obs_src.push((read_idx, qi as u32));
                     s.depth += 1;
                 }
@@ -602,11 +690,16 @@ fn observe(lr: &mut LiveRead, read_idx: u32, cur_pos: u32, opts: &EngineOpts, si
     let s = &mut site.per_sample[lr.sample_idx];
     match lr.indel_after_cursor(cur_pos) {
         Some(IndelEvent::Ins(seq)) => {
-            if let Some(e) = s.ins_alleles.iter_mut().find(|(k, _, _)| k.as_bytes() == seq) {
+            if let Some(e) = s
+                .ins_alleles
+                .iter_mut()
+                .find(|(k, _, _)| k.as_bytes() == seq)
+            {
                 e.1 += 1;
                 e.2 += f;
             } else {
-                s.ins_alleles.push((String::from_utf8_lossy(seq).into_owned(), 1, f));
+                s.ins_alleles
+                    .push((String::from_utf8_lossy(seq).into_owned(), 1, f));
             }
         }
         Some(IndelEvent::Del(l)) => {
@@ -639,7 +732,9 @@ fn read_passes(lr: &LiveRead, opts: &EngineOpts) -> bool {
 impl ReadSource for std::vec::IntoIter<LiveRead> {
     fn next_read(&mut self, opts: &EngineOpts, sample_idx: usize) -> Option<LiveRead> {
         for mut lr in self.by_ref() {
-            if !read_passes(&lr, opts) { continue; }
+            if !read_passes(&lr, opts) {
+                continue;
+            }
             lr.sample_idx = sample_idx;
             return Some(lr);
         }
@@ -650,7 +745,9 @@ impl ReadSource for std::vec::IntoIter<LiveRead> {
 impl ReadSource for crossbeam_channel::IntoIter<LiveRead> {
     fn next_read(&mut self, opts: &EngineOpts, sample_idx: usize) -> Option<LiveRead> {
         for mut lr in self.by_ref() {
-            if !read_passes(&lr, opts) { continue; }
+            if !read_passes(&lr, opts) {
+                continue;
+            }
             lr.sample_idx = sample_idx;
             return Some(lr);
         }
@@ -677,7 +774,11 @@ where
 {
     let overlaps = opts.overlaps;
     let n_samples = sources.len();
-    let mut next: Vec<Option<LiveRead>> = sources.iter_mut().enumerate().map(|(i, s)| s.next_read(opts, i)).collect();
+    let mut next: Vec<Option<LiveRead>> = sources
+        .iter_mut()
+        .enumerate()
+        .map(|(i, s)| s.next_read(opts, i))
+        .collect();
     let mut live: VecDeque<LiveRead> = VecDeque::new();
     let mut site = PileupSite::default();
     let mut pool: Vec<u32> = Vec::new();
@@ -693,7 +794,13 @@ where
                     let cand = (i, lr.ref_id as i32, lr.ref_start);
                     pick = Some(match pick {
                         None => cand,
-                        Some(p) => if (cand.1, cand.2) < (p.1, p.2) { cand } else { p },
+                        Some(p) => {
+                            if (cand.1, cand.2) < (p.1, p.2) {
+                                cand
+                            } else {
+                                p
+                            }
+                        }
                     });
                 }
             }
@@ -778,20 +885,46 @@ where
     Ok(())
 }
 
-pub fn mpileup_engine<F>(bam: &mut crate::bam::BamReader, min_mq: u8, min_bq: u8, skip_indels: bool, overlaps: bool, mut emit: F) -> Result<()>
+pub fn mpileup_engine<F>(
+    bam: &mut crate::bam::BamReader,
+    min_mq: u8,
+    min_bq: u8,
+    skip_indels: bool,
+    overlaps: bool,
+    mut emit: F,
+) -> Result<()>
 where
     F: FnMut(&PileupSite, &[LiveRead]),
 {
-    mpileup_engine_multi(std::slice::from_mut(bam), min_mq, min_bq, skip_indels, overlaps, &mut emit)
+    mpileup_engine_multi(
+        std::slice::from_mut(bam),
+        min_mq,
+        min_bq,
+        skip_indels,
+        overlaps,
+        &mut emit,
+    )
 }
 
 /// Engine over decoder threads: nothing but the channel buffers is in RAM.
 /// Decoder errors surface after the walk.
-pub fn mpileup_engine_streaming<F>(streams: Vec<crate::bam::StreamingBam>, min_mq: u8, min_bq: u8, skip_indels: bool, overlaps: bool, emit: &mut F) -> Result<()>
+pub fn mpileup_engine_streaming<F>(
+    streams: Vec<crate::bam::StreamingBam>,
+    min_mq: u8,
+    min_bq: u8,
+    skip_indels: bool,
+    overlaps: bool,
+    emit: &mut F,
+) -> Result<()>
 where
     F: FnMut(&PileupSite, &[LiveRead]),
 {
-    mpileup_engine_streaming_opts(streams, &EngineOpts::new(min_mq, min_bq, skip_indels, overlaps), None, emit)
+    mpileup_engine_streaming_opts(
+        streams,
+        &EngineOpts::new(min_mq, min_bq, skip_indels, overlaps),
+        None,
+        emit,
+    )
 }
 
 /// [`mpileup_engine_streaming`] with the full option set.
@@ -814,17 +947,36 @@ where
         .collect();
     run_engine(sources, opts, None, hook, emit)?;
     for h in handles.into_iter().flatten() {
-        h.join().map_err(|_| anyhow::anyhow!("BAM decoder thread panicked"))??;
+        h.join()
+            .map_err(|_| anyhow::anyhow!("BAM decoder thread panicked"))??;
     }
     Ok(())
 }
 
-pub fn mpileup_engine_multi<F>(bams: &mut [crate::bam::BamReader], min_mq: u8, min_bq: u8, skip_indels: bool, overlaps: bool, emit: &mut F) -> Result<()>
+pub fn mpileup_engine_multi<F>(
+    bams: &mut [crate::bam::BamReader],
+    min_mq: u8,
+    min_bq: u8,
+    skip_indels: bool,
+    overlaps: bool,
+    emit: &mut F,
+) -> Result<()>
 where
     F: FnMut(&PileupSite, &[LiveRead]),
 {
-    let records_per_sample: Vec<Vec<LiveRead>> = bams.iter_mut().map(|b| std::mem::take(&mut b.records_buf)).collect();
-    mpileup_engine_from_records(records_per_sample, min_mq, min_bq, skip_indels, overlaps, None, emit)
+    let records_per_sample: Vec<Vec<LiveRead>> = bams
+        .iter_mut()
+        .map(|b| std::mem::take(&mut b.records_buf))
+        .collect();
+    mpileup_engine_from_records(
+        records_per_sample,
+        min_mq,
+        min_bq,
+        skip_indels,
+        overlaps,
+        None,
+        emit,
+    )
 }
 
 /// Engine entry point that takes owned records directly. Pass `pos_filter`
@@ -842,7 +994,13 @@ pub fn mpileup_engine_from_records<F>(
 where
     F: FnMut(&PileupSite, &[LiveRead]),
 {
-    mpileup_engine_from_records_opts(records_per_sample, &EngineOpts::new(min_mq, min_bq, skip_indels, overlaps), pos_filter, None, emit)
+    mpileup_engine_from_records_opts(
+        records_per_sample,
+        &EngineOpts::new(min_mq, min_bq, skip_indels, overlaps),
+        pos_filter,
+        None,
+        emit,
+    )
 }
 
 /// [`mpileup_engine_from_records`] with the full option set.
@@ -856,12 +1014,20 @@ pub fn mpileup_engine_from_records_opts<F>(
 where
     F: FnMut(&PileupSite, &[LiveRead]),
 {
-    let sources: Vec<std::vec::IntoIter<LiveRead>> = records_per_sample.into_iter().map(|v| v.into_iter()).collect();
+    let sources: Vec<std::vec::IntoIter<LiveRead>> = records_per_sample
+        .into_iter()
+        .map(|v| v.into_iter())
+        .collect();
     run_engine(sources, opts, pos_filter, hook, emit)
 }
 
 /// Mate start for overlap detection: paired, mate mapped on the same contig.
-fn mate_pos_of(flags: u16, ref_id: usize, mate_ref: Option<usize>, mate_start: Option<usize>) -> u32 {
+fn mate_pos_of(
+    flags: u16,
+    ref_id: usize,
+    mate_ref: Option<usize>,
+    mate_start: Option<usize>,
+) -> u32 {
     let paired = flags & 0x1 != 0;
     let mate_unmapped = flags & 0x8 != 0;
     match (paired && !mate_unmapped, mate_ref, mate_start) {
@@ -898,10 +1064,15 @@ fn bam_aux_str(rec: &bam::Record, tag: &[u8; 2]) -> Option<Vec<u8>> {
 }
 
 /// [`build_live_from_bam`] with the sample chosen from the read group.
-pub fn build_live_from_bam_with(rec: &bam::Record, resolve: &SampleResolver<'_>) -> Option<LiveRead> {
+pub fn build_live_from_bam_with(
+    rec: &bam::Record,
+    resolve: &SampleResolver<'_>,
+) -> Option<LiveRead> {
     let rg = bam_aux_str(rec, b"RG");
     let sample_idx = resolve(rg.as_deref())?;
-    let nm = bam_aux_int(rec, b"NM").map(|v| v.clamp(-1, i32::MAX as i64) as i32).unwrap_or(-1);
+    let nm = bam_aux_int(rec, b"NM")
+        .map(|v| v.clamp(-1, i32::MAX as i64) as i32)
+        .unwrap_or(-1);
     let bq = bam_aux_str(rec, b"BQ");
     let start = usize::from(rec.alignment_start().transpose().ok().flatten()?) as u32 - 1;
     let ref_id = rec.reference_sequence_id().transpose().ok().flatten()?;
@@ -918,19 +1089,39 @@ pub fn build_live_from_bam_with(rec: &bam::Record, resolve: &SampleResolver<'_>)
         let op = op.ok()?;
         cigar.push((op.kind(), op.len() as u32));
     }
-    let qname_hash = rec.name().map(|n| khash_qname_hash(n.as_ref() as &[u8])).unwrap_or(0);
+    let qname_hash = rec
+        .name()
+        .map(|n| khash_qname_hash(n.as_ref() as &[u8]))
+        .unwrap_or(0);
     let mate_ref = rec.mate_reference_sequence_id().transpose().ok().flatten();
-    let mate_start = rec.mate_alignment_start().transpose().ok().flatten().map(usize::from);
+    let mate_start = rec
+        .mate_alignment_start()
+        .transpose()
+        .ok()
+        .flatten()
+        .map(usize::from);
     let mate_pos = mate_pos_of(flags, ref_id, mate_ref, mate_start);
-    Some(LiveRead::from_parts(data, n, cigar, start, ref_id, mapq, sample_idx, flags, qname_hash, mate_pos).with_nm(nm).with_bq_tag(bq))
+    Some(
+        LiveRead::from_parts(
+            data, n, cigar, start, ref_id, mapq, sample_idx, flags, qname_hash, mate_pos,
+        )
+        .with_nm(nm)
+        .with_bq_tag(bq),
+    )
 }
 
-pub fn build_live_from_cram(rb: &noodles_sam::alignment::RecordBuf, sample_idx: usize) -> Option<LiveRead> {
+pub fn build_live_from_cram(
+    rb: &noodles_sam::alignment::RecordBuf,
+    sample_idx: usize,
+) -> Option<LiveRead> {
     build_live_from_cram_with(rb, &|_| Some(sample_idx))
 }
 
 /// [`build_live_from_cram`] with the sample chosen from the read group.
-pub fn build_live_from_cram_with(rb: &noodles_sam::alignment::RecordBuf, resolve: &SampleResolver<'_>) -> Option<LiveRead> {
+pub fn build_live_from_cram_with(
+    rb: &noodles_sam::alignment::RecordBuf,
+    resolve: &SampleResolver<'_>,
+) -> Option<LiveRead> {
     use noodles_sam::alignment::record::cigar::Op;
     use noodles_sam::alignment::record::data::field::Tag;
     use noodles_sam::alignment::record_buf::data::field::Value;
@@ -939,7 +1130,12 @@ pub fn build_live_from_cram_with(rb: &noodles_sam::alignment::RecordBuf, resolve
         _ => None,
     };
     let sample_idx = resolve(rg.as_deref())?;
-    let nm = rb.data().get(&Tag::EDIT_DISTANCE).and_then(|v| v.as_int()).map(|v| v.clamp(-1, i32::MAX as i64) as i32).unwrap_or(-1);
+    let nm = rb
+        .data()
+        .get(&Tag::EDIT_DISTANCE)
+        .and_then(|v| v.as_int())
+        .map(|v| v.clamp(-1, i32::MAX as i64) as i32)
+        .unwrap_or(-1);
     let bq: Option<Vec<u8>> = match rb.data().get(&Tag::from(*b"BQ")) {
         Some(Value::String(s)) => Some(s.to_vec()),
         _ => None,
@@ -951,18 +1147,43 @@ pub fn build_live_from_cram_with(rb: &noodles_sam::alignment::RecordBuf, resolve
     let seq: &[u8] = rb.sequence().as_ref();
     let qual: &[u8] = rb.quality_scores().as_ref();
     let cigar_ops: &[Op] = rb.cigar().as_ref();
-    if cigar_ops.is_empty() { return None; }
-    let cigar: CigarOps = cigar_ops.iter().map(|op| (op.kind(), op.len() as u32)).collect();
-    let qname_hash = rb.name().map(|n| khash_qname_hash(n.as_ref() as &[u8])).unwrap_or(0);
-    let mate_pos = mate_pos_of(flags, ref_id, rb.mate_reference_sequence_id(), rb.mate_alignment_start().map(usize::from));
-    Some(LiveRead::new(seq, qual, cigar, start, ref_id, mapq, sample_idx, flags).with_mate(qname_hash, mate_pos).with_nm(nm).with_bq_tag(bq))
+    if cigar_ops.is_empty() {
+        return None;
+    }
+    let cigar: CigarOps = cigar_ops
+        .iter()
+        .map(|op| (op.kind(), op.len() as u32))
+        .collect();
+    let qname_hash = rb
+        .name()
+        .map(|n| khash_qname_hash(n.as_ref() as &[u8]))
+        .unwrap_or(0);
+    let mate_pos = mate_pos_of(
+        flags,
+        ref_id,
+        rb.mate_reference_sequence_id(),
+        rb.mate_alignment_start().map(usize::from),
+    );
+    Some(
+        LiveRead::new(seq, qual, cigar, start, ref_id, mapq, sample_idx, flags)
+            .with_mate(qname_hash, mate_pos)
+            .with_nm(nm)
+            .with_bq_tag(bq),
+    )
 }
 
 #[inline]
 fn compute_ref_end(start: u32, cigar_pairs: &[(Kind, u32)]) -> u32 {
     let mut r = start;
     for &(k, l) in cigar_pairs {
-        if matches!(k, Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch | Kind::Deletion | Kind::Skip) {
+        if matches!(
+            k,
+            Kind::Match
+                | Kind::SequenceMatch
+                | Kind::SequenceMismatch
+                | Kind::Deletion
+                | Kind::Skip
+        ) {
             r += l;
         }
     }
@@ -972,12 +1193,16 @@ fn compute_ref_end(start: u32, cigar_pairs: &[(Kind, u32)]) -> u32 {
 /// Two-tailed Fisher exact test p-value for a 2x2 table (htslib `kt_fisher_exact`).
 pub fn fisher_exact_two_tailed(n11: u32, n12: u32, n21: u32, n22: u32) -> f64 {
     let n = n11 + n12 + n21 + n22;
-    if n == 0 { return 1.0; }
+    if n == 0 {
+        return 1.0;
+    }
     let r1 = n11 + n12;
     let c1 = n11 + n21;
     let lnf = |k: u32| -> f64 {
         let mut s = 0.0;
-        for i in 2..=k { s += (i as f64).ln(); }
+        for i in 2..=k {
+            s += (i as f64).ln();
+        }
         s
     };
     let ln_const = lnf(r1) + lnf(n - r1) + lnf(c1) + lnf(n - c1) - lnf(n);
@@ -993,7 +1218,9 @@ pub fn fisher_exact_two_tailed(n11: u32, n12: u32, n21: u32, n22: u32) -> f64 {
     let mut p = 0.0;
     for a in lo..=hi {
         let pa = prob(a);
-        if pa <= p_obs * (1.0 + 1e-7) { p += pa; }
+        if pa <= p_obs * (1.0 + 1e-7) {
+            p += pa;
+        }
     }
     p.min(1.0)
 }
@@ -1001,7 +1228,9 @@ pub fn fisher_exact_two_tailed(n11: u32, n12: u32, n21: u32, n22: u32) -> f64 {
 /// Phred-scaled strand bias (bcftools SP): Fisher test on ref/alt by strand.
 pub fn strand_bias_phred(ref_fwd: u32, ref_rev: u32, alt_fwd: u32, alt_rev: u32) -> u32 {
     let p = fisher_exact_two_tailed(ref_fwd, ref_rev, alt_fwd, alt_rev);
-    if p <= 0.0 { return 255; }
+    if p <= 0.0 {
+        return 255;
+    }
     ((-10.0 * p.log10()).round() as i64).clamp(0, 255) as u32
 }
 

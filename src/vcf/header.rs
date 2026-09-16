@@ -174,7 +174,11 @@ impl HeaderInfo {
                         if def.id.is_empty() {
                             continue;
                         }
-                        let map = if kind == "INFO" { &mut h.info } else { &mut h.format };
+                        let map = if kind == "INFO" {
+                            &mut h.info
+                        } else {
+                            &mut h.format
+                        };
                         map.insert(def.id.clone(), def);
                     }
                     "FILTER" => {
@@ -197,11 +201,17 @@ impl HeaderInfo {
     }
 
     pub fn info_number(&self, key: &str) -> FieldNumber {
-        self.info.get(key).map(|d| d.number).unwrap_or(FieldNumber::Dot)
+        self.info
+            .get(key)
+            .map(|d| d.number)
+            .unwrap_or(FieldNumber::Dot)
     }
 
     pub fn format_number(&self, key: &str) -> FieldNumber {
-        self.format.get(key).map(|d| d.number).unwrap_or(FieldNumber::Dot)
+        self.format
+            .get(key)
+            .map(|d| d.number)
+            .unwrap_or(FieldNumber::Dot)
     }
 
     pub fn info_type(&self, key: &str) -> Option<FieldType> {
@@ -221,7 +231,9 @@ pub fn parse_struct_line(line: &str) -> Option<(&str, Vec<(&str, &str)>)> {
     let body = rest[eq + 1..].strip_prefix('<')?.strip_suffix('>')?;
     let mut out = Vec::new();
     for kv in split_top_commas(body) {
-        let Some((k, v)) = kv.split_once('=') else { continue };
+        let Some((k, v)) = kv.split_once('=') else {
+            continue;
+        };
         let v = v.trim_matches('"');
         out.push((k.trim(), v));
     }

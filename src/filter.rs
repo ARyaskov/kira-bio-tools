@@ -338,10 +338,7 @@ impl<'a> FormatCache<'a> {
             let vals: Vec<&str> = s.split(':').collect();
             samples.push(vals);
         }
-        Self {
-            key_index,
-            samples,
-        }
+        Self { key_index, samples }
     }
 
     fn get_value(&self, sample_idx: usize, key: &str) -> Option<&str> {
@@ -777,18 +774,21 @@ impl<'a> Parser<'a> {
                 has_exp = true;
                 self.pos += 1;
                 if let Some(sign) = self.peek_char()
-                    && (sign == '+' || sign == '-') {
-                        self.pos += 1;
-                    }
+                    && (sign == '+' || sign == '-')
+                {
+                    self.pos += 1;
+                }
                 continue;
             }
             break;
         }
         let s: String = self.chars[start..self.pos].iter().collect();
-        if !has_dot && !has_exp
-            && let Ok(i) = s.parse::<i64>() {
-                return Ok(Literal::Int(i));
-            }
+        if !has_dot
+            && !has_exp
+            && let Ok(i) = s.parse::<i64>()
+        {
+            return Ok(Literal::Int(i));
+        }
         let f = s.parse::<f64>()?;
         Ok(Literal::Float(f))
     }
@@ -1156,7 +1156,11 @@ fn fast_eval(fast: &FastExpr, rec: &crate::vcf::VcfRecordRef<'_>) -> bool {
             FastField::InfoFlag(idx) => {
                 let key = &fast.info_keys[idx];
                 // A Flag reads as 1 when set and 0 when absent (`INDEL=0`).
-                let values = vec![if info_has_flag(rec.info, key) { 1.0 } else { 0.0 }];
+                let values = vec![if info_has_flag(rec.info, key) {
+                    1.0
+                } else {
+                    0.0
+                }];
                 fast_cmp_values(term.op, values, term.value)
             }
         };
@@ -1187,9 +1191,10 @@ fn info_numbers(info: &str, key: &str) -> Vec<f64> {
             continue;
         }
         if let Some((k, v)) = item.split_once('=')
-            && k == key {
-                return parse_number_list(v);
-            }
+            && k == key
+        {
+            return parse_number_list(v);
+        }
     }
     Vec::new()
 }
@@ -1468,7 +1473,11 @@ fn eval_info_field(field: &FieldRef, ctx: &mut EvalContext) -> Result<EvalValue>
         }
         None => {
             if matches!(field_type, FieldType::Flag) {
-                vec![Value::Int(if info_has_flag(ctx.rec.info, &field.name) { 1 } else { 0 })]
+                vec![Value::Int(if info_has_flag(ctx.rec.info, &field.name) {
+                    1
+                } else {
+                    0
+                })]
             } else {
                 Vec::new()
             }
@@ -1981,29 +1990,35 @@ fn compare_values(
         return compare_with_list(op, list, a);
     }
     if let EvalValue::Samples(av) = &a
-        && av.kind == ValueKind::Gt {
-            return Ok(compare_gt(op, av, b));
-        }
+        && av.kind == ValueKind::Gt
+    {
+        return Ok(compare_gt(op, av, b));
+    }
     if let EvalValue::Samples(bv) = &b
-        && bv.kind == ValueKind::Gt {
-            return Ok(compare_gt(op, bv, a));
-        }
+        && bv.kind == ValueKind::Gt
+    {
+        return Ok(compare_gt(op, bv, a));
+    }
     if let EvalValue::Scalar(av) = &a
-        && av.kind == ValueKind::Type {
-            return Ok(compare_type(op, av, b));
-        }
+        && av.kind == ValueKind::Type
+    {
+        return Ok(compare_type(op, av, b));
+    }
     if let EvalValue::Scalar(bv) = &b
-        && bv.kind == ValueKind::Type {
-            return Ok(compare_type(op, bv, a));
-        }
+        && bv.kind == ValueKind::Type
+    {
+        return Ok(compare_type(op, bv, a));
+    }
     if let EvalValue::Scalar(av) = &a
-        && av.kind == ValueKind::Filter {
-            return Ok(compare_filter(op, av, b));
-        }
+        && av.kind == ValueKind::Filter
+    {
+        return Ok(compare_filter(op, av, b));
+    }
     if let EvalValue::Scalar(bv) = &b
-        && bv.kind == ValueKind::Filter {
-            return Ok(compare_filter(op, bv, a));
-        }
+        && bv.kind == ValueKind::Filter
+    {
+        return Ok(compare_filter(op, bv, a));
+    }
     match (a, b) {
         (EvalValue::Scalar(av), EvalValue::Scalar(bv)) => {
             Ok(compare_scalar(op, &av.values, &bv.values))
@@ -2033,10 +2048,11 @@ fn compare_with_list(op: BinaryOp, list: &HashSet<String>, other: EvalValue) -> 
             let mut pass = false;
             for val in v.values {
                 if let Value::Str(s) = val
-                    && check(&s) {
-                        pass = true;
-                        break;
-                    }
+                    && check(&s)
+                {
+                    pass = true;
+                    break;
+                }
             }
             Ok(EvalResult {
                 pass_site: pass,
@@ -2052,11 +2068,12 @@ fn compare_with_list(op: BinaryOp, list: &HashSet<String>, other: EvalValue) -> 
                 }
                 for val in vals {
                     if let Value::Str(s) = val
-                        && check(s) {
-                            pass_samples[i] = true;
-                            pass_site = true;
-                            break;
-                        }
+                        && check(s)
+                    {
+                        pass_samples[i] = true;
+                        pass_site = true;
+                        break;
+                    }
                 }
             }
             Ok(EvalResult {
@@ -2336,8 +2353,7 @@ fn gt_missing(gt: &str) -> bool {
     if gt == "." || gt == "./." || gt == ".|." {
         return true;
     }
-    gt.split(['/', '|'])
-        .any(|p| p == "." || p.is_empty())
+    gt.split(['/', '|']).any(|p| p == "." || p.is_empty())
 }
 
 fn gt_ploidy(gt: &str) -> usize {
@@ -2826,7 +2842,10 @@ fn eval_func(name: FuncName, args: &[Expr], ctx: &mut EvalContext) -> Result<Eva
         | FuncName::Sum
         | FuncName::Median
         | FuncName::Stdev => {
-            let v = eval_value(args.first().ok_or_else(|| anyhow!("func needs 1 arg"))?, ctx)?;
+            let v = eval_value(
+                args.first().ok_or_else(|| anyhow!("func needs 1 arg"))?,
+                ctx,
+            )?;
             Ok(apply_reduce(name, v))
         }
         FuncName::SMplMax
@@ -2836,7 +2855,10 @@ fn eval_func(name: FuncName, args: &[Expr], ctx: &mut EvalContext) -> Result<Eva
         | FuncName::SMplMedian
         | FuncName::SMplStdev
         | FuncName::SMplCount => {
-            let v = eval_value(args.first().ok_or_else(|| anyhow!("func needs 1 arg"))?, ctx)?;
+            let v = eval_value(
+                args.first().ok_or_else(|| anyhow!("func needs 1 arg"))?,
+                ctx,
+            )?;
             Ok(apply_sample_reduce(name, v))
         }
     }
@@ -3257,7 +3279,6 @@ fn value_from_bool(res: EvalResult) -> EvalValue {
         kind: ValueKind::Normal,
     })
 }
-
 
 #[cfg(test)]
 #[path = "../tests/unit/filter_engine.rs"]

@@ -6,10 +6,23 @@ use std::io::{Cursor, Read};
 use crate::cli::args::HeadArgs;
 
 pub fn cmd_head(args: HeadArgs) -> Result<()> {
-    let mut argv: Vec<String> = args.input.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-    if args.headers >= 0 { argv.push("-h".into()); argv.push(args.headers.to_string()); }
-    if args.records >= 0 { argv.push("-n".into()); argv.push(args.records.to_string()); }
-    if args.samples >= 0 { argv.push("-s".into()); argv.push(args.samples.to_string()); }
+    let mut argv: Vec<String> = args
+        .input
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    if args.headers >= 0 {
+        argv.push("-h".into());
+        argv.push(args.headers.to_string());
+    }
+    if args.records >= 0 {
+        argv.push("-n".into());
+        argv.push(args.records.to_string());
+    }
+    if args.samples >= 0 {
+        argv.push("-s".into());
+        argv.push(args.samples.to_string());
+    }
     argv.extend(args.passthrough.iter().cloned());
     let cfg = parse_args(&argv)?;
     let content = read_input(&cfg)?;
@@ -47,9 +60,10 @@ pub fn cmd_head(args: HeadArgs) -> Result<()> {
     if let Some(s) = cfg.s {
         record_count = s;
         if let Some(chrom) = chrom_line
-            && !out.contains(&chrom) {
-                out.push(chrom);
-            }
+            && !out.contains(&chrom)
+        {
+            out.push(chrom);
+        }
     }
 
     if record_count > 0 {

@@ -46,15 +46,33 @@ fn set_by_idx(table: &mut Vec<u32>, idx: u32, pos: usize) {
 
 impl BcfHeaderDict {
     pub fn info_field(&self, idx: u32) -> Option<&HdrField> {
-        self.info_by_idx.get(idx as usize).and_then(|&p| if p == NONE { None } else { self.info.get(p as usize) })
+        self.info_by_idx.get(idx as usize).and_then(|&p| {
+            if p == NONE {
+                None
+            } else {
+                self.info.get(p as usize)
+            }
+        })
     }
 
     pub fn format_field(&self, idx: u32) -> Option<&HdrField> {
-        self.format_by_idx.get(idx as usize).and_then(|&p| if p == NONE { None } else { self.format.get(p as usize) })
+        self.format_by_idx.get(idx as usize).and_then(|&p| {
+            if p == NONE {
+                None
+            } else {
+                self.format.get(p as usize)
+            }
+        })
     }
 
     pub fn filter_field(&self, idx: u32) -> Option<&HdrField> {
-        self.filter_by_idx.get(idx as usize).and_then(|&p| if p == NONE { None } else { self.filter.get(p as usize) })
+        self.filter_by_idx.get(idx as usize).and_then(|&p| {
+            if p == NONE {
+                None
+            } else {
+                self.filter.get(p as usize)
+            }
+        })
     }
 
     /// Do records encoded against `other` decode identically against
@@ -66,14 +84,26 @@ impl BcfHeaderDict {
             && self.info_idx == other.info_idx
             && self.format_idx == other.format_idx
             && self.filter_idx == other.filter_idx
-            && self.info.iter().map(|f| (&f.id, &f.typ, &f.number)).eq(other.info.iter().map(|f| (&f.id, &f.typ, &f.number)))
-            && self.format.iter().map(|f| (&f.id, &f.typ, &f.number)).eq(other.format.iter().map(|f| (&f.id, &f.typ, &f.number)))
+            && self
+                .info
+                .iter()
+                .map(|f| (&f.id, &f.typ, &f.number))
+                .eq(other.info.iter().map(|f| (&f.id, &f.typ, &f.number)))
+            && self
+                .format
+                .iter()
+                .map(|f| (&f.id, &f.typ, &f.number))
+                .eq(other.format.iter().map(|f| (&f.id, &f.typ, &f.number)))
     }
 
     pub fn contig_name(&self, rid: u32) -> Option<&str> {
-        self.contig_by_idx
-            .get(rid as usize)
-            .and_then(|&p| if p == NONE { None } else { self.contigs.get(p as usize).map(String::as_str) })
+        self.contig_by_idx.get(rid as usize).and_then(|&p| {
+            if p == NONE {
+                None
+            } else {
+                self.contigs.get(p as usize).map(String::as_str)
+            }
+        })
     }
 
     fn rebuild_tables(&mut self) {
@@ -143,8 +173,14 @@ pub fn parse_header_to_dict(headers: &[String]) -> BcfHeaderDict {
     for h in headers {
         d.raw_lines.push(h.clone());
         if let Some((kind, kvs)) = parse_struct_line(h) {
-            let id = kvs.iter().find(|(k, _)| *k == "ID").map(|(_, v)| v.to_string());
-            let explicit = kvs.iter().find(|(k, _)| *k == "IDX").and_then(|(_, v)| v.parse::<u32>().ok());
+            let id = kvs
+                .iter()
+                .find(|(k, _)| *k == "ID")
+                .map(|(_, v)| v.to_string());
+            let explicit = kvs
+                .iter()
+                .find(|(k, _)| *k == "IDX")
+                .and_then(|(_, v)| v.parse::<u32>().ok());
             let Some(id) = id else { continue };
             match kind {
                 "contig" => {
@@ -159,13 +195,17 @@ pub fn parse_header_to_dict(headers: &[String]) -> BcfHeaderDict {
                     f.idx = ids.assign(&id, explicit);
                     match kind {
                         "INFO" => {
-                            if let std::collections::hash_map::Entry::Vacant(e) = d.info_idx.entry(id) {
+                            if let std::collections::hash_map::Entry::Vacant(e) =
+                                d.info_idx.entry(id)
+                            {
                                 e.insert(f.idx);
                                 d.info.push(f);
                             }
                         }
                         "FORMAT" => {
-                            if let std::collections::hash_map::Entry::Vacant(e) = d.format_idx.entry(id) {
+                            if let std::collections::hash_map::Entry::Vacant(e) =
+                                d.format_idx.entry(id)
+                            {
                                 e.insert(f.idx);
                                 d.format.push(f);
                             }
@@ -174,7 +214,9 @@ pub fn parse_header_to_dict(headers: &[String]) -> BcfHeaderDict {
                             if id == "PASS" {
                                 have_pass_line = true;
                             }
-                            if let std::collections::hash_map::Entry::Vacant(e) = d.filter_idx.entry(id) {
+                            if let std::collections::hash_map::Entry::Vacant(e) =
+                                d.filter_idx.entry(id)
+                            {
                                 e.insert(f.idx);
                                 d.filter.push(f);
                             }
@@ -229,7 +271,9 @@ pub fn serialize_header(d: &BcfHeaderDict) -> String {
     let mut out = String::new();
     let mut had_fileformat = false;
     let has_pass_line = d.raw_lines.iter().any(|l| {
-        parse_struct_line(l).is_some_and(|(k, kvs)| k == "FILTER" && kvs.iter().any(|(a, b)| *a == "ID" && *b == "PASS"))
+        parse_struct_line(l).is_some_and(|(k, kvs)| {
+            k == "FILTER" && kvs.iter().any(|(a, b)| *a == "ID" && *b == "PASS")
+        })
     });
     let pass_line = format!(
         "##FILTER=<ID=PASS,Description=\"All filters passed\",IDX={}>",
@@ -289,9 +333,10 @@ pub fn serialize_header(d: &BcfHeaderDict) -> String {
 
 fn inject_idx(line: &str, idx: u32) -> String {
     if let Some((_, kvs)) = parse_struct_line(line)
-        && kvs.iter().any(|(k, _)| *k == "IDX") {
-            return line.to_string();
-        }
+        && kvs.iter().any(|(k, _)| *k == "IDX")
+    {
+        return line.to_string();
+    }
     if let Some(p) = line.rfind('>') {
         let mut s = String::with_capacity(line.len() + 12);
         s.push_str(&line[..p]);

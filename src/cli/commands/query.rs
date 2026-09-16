@@ -4,8 +4,8 @@ use std::io::{BufRead, BufReader};
 use std::io::{BufWriter, Write};
 
 use crate::cli::args::{HeaderArgs, ListArgs, QueryCompatArgs, RegionQueryArgs, StatArgs};
-use crate::filter::FilterEngine;
 use crate::csi::{BinIndex, IndexKind, IndexedVcfReader, find_index_for};
+use crate::filter::FilterEngine;
 use crate::{KbiIndex, LineFetcher, Region, RegionSet, VcfReader};
 use std::path::Path;
 
@@ -38,8 +38,14 @@ pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
     let filter_expr = include.as_deref().or(exclude.as_deref());
     let filter_engine = FilterEngine::new(&headers, filter_expr, exclude.is_some())?;
 
-    let region_filter = RegionSet::from_args(cfg.regions.as_deref(), cfg.regions_file.as_deref().map(Path::new))?;
-    let target_filter = RegionSet::from_args(cfg.targets.as_deref(), cfg.targets_file.as_deref().map(Path::new))?;
+    let region_filter = RegionSet::from_args(
+        cfg.regions.as_deref(),
+        cfg.regions_file.as_deref().map(Path::new),
+    )?;
+    let target_filter = RegionSet::from_args(
+        cfg.targets.as_deref(),
+        cfg.targets_file.as_deref().map(Path::new),
+    )?;
     let no_nas = cfg.no_nas.clone();
     let exclude_uncalled = cfg.exclude_uncalled;
 
@@ -58,12 +64,15 @@ pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
 
     let mut handle = |rec: &crate::vcf::VcfRecord| -> Result<()> {
         if let Some(tf) = &target_filter
-            && !tf.record_passes(&rec.chrom, rec.pos, &rec.ref_allele, &rec.alt, 0) {
-                return Ok(());
-            }
+            && !tf.record_passes(&rec.chrom, rec.pos, &rec.ref_allele, &rec.alt, 0)
+        {
+            return Ok(());
+        }
         let eval = filter_engine.eval(rec)?;
         let site_pass = if let Some(ps) = eval.pass_samples.as_ref() {
-            sample_idx.iter().any(|&i| ps.get(i).copied().unwrap_or(false))
+            sample_idx
+                .iter()
+                .any(|&i| ps.get(i).copied().unwrap_or(false))
         } else {
             eval.pass_site
         };
@@ -75,7 +84,9 @@ pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
         }
         let mut s = fmt_ctx.render_record(rec, eval.pass_samples.as_deref())?;
         if let Some(repl) = &no_nas {
-            s = s.replace("\t.\t", &format!("\t{}\t", repl)).replace("\t.\n", &format!("\t{}\n", repl));
+            s = s
+                .replace("\t.\t", &format!("\t{}\t", repl))
+                .replace("\t.\n", &format!("\t{}\n", repl));
         }
         out.write_all(s.as_bytes())?;
         if !s.ends_with('\n') {
@@ -86,7 +97,9 @@ pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
 
     // `-r` reads only the indexed blocks when the input has a .csi/.tbi;
     // without an index (or from stdin) every record is scanned.
-    let use_index = region_filter.is_some() && cfg.input != Path::new("-") && find_index_for(&cfg.input).is_some();
+    let use_index = region_filter.is_some()
+        && cfg.input != Path::new("-")
+        && find_index_for(&cfg.input).is_some();
     if use_index {
         let rf = region_filter.as_ref().unwrap();
         rf.stream_with_index(&cfg.input, 1, |line| {
@@ -98,9 +111,10 @@ pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
     } else {
         while let Some(rec) = reader.next_record()? {
             if let Some(rf) = &region_filter
-                && !rf.record_passes(&rec.chrom, rec.pos, &rec.ref_allele, &rec.alt, 1) {
-                    continue;
-                }
+                && !rf.record_passes(&rec.chrom, rec.pos, &rec.ref_allele, &rec.alt, 1)
+            {
+                continue;
+            }
             handle(&rec)?;
         }
     }
@@ -110,7 +124,9 @@ pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
 }
 
 fn record_all_missing(rec: &crate::vcf::VcfRecord) -> bool {
-    if rec.samples.is_empty() { return false; }
+    if rec.samples.is_empty() {
+        return false;
+    }
     rec.samples.iter().all(|s| {
         let gt = s.split(':').next().unwrap_or(".");
         gt.split(['/', '|']).all(|a| a == "." || a.is_empty())
@@ -175,7 +191,8 @@ pub fn cmd_region_query(args: RegionQueryArgs) -> Result<()> {
             }
         }
     } else {
-        let mut reader = IndexedVcfReader::open_with_index(&args.file, bin_index.as_ref().unwrap())?;
+        let mut reader =
+            IndexedVcfReader::open_with_index(&args.file, bin_index.as_ref().unwrap())?;
         for region_str in &regions {
             let region = Region::parse(region_str)
                 .ok_or_else(|| anyhow::anyhow!("Invalid region: {}", region_str))?;
@@ -232,7 +249,14 @@ pub fn cmd_stat(args: StatArgs) -> Result<()> {
     {
         let idx = BinIndex::load(&args.index)?;
 
-        println!("Index Statistics ({})", if idx.kind == IndexKind::Csi { "CSI" } else { "TBI" });
+        println!(
+            "Index Statistics ({})",
+            if idx.kind == IndexKind::Csi {
+                "CSI"
+            } else {
+                "TBI"
+            }
+        );
         println!("==========================");
         println!("File:          {:?}", args.index);
         println!(
@@ -245,7 +269,12 @@ pub fn cmd_stat(args: StatArgs) -> Result<()> {
         println!("References:    {}", idx.n_refs());
         println!("Records:       {}", idx.total_records());
         let bins: usize = idx.refs.iter().map(|r| r.bins.len()).sum();
-        let chunks: usize = idx.refs.iter().flat_map(|r| r.bins.values()).map(|b| b.chunks.len()).sum();
+        let chunks: usize = idx
+            .refs
+            .iter()
+            .flat_map(|r| r.bins.values())
+            .map(|b| b.chunks.len())
+            .sum();
         println!("Bins:          {}", bins);
         println!("Chunks:        {}", chunks);
     } else {
@@ -323,7 +352,10 @@ fn parse_query_args(args: &[String]) -> Result<QueryConfig> {
     let mut i = 0usize;
     let load_expr = |s: &str| -> String {
         if let Some(path) = s.strip_prefix('@')
-            && let Ok(c) = std::fs::read_to_string(path) { return c.trim().to_string(); }
+            && let Ok(c) = std::fs::read_to_string(path)
+        {
+            return c.trim().to_string();
+        }
         s.to_string()
     };
     while i < args.len() {
@@ -387,7 +419,9 @@ fn parse_query_args(args: &[String]) -> Result<QueryConfig> {
         }
         i += 1;
     }
-    if cfg.print_header { cfg.header_mode = cfg.header_mode.max(1); }
+    if cfg.print_header {
+        cfg.header_mode = cfg.header_mode.max(1);
+    }
     if cfg.input.as_os_str().is_empty() {
         return Err(anyhow::anyhow!("query: missing input file"));
     }
@@ -675,9 +709,10 @@ impl QueryFormatContext {
         }
         if tok == "VKX" {
             if let Some(rs) = info_value(&rec.info, "RS").and_then(|v| v.parse::<u32>().ok())
-                && let Some(v) = known_vkx_for_rs(rs) {
-                    return Ok(v.to_string());
-                }
+                && let Some(v) = known_vkx_for_rs(rs)
+            {
+                return Ok(v.to_string());
+            }
             if let Some(vk) = variantkey_hex(rec) {
                 return Ok(vk);
             }
@@ -701,17 +736,29 @@ impl QueryFormatContext {
         if tok == "TYPE" {
             return Ok(classify_variant(&rec.ref_allele, &rec.alt));
         }
-        if let Some(key) = tok.strip_prefix("FORMAT/").or_else(|| tok.strip_prefix("FMT/")) {
+        if let Some(key) = tok
+            .strip_prefix("FORMAT/")
+            .or_else(|| tok.strip_prefix("FMT/"))
+        {
             if let Some(i) = sample {
-                if let Some(v) = sample_fmt(rec, i, key) { return Ok(self.format_text(key, v)); }
+                if let Some(v) = sample_fmt(rec, i, key) {
+                    return Ok(self.format_text(key, v));
+                }
             } else if let Some(fmt) = &rec.format {
                 let mut s = String::new();
                 let mut first = true;
                 for &si in &self.selected {
-                    if sample_mask.map(|m| m.get(si).copied().unwrap_or(false)).unwrap_or(true) {
-                        if !first { s.push(','); }
+                    if sample_mask
+                        .map(|m| m.get(si).copied().unwrap_or(false))
+                        .unwrap_or(true)
+                    {
+                        if !first {
+                            s.push(',');
+                        }
                         first = false;
-                        let v = sample_fmt_by_format(fmt, rec.samples.get(si).map(String::as_str), key).unwrap_or(".");
+                        let v =
+                            sample_fmt_by_format(fmt, rec.samples.get(si).map(String::as_str), key)
+                                .unwrap_or(".");
                         s.push_str(&self.format_text(key, v));
                     }
                 }
@@ -729,9 +776,10 @@ impl QueryFormatContext {
             return Ok(format_tgt(gt, &rec.ref_allele, &rec.alt));
         }
         if let Some(i) = sample
-            && let Some(v) = sample_fmt(rec, i, tok) {
-                return Ok(self.format_text(tok, v));
-            }
+            && let Some(v) = sample_fmt(rec, i, tok)
+        {
+            return Ok(self.format_text(tok, v));
+        }
         if let Some(v) = info_value(&rec.info, tok) {
             return Ok(self.info_text(tok, v));
         }
@@ -739,11 +787,19 @@ impl QueryFormatContext {
     }
 
     fn info_text(&self, key: &str, v: &str) -> String {
-        if self.canon.info_is_float(key) { crate::vcf::canonical_floats(v).into_owned() } else { v.to_string() }
+        if self.canon.info_is_float(key) {
+            crate::vcf::canonical_floats(v).into_owned()
+        } else {
+            v.to_string()
+        }
     }
 
     fn format_text(&self, key: &str, v: &str) -> String {
-        if self.canon.format_is_float(key) { crate::vcf::canonical_floats(v).into_owned() } else { v.to_string() }
+        if self.canon.format_is_float(key) {
+            crate::vcf::canonical_floats(v).into_owned()
+        } else {
+            v.to_string()
+        }
     }
 }
 
@@ -751,13 +807,27 @@ fn classify_variant(refa: &str, alt: &str) -> String {
     let mut tags: Vec<&str> = Vec::new();
     for a in alt.split(',') {
         let a = a.trim();
-        if a.is_empty() || a == "." { continue; }
-        let t = if refa.len() == 1 && a.len() == 1 { "SNP" }
-            else if refa.len() == a.len() && refa.len() > 1 { "MNP" }
-            else if refa.len() != a.len() { "INDEL" } else { "OTHER" };
-        if !tags.contains(&t) { tags.push(t); }
+        if a.is_empty() || a == "." {
+            continue;
+        }
+        let t = if refa.len() == 1 && a.len() == 1 {
+            "SNP"
+        } else if refa.len() == a.len() && refa.len() > 1 {
+            "MNP"
+        } else if refa.len() != a.len() {
+            "INDEL"
+        } else {
+            "OTHER"
+        };
+        if !tags.contains(&t) {
+            tags.push(t);
+        }
     }
-    if tags.is_empty() { ".".into() } else { tags.join(",") }
+    if tags.is_empty() {
+        ".".into()
+    } else {
+        tags.join(",")
+    }
 }
 
 fn sample_fmt_by_format<'a>(fmt: &str, sample: Option<&'a str>, key: &str) -> Option<&'a str> {
@@ -866,9 +936,10 @@ fn parse_qparts(format: &str) -> Result<Vec<QPart>> {
 fn info_value<'a>(info: &'a str, key: &str) -> Option<&'a str> {
     for item in info.split(';') {
         if let Some((k, v)) = item.split_once('=')
-            && k == key {
-                return Some(v);
-            }
+            && k == key
+        {
+            return Some(v);
+        }
     }
     None
 }
@@ -878,10 +949,11 @@ fn parse_indexed_info(tok: &str) -> Option<(String, usize)> {
         let close = if *open == '[' { ']' } else { '}' };
         if let Some((key, rest)) = tok.split_once(*open)
             && let Some(r) = rest.strip_suffix(close)
-                && let Ok(i) = r.parse::<usize>() {
-                    let k = key.strip_prefix("INFO/").unwrap_or(key).to_string();
-                    return Some((k, i));
-                }
+            && let Ok(i) = r.parse::<usize>()
+        {
+            let k = key.strip_prefix("INFO/").unwrap_or(key).to_string();
+            return Some((k, i));
+        }
     }
     None
 }

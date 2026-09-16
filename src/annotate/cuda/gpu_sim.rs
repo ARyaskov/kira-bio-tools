@@ -42,11 +42,21 @@ const BLOOM_BLOCK_WORDS: usize = 8;
 /// export's own lane shift: 26 (6-bit index) for filters built by 0.6.3,
 /// 27 (5-bit) for ones deserialized from a 0.6 file.
 #[inline]
-fn bloom_block_and_mask(hash: u64, blocks: usize, bit_shift: u32) -> (usize, [u64; BLOOM_BLOCK_WORDS]) {
+fn bloom_block_and_mask(
+    hash: u64,
+    blocks: usize,
+    bit_shift: u32,
+) -> (usize, [u64; BLOOM_BLOCK_WORDS]) {
     let block = (((hash >> 32) as u128 * blocks as u128) >> 32) as usize;
     let seed = hash as u32;
     const SALT: [u32; BLOOM_BLOCK_WORDS] = [
-        0x47b6_137b, 0x4476_8924, 0x1820_5237, 0x2384_8965, 0x8e6e_2354, 0x0f7c_c9b6, 0xe43d_5fa5,
+        0x47b6_137b,
+        0x4476_8924,
+        0x1820_5237,
+        0x2384_8965,
+        0x8e6e_2354,
+        0x0f7c_c9b6,
+        0xe43d_5fa5,
         0xa4d5_2dc1,
     ];
     let mut mask = [0u64; BLOOM_BLOCK_WORDS];

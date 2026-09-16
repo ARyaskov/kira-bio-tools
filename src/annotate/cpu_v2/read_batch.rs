@@ -53,7 +53,9 @@ impl ReadBatch {
         let offset = self.bytes.len();
         match std::str::from_utf8(trimmed) {
             Ok(_) => self.bytes.extend_from_slice(trimmed),
-            Err(_) => self.bytes.extend_from_slice(String::from_utf8_lossy(trimmed).as_bytes()),
+            Err(_) => self
+                .bytes
+                .extend_from_slice(String::from_utf8_lossy(trimmed).as_bytes()),
         }
         let len = self.bytes.len() - offset;
         debug_assert!(offset <= u32::MAX as usize, "ReadBatch offset overflow");

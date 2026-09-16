@@ -615,15 +615,16 @@ impl Caller {
             }
         }
         if let Some((_, ppos)) = &self.prev
-            && *ppos > rec.pos {
-                bail!(
-                    "Error: The file is not sorted, {}:{} comes before {}:{}",
-                    rec.chrom,
-                    ppos + 1,
-                    rec.chrom,
-                    rec.pos + 1
-                );
-            }
+            && *ppos > rec.pos
+        {
+            bail!(
+                "Error: The file is not sorted, {}:{} comes before {}:{}",
+                rec.chrom,
+                ppos + 1,
+                rec.chrom,
+                rec.pos + 1
+            );
+        }
         let mut call_csq = true;
         if rec.n_allele() < 2 {
             call_csq = false;
@@ -635,10 +636,9 @@ impl Caller {
         } else if rec.alleles[1].starts_with('<') && !rec.alleles[1].starts_with("<INS") {
             call_csq = false;
         }
-        if call_csq
-            && let Some(p) = filter_pass {
-                call_csq = p;
-            }
+        if call_csq && let Some(p) = filter_pass {
+            call_csq = p;
+        }
         if !call_csq {
             if self.out.is_text() {
                 return Ok(());
@@ -759,9 +759,10 @@ impl Caller {
             }
             let tr_end = self.gff.tscripts[tr_i].end;
             if let Some(vbuf) = self.buf.get_mut(vb)
-                && vbuf.keep_until < tr_end {
-                    vbuf.keep_until = tr_end;
-                }
+                && vbuf.keep_until < tr_end
+            {
+                vbuf.keep_until = tr_end;
+            }
             ret = true;
             if self.aux[tr_i].is_none() {
                 let r = tscript_init_ref(&self.fasta, &self.opts, &self.gff, tr_i, &chr)?;
@@ -865,30 +866,32 @@ impl Caller {
                 let mut gt = [Some(g0), rec.gt(ismpl, 1)];
                 if ngts > 1
                     && let Some(g1) = gt[1]
-                        && g1.allele >= 0 && g0.allele != g1.allele {
-                            if phase == Phase::Merge && g0.allele == 0 {
-                                gt[0] = Some(g1);
-                            }
-                            if !g0.phased && !g1.phased {
-                                match phase {
-                                    Phase::Require => bail!(
-                                        "Unphased heterozygous genotype at {}:{}, sample {}. See the --phase option.",
-                                        chr,
-                                        rec.pos + 1,
-                                        self.samples[ismpl]
-                                    ),
-                                    Phase::Skip => continue,
-                                    Phase::NonRef => {
-                                        if gt[0].unwrap().allele == 0 {
-                                            gt[0] = gt[1];
-                                        } else if g1.allele == 0 {
-                                            gt[1] = gt[0];
-                                        }
-                                    }
-                                    _ => {}
+                    && g1.allele >= 0
+                    && g0.allele != g1.allele
+                {
+                    if phase == Phase::Merge && g0.allele == 0 {
+                        gt[0] = Some(g1);
+                    }
+                    if !g0.phased && !g1.phased {
+                        match phase {
+                            Phase::Require => bail!(
+                                "Unphased heterozygous genotype at {}:{}, sample {}. See the --phase option.",
+                                chr,
+                                rec.pos + 1,
+                                self.samples[ismpl]
+                            ),
+                            Phase::Skip => continue,
+                            Phase::NonRef => {
+                                if gt[0].unwrap().allele == 0 {
+                                    gt[0] = gt[1];
+                                } else if g1.allele == 0 {
+                                    gt[1] = gt[0];
                                 }
                             }
+                            _ => {}
                         }
+                    }
+                }
                 for ihap in 0..ngts {
                     let Some(g) = gt[ihap] else { continue };
                     if g.allele < 0 {

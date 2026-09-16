@@ -35,7 +35,8 @@ impl IndexedVcfReader {
     }
 
     pub fn open_with_index(path: &Path, index_path: &Path) -> Result<Self> {
-        let index = BinIndex::load(index_path).with_context(|| format!("read index {}", index_path.display()))?;
+        let index = BinIndex::load(index_path)
+            .with_context(|| format!("read index {}", index_path.display()))?;
         let f = File::open(path).with_context(|| format!("open {}", path.display()))?;
         let mut probe = noodles_bgzf::io::Reader::new(f);
         let mut magic = [0u8; 5];
@@ -50,9 +51,19 @@ impl IndexedVcfReader {
                     names.push(r.dict.contig_name(rid).unwrap_or("").to_string());
                 }
             }
-            return Ok(Self { src: Source::Bcf(r), index, index_path: index_path.to_path_buf(), headers, names, conf: TabixConf::VCF });
+            return Ok(Self {
+                src: Source::Bcf(r),
+                index,
+                index_path: index_path.to_path_buf(),
+                headers,
+                names,
+                conf: TabixConf::VCF,
+            });
         }
-        let conf = index.tabix_header().map(TabixConf::from_header).unwrap_or(TabixConf::VCF);
+        let conf = index
+            .tabix_header()
+            .map(TabixConf::from_header)
+            .unwrap_or(TabixConf::VCF);
         let f = File::open(path)?;
         let mut r = noodles_bgzf::io::Reader::new(f);
         let mut headers = Vec::new();
@@ -62,13 +73,22 @@ impl IndexedVcfReader {
             line.clear();
             let n = r.read_line(&mut line)?;
             lineno += 1;
-            if n == 0 || !(lineno <= conf.skip as i64 || line.as_bytes().first() == Some(&conf.meta)) {
+            if n == 0
+                || !(lineno <= conf.skip as i64 || line.as_bytes().first() == Some(&conf.meta))
+            {
                 break;
             }
             headers.push(line.trim_end_matches(['\r', '\n']).to_string());
         }
         let names = index.names().to_vec();
-        Ok(Self { src: Source::Vcf(r), index, index_path: index_path.to_path_buf(), headers, names, conf })
+        Ok(Self {
+            src: Source::Vcf(r),
+            index,
+            index_path: index_path.to_path_buf(),
+            headers,
+            names,
+            conf,
+        })
     }
 
     pub fn headers(&self) -> &[String] {
@@ -106,17 +126,27 @@ impl IndexedVcfReader {
     where
         F: FnMut(&[u8], &[u8]) -> Result<bool>,
     {
-        let Some(rid) = self.ref_id(chrom) else { return Ok(()) };
-        let Some((chunks, max_end)) = self.merged_chunks(rid, ranges) else { return Ok(()) };
-        let Source::Bcf(r) = &mut self.src else { bail!("query_raw needs a BCF input") };
+        let Some(rid) = self.ref_id(chrom) else {
+            return Ok(());
+        };
+        let Some((chunks, max_end)) = self.merged_chunks(rid, ranges) else {
+            return Ok(());
+        };
+        let Source::Bcf(r) = &mut self.src else {
+            bail!("query_raw needs a BCF input")
+        };
         for (s, e) in chunks {
             r.seek(s)?;
             loop {
                 if r.virtual_position().unwrap_or(u64::MAX) >= e {
                     break;
                 }
-                let Some((shared, indiv)) = r.read_record_raw()? else { break };
-                let Some(m) = record_meta(&shared) else { continue };
+                let Some((shared, indiv)) = r.read_record_raw()? else {
+                    break;
+                };
+                let Some(m) = record_meta(&shared) else {
+                    continue;
+                };
                 if m.rid < 0 || m.rid as usize != rid {
                     continue;
                 }
@@ -153,10 +183,11 @@ impl IndexedVcfReader {
         let mut merged: Vec<(u64, u64)> = Vec::with_capacity(chunks.len());
         for (s, e) in chunks {
             if let Some(m) = merged.last_mut()
-                && s >> 16 <= m.1 >> 16 {
-                    m.1 = m.1.max(e);
-                    continue;
-                }
+                && s >> 16 <= m.1 >> 16
+            {
+                m.1 = m.1.max(e);
+                continue;
+            }
             merged.push((s, e));
         }
         Some((merged, max_end))
@@ -178,14 +209,19 @@ impl IndexedVcfReader {
     where
         F: FnMut(&str) -> Result<bool>,
     {
-        let Some(rid) = self.ref_id(chrom) else { return Ok(()) };
-        let Some((chunks, max_end)) = self.merged_chunks(rid, ranges) else { return Ok(()) };
+        let Some(rid) = self.ref_id(chrom) else {
+            return Ok(());
+        };
+        let Some((chunks, max_end)) = self.merged_chunks(rid, ranges) else {
+            return Ok(());
+        };
         let conf = self.conf;
         match &mut self.src {
             Source::Vcf(r) => {
                 let mut line = String::new();
                 for (s, e) in chunks {
-                    r.seek(noodles_bgzf::VirtualPosition::from(s)).context("bgzf seek")?;
+                    r.seek(noodles_bgzf::VirtualPosition::from(s))
+                        .context("bgzf seek")?;
                     loop {
                         if u64::from(r.virtual_position()) >= e {
                             break;
@@ -199,8 +235,14 @@ impl IndexedVcfReader {
                         if l.is_empty() || l.as_bytes()[0] == conf.meta {
                             continue;
                         }
-                        let interval = if conf.is_vcf() { vcf_line_interval(l) } else { tabix_line_interval(&conf, l) };
-                        let Some((c, rb, re)) = interval else { continue };
+                        let interval = if conf.is_vcf() {
+                            vcf_line_interval(l)
+                        } else {
+                            tabix_line_interval(&conf, l)
+                        };
+                        let Some((c, rb, re)) = interval else {
+                            continue;
+                        };
                         if c != chrom {
                             continue;
                         }
@@ -220,8 +262,12 @@ impl IndexedVcfReader {
                         if r.virtual_position().unwrap_or(u64::MAX) >= e {
                             break;
                         }
-                        let Some((shared, indiv)) = r.read_record_raw()? else { break };
-                        let Some(m) = record_meta(&shared) else { continue };
+                        let Some((shared, indiv)) = r.read_record_raw()? else {
+                            break;
+                        };
+                        let Some(m) = record_meta(&shared) else {
+                            continue;
+                        };
                         if m.rid < 0 || m.rid as usize != rid {
                             continue;
                         }

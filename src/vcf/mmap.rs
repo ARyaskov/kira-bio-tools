@@ -70,13 +70,14 @@ impl<'a> MmapVcfParser<'a> {
 
             let line = &self.data[pos..line_end];
 
-            if !line.is_empty() && line[0] != b'#'
+            if !line.is_empty()
+                && line[0] != b'#'
                 && let Ok(line_str) = std::str::from_utf8(line)
-                    && let Ok(Some(rec)) =
-                        crate::vcf::unified_reader::parse_vcf_record(line_str, pos as u64, &mut contigs)
-                    {
-                        records.push(rec);
-                    }
+                && let Ok(Some(rec)) =
+                    crate::vcf::unified_reader::parse_vcf_record(line_str, pos as u64, &mut contigs)
+            {
+                records.push(rec);
+            }
 
             pos = line_end + 1;
         }

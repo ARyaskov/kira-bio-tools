@@ -11,10 +11,20 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Collapse { None, All, Snps, Indels, Both, Some_, Id }
+enum Collapse {
+    None,
+    All,
+    Snps,
+    Indels,
+    Both,
+    Some_,
+    Id,
+}
 
 fn parse_collapse(s: Option<&str>) -> Result<Collapse> {
-    let Some(s) = s else { return Ok(Collapse::None); };
+    let Some(s) = s else {
+        return Ok(Collapse::None);
+    };
     match s {
         "none" => Ok(Collapse::None),
         "all" | "any" => Ok(Collapse::All),
@@ -23,7 +33,10 @@ fn parse_collapse(s: Option<&str>) -> Result<Collapse> {
         "both" => Ok(Collapse::Both),
         "some" => Ok(Collapse::Some_),
         "id" => Ok(Collapse::Id),
-        _ => bail!("-c: unknown collapse mode '{}', expected none|all|snps|indels|both|some|id", s),
+        _ => bail!(
+            "-c: unknown collapse mode '{}', expected none|all|snps|indels|both|some|id",
+            s
+        ),
     }
 }
 
@@ -44,11 +57,20 @@ impl Rec {
         let refa = it.next()?.to_string();
         let alt = it.next()?.to_string();
         let vt = record_type(&refa, &alt);
-        Some(Self { line, id, refa, alt, vt })
+        Some(Self {
+            line,
+            id,
+            refa,
+            alt,
+            vt,
+        })
     }
 
     fn alts(&self) -> Vec<&str> {
-        self.alt.split(',').filter(|a| *a != "*" && *a != ".").collect()
+        self.alt
+            .split(',')
+            .filter(|a| *a != "*" && *a != ".")
+            .collect()
     }
 }
 
@@ -56,7 +78,9 @@ impl Rec {
 fn same_site(a: &Rec, b: &Rec, mode: Collapse) -> bool {
     match mode {
         Collapse::All => true,
-        Collapse::None => a.refa.eq_ignore_ascii_case(&b.refa) && a.alt.eq_ignore_ascii_case(&b.alt),
+        Collapse::None => {
+            a.refa.eq_ignore_ascii_case(&b.refa) && a.alt.eq_ignore_ascii_case(&b.alt)
+        }
         Collapse::Snps => {
             let s = a.vt & VT_SNP != 0 && b.vt & VT_SNP != 0;
             s || (a.refa.eq_ignore_ascii_case(&b.refa) && a.alt.eq_ignore_ascii_case(&b.alt))
@@ -71,7 +95,10 @@ fn same_site(a: &Rec, b: &Rec, mode: Collapse) -> bool {
                 || (a.refa.eq_ignore_ascii_case(&b.refa) && a.alt.eq_ignore_ascii_case(&b.alt))
         }
         Collapse::Some_ => {
-            a.refa.eq_ignore_ascii_case(&b.refa) && a.alts().iter().any(|x| b.alts().iter().any(|y| x.eq_ignore_ascii_case(y)))
+            a.refa.eq_ignore_ascii_case(&b.refa)
+                && a.alts()
+                    .iter()
+                    .any(|x| b.alts().iter().any(|y| x.eq_ignore_ascii_case(y)))
         }
         Collapse::Id => a.id != "." && a.id == b.id,
     }
@@ -97,23 +124,44 @@ impl Source {
                 self.next = None;
                 return Ok(());
             };
-            if line.is_empty() || line.as_bytes()[0] == b'#' { continue; }
+            if line.is_empty() || line.as_bytes()[0] == b'#' {
+                continue;
+            }
             if let Some(rf) = &self.region
-                && !rf.line_passes_mode(&line, self.regions_overlap) { continue; }
+                && !rf.line_passes_mode(&line, self.regions_overlap)
+            {
+                continue;
+            }
             if let Some(tf) = &self.target
-                && tf.line_passes_mode(&line, 0) == self.target_inverse { continue; }
+                && tf.line_passes_mode(&line, 0) == self.target_inverse
+            {
+                continue;
+            }
             if let Some(af) = &self.apply_filters {
                 let f = line.split('\t').nth(6).unwrap_or(".");
-                let pass = if f == "." || f.is_empty() { af.iter().any(|a| a == ".") } else { f.split(';').any(|t| af.iter().any(|a| a == t)) };
-                if !pass { continue; }
+                let pass = if f == "." || f.is_empty() {
+                    af.iter().any(|a| a == ".")
+                } else {
+                    f.split(';').any(|t| af.iter().any(|a| a == t))
+                };
+                if !pass {
+                    continue;
+                }
             }
             if (self.include.is_some() || self.exclude.is_some())
-                && let Some(rec) = parse_vcf_line(&line) {
-                    if let Some(e) = &self.include
-                        && !e.eval(&rec).map(|r| r.pass_site).unwrap_or(true) { continue; }
-                    if let Some(e) = &self.exclude
-                        && e.eval(&rec).map(|r| r.pass_site).unwrap_or(false) { continue; }
+                && let Some(rec) = parse_vcf_line(&line)
+            {
+                if let Some(e) = &self.include
+                    && !e.eval(&rec).map(|r| r.pass_site).unwrap_or(true)
+                {
+                    continue;
                 }
+                if let Some(e) = &self.exclude
+                    && e.eval(&rec).map(|r| r.pass_site).unwrap_or(false)
+                {
+                    continue;
+                }
+            }
             let mut it = line.splitn(3, '\t');
             let chrom = it.next().unwrap_or("").to_string();
             let pos: u32 = it
@@ -121,7 +169,9 @@ impl Source {
                 .and_then(|p| p.parse().ok())
                 .ok_or_else(|| anyhow::anyhow!("isec: malformed POS in record {line:?}"))?;
             let rank = contigs.insert(&chrom) as usize;
-            let Some(rec) = Rec::from_line(line) else { continue };
+            let Some(rec) = Rec::from_line(line) else {
+                continue;
+            };
             self.next = Some((rank, pos, chrom, rec));
             return Ok(());
         }
@@ -134,7 +184,9 @@ pub fn cmd_isec(args: IsecArgs) -> Result<()> {
         for line in BufReader::new(File::open(fl)?).lines() {
             let l = line?;
             let t = l.trim();
-            if t.is_empty() || t.starts_with('#') { continue; }
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
             inputs.push(PathBuf::from(t));
         }
     }
@@ -152,7 +204,10 @@ pub fn cmd_isec(args: IsecArgs) -> Result<()> {
         write_files = Some(vec![0]);
     }
     let collapse = parse_collapse(args.collapse.as_deref())?;
-    let apply_filters: Option<Vec<String>> = args.apply_filters.as_deref().map(|s| s.split(',').map(|t| t.trim().to_string()).collect());
+    let apply_filters: Option<Vec<String>> = args
+        .apply_filters
+        .as_deref()
+        .map(|s| s.split(',').map(|t| t.trim().to_string()).collect());
     let region = if let Some(s) = &args.regions {
         Some(RegionFilter::from_cli(s)?)
     } else if let Some(p) = &args.regions_file {
@@ -168,7 +223,12 @@ pub fn cmd_isec(args: IsecArgs) -> Result<()> {
         None
     };
     let target_inverse = args.targets.as_deref().is_some_and(|s| s.starts_with('^'));
-    let kind = args.output_type.as_deref().map(parse_output_type).transpose()?.unwrap_or(OutputKind::Vcf);
+    let kind = args
+        .output_type
+        .as_deref()
+        .map(parse_output_type)
+        .transpose()?
+        .unwrap_or(OutputKind::Vcf);
 
     let mut contigs = ContigDict::new();
     let mut sources: Vec<Source> = Vec::with_capacity(n_files);
@@ -180,8 +240,18 @@ pub fn cmd_isec(args: IsecArgs) -> Result<()> {
                 contigs.insert_with_length(&id, len);
             }
         }
-        let include = args.include.as_deref().map(|e| FilterEngine::new(&headers, Some(e), false)).transpose().context("-i")?;
-        let exclude = args.exclude.as_deref().map(|e| FilterEngine::new(&headers, Some(e), false)).transpose().context("-e")?;
+        let include = args
+            .include
+            .as_deref()
+            .map(|e| FilterEngine::new(&headers, Some(e), false))
+            .transpose()
+            .context("-i")?;
+        let exclude = args
+            .exclude
+            .as_deref()
+            .map(|e| FilterEngine::new(&headers, Some(e), false))
+            .transpose()
+            .context("-e")?;
         let mut s = Source {
             reader: r,
             headers,
@@ -223,14 +293,21 @@ pub fn cmd_isec(args: IsecArgs) -> Result<()> {
                 continue;
             }
             let path = d.join(format!("{:04}.{ext}", i));
-            let what = if args.complement && i == 0 { "for records private to".to_string() } else { "for stripped".to_string() };
+            let what = if args.complement && i == 0 {
+                "for records private to".to_string()
+            } else {
+                "for stripped".to_string()
+            };
             writeln!(readme, "{}\t{}\t{}", path.display(), what, p.display())?;
             let mut w = VcfSink::open(Some(&path), kind, &sources[i].headers)?;
             w.write_header(&sources[i].headers)?;
             writers.push(Some(w));
         }
         readme.flush()?;
-        sites_out = Some(BufWriter::with_capacity(1 << 20, File::create(d.join("sites.txt"))?));
+        sites_out = Some(BufWriter::with_capacity(
+            1 << 20,
+            File::create(d.join("sites.txt"))?,
+        ));
     } else if let Some(w) = &write_files {
         // Without -p, -w selects one file whose records are printed.
         let i = *w.first().unwrap_or(&0);
@@ -240,11 +317,20 @@ pub fn cmd_isec(args: IsecArgs) -> Result<()> {
     } else {
         stdout_sites = Some(BufWriter::with_capacity(1 << 20, std::io::stdout()));
     }
-    let stdout_file = write_files.as_ref().and_then(|w| w.first().copied()).unwrap_or(0);
+    let stdout_file = write_files
+        .as_ref()
+        .and_then(|w| w.first().copied())
+        .unwrap_or(0);
 
     // k-way walk over the sorted inputs.
     loop {
-        let Some((rank, pos)) = sources.iter().filter_map(|s| s.next.as_ref().map(|n| (n.0, n.1))).min() else { break };
+        let Some((rank, pos)) = sources
+            .iter()
+            .filter_map(|s| s.next.as_ref().map(|n| (n.0, n.1)))
+            .min()
+        else {
+            break;
+        };
         // All records at this site from every file.
         let mut here: Vec<Vec<Rec>> = (0..n_files).map(|_| Vec::new()).collect();
         let mut chrom = String::new();
@@ -279,13 +365,18 @@ pub fn cmd_isec(args: IsecArgs) -> Result<()> {
                         w.write_line(&r.line)?;
                     }
                     if i == stdout_file
-                        && let Some(s) = stdout_sink.as_mut() {
-                            s.write_line(&r.line)?;
-                        }
+                        && let Some(s) = stdout_sink.as_mut()
+                    {
+                        s.write_line(&r.line)?;
+                    }
                 }
                 // Every record of a file is listed; a later file's record is
                 // skipped only when an earlier file already carried that site.
-                if !pass || emitted.iter().any(|(f, e)| *f != i && same_site(e, r, collapse)) {
+                if !pass
+                    || emitted
+                        .iter()
+                        .any(|(f, e)| *f != i && same_site(e, r, collapse))
+                {
                     continue;
                 }
                 emitted.push((i, r));
@@ -304,14 +395,25 @@ pub fn cmd_isec(args: IsecArgs) -> Result<()> {
     for w in writers.into_iter().flatten() {
         w.finish()?;
     }
-    if let Some(w) = sites_out.as_mut() { w.flush()?; }
-    if let Some(s) = stdout_sink { s.finish()?; }
-    if let Some(w) = stdout_sites.as_mut() { w.flush()?; }
+    if let Some(w) = sites_out.as_mut() {
+        w.flush()?;
+    }
+    if let Some(s) = stdout_sink {
+        s.finish()?;
+    }
+    if let Some(w) = stdout_sites.as_mut() {
+        w.flush()?;
+    }
     Ok(())
 }
 
 #[derive(Debug)]
-enum NSpec { Exact(usize), AtLeast(usize), AtMost(usize), Mask(Vec<Option<bool>>) }
+enum NSpec {
+    Exact(usize),
+    AtLeast(usize),
+    AtMost(usize),
+    Mask(Vec<Option<bool>>),
+}
 
 fn parse_nfiles(s: Option<&str>, n: usize, complement: bool) -> Result<NSpec> {
     if complement {
@@ -320,7 +422,9 @@ fn parse_nfiles(s: Option<&str>, n: usize, complement: bool) -> Result<NSpec> {
         m[0] = Some(true);
         return Ok(NSpec::Mask(m));
     }
-    let Some(s) = s else { return Ok(NSpec::AtLeast(1)); };
+    let Some(s) = s else {
+        return Ok(NSpec::AtLeast(1));
+    };
     if let Some(rest) = s.strip_prefix('=') {
         return Ok(NSpec::Exact(rest.parse().context("-n =N: parse N")?));
     }
@@ -331,8 +435,17 @@ fn parse_nfiles(s: Option<&str>, n: usize, complement: bool) -> Result<NSpec> {
         return Ok(NSpec::AtMost(rest.parse().context("-n -N: parse N")?));
     }
     if let Some(rest) = s.strip_prefix('~') {
-        let bits: Vec<Option<bool>> = rest.chars().map(|c| match c { '1' => Some(true), '0' => Some(false), _ => None }).collect();
-        if bits.len() != n { bail!("-n ~MASK: mask length {} != #files {}", bits.len(), n); }
+        let bits: Vec<Option<bool>> = rest
+            .chars()
+            .map(|c| match c {
+                '1' => Some(true),
+                '0' => Some(false),
+                _ => None,
+            })
+            .collect();
+        if bits.len() != n {
+            bail!("-n ~MASK: mask length {} != #files {}", bits.len(), n);
+        }
         return Ok(NSpec::Mask(bits));
     }
     Ok(NSpec::Exact(s.parse().context("-n N: parse N")?))
@@ -344,16 +457,23 @@ fn matches_nfiles(presence: &[bool], spec: &NSpec) -> bool {
         NSpec::Exact(k) => n_present == *k,
         NSpec::AtLeast(k) => n_present >= *k,
         NSpec::AtMost(k) => n_present <= *k,
-        NSpec::Mask(mask) => presence.iter().zip(mask.iter()).all(|(p, m)| m.is_none_or(|m| m == *p)),
+        NSpec::Mask(mask) => presence
+            .iter()
+            .zip(mask.iter())
+            .all(|(p, m)| m.is_none_or(|m| m == *p)),
     }
 }
 
 fn parse_write(s: Option<&str>, n: usize) -> Result<Option<Vec<usize>>> {
-    let Some(s) = s else { return Ok(None); };
+    let Some(s) = s else {
+        return Ok(None);
+    };
     let mut out = Vec::new();
     for tok in s.split(',') {
         let i: usize = tok.trim().parse().context("-w: parse index")?;
-        if i == 0 || i > n { bail!("-w: index {i} out of range 1..={n}"); }
+        if i == 0 || i > n {
+            bail!("-w: index {i} out of range 1..={n}");
+        }
         out.push(i - 1);
     }
     Ok(Some(out))

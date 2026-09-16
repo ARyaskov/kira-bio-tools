@@ -1,5 +1,5 @@
-use anyhow::Result;
 use crate::fx::FxHashMap;
+use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -53,14 +53,15 @@ pub fn process_vcf_line_multiallelic_simd(
     let mut samples = parsed.samples.clone();
     if expected_sample_count > 0
         && (samples.len() != expected_sample_count || samples.iter().any(|s| s.is_empty()))
-        && let Ok(line_str) = std::str::from_utf8(line) {
-            let cols: Vec<&str> = line_str.split('\t').collect();
-            if cols.len() > 9 {
-                samples = cols[9..].to_vec();
-            } else {
-                samples.clear();
-            }
+        && let Ok(line_str) = std::str::from_utf8(line)
+    {
+        let cols: Vec<&str> = line_str.split('\t').collect();
+        if cols.len() > 9 {
+            samples = cols[9..].to_vec();
+        } else {
+            samples.clear();
         }
+    }
 
     let format_ofs = if samples.is_empty() {
         ANI_STR_NONE
@@ -158,10 +159,8 @@ fn split_format_samples_for_allele(
     if keys.is_empty() || format_meta.is_empty() {
         return samples.iter().map(|s| (*s).to_string()).collect();
     }
-    let numbers: Vec<Option<FieldNumber>> = keys
-        .iter()
-        .map(|k| format_meta.get(*k).copied())
-        .collect();
+    let numbers: Vec<Option<FieldNumber>> =
+        keys.iter().map(|k| format_meta.get(*k).copied()).collect();
     if !numbers
         .iter()
         .any(|n| matches!(n, Some(FieldNumber::A | FieldNumber::R | FieldNumber::G)))
@@ -176,10 +175,7 @@ fn split_format_samples_for_allele(
             for (idx, number) in numbers.iter().enumerate() {
                 let raw = vals.get(idx).copied().unwrap_or(".");
                 out.push(split_format_value_for_allele(
-                    raw,
-                    *number,
-                    alt_idx,
-                    alt_count,
+                    raw, *number, alt_idx, alt_count,
                 ));
             }
             out.join(":")
@@ -200,11 +196,7 @@ fn split_format_value_for_allele(
         return raw.to_string();
     };
     match number {
-        FieldNumber::A => raw
-            .split(',')
-            .nth(alt_idx)
-            .unwrap_or(".")
-            .to_string(),
+        FieldNumber::A => raw.split(',').nth(alt_idx).unwrap_or(".").to_string(),
         FieldNumber::R => {
             let values: Vec<&str> = raw.split(',').collect();
             let ref_val = values.first().copied().unwrap_or(".");

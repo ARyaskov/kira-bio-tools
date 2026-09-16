@@ -159,20 +159,30 @@ impl KbiIndex {
         let slots_start = header.off_slots as usize;
         let slots_end = slots_start + n_slots * mem::size_of::<u32>();
         let names_start = header.off_names as usize;
-        if keys_end > mmap.len() || offsets_end > mmap.len() || slots_end > mmap.len() || names_start + 4 > mmap.len() {
+        if keys_end > mmap.len()
+            || offsets_end > mmap.len()
+            || slots_end > mmap.len()
+            || names_start + 4 > mmap.len()
+        {
             return Err(KbiError::InvalidFormat("Section out of range".into()));
         }
         // Sections are not necessarily 8-aligned inside the file: decode by value.
         let keys: Vec<u64> = mmap[keys_start..keys_end]
-            .as_chunks::<8>().0.iter()
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|c| u64::from_le_bytes(*c))
             .collect();
         let offsets: Vec<u64> = mmap[offsets_start..offsets_end]
-            .as_chunks::<8>().0.iter()
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|c| u64::from_le_bytes(*c))
             .collect();
         let slot_to_idx: Vec<u32> = mmap[slots_start..slots_end]
-            .as_chunks::<4>().0.iter()
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| u32::from_le_bytes(*c))
             .collect();
 
@@ -195,7 +205,13 @@ impl KbiIndex {
             p += len;
         }
 
-        Ok(Self { index, keys, offsets, slot_to_idx, contigs })
+        Ok(Self {
+            index,
+            keys,
+            offsets,
+            slot_to_idx,
+            contigs,
+        })
     }
 
     pub fn memory_usage(&self) -> usize {
@@ -217,7 +233,13 @@ impl KbiIndex {
         slot_to_idx: Vec<u32>,
         contigs: ContigDict,
     ) -> Self {
-        Self { index, keys, offsets, slot_to_idx, contigs }
+        Self {
+            index,
+            keys,
+            offsets,
+            slot_to_idx,
+            contigs,
+        }
     }
 
     pub fn stats(&self, file_size: u64) -> KbiStats {

@@ -105,7 +105,11 @@ pub struct MpileupArgs {
     /// Confirm indel candidates by pair-HMM realignment of the covering reads:
     /// `off`, `ins` (insertions) or `all`. A kira extension, off by default.
     /// `KIRA_INDEL_REALIGN` sets it when the flag is absent.
-    #[arg(long = "indel-realign", env = "KIRA_INDEL_REALIGN", default_value = "off")]
+    #[arg(
+        long = "indel-realign",
+        env = "KIRA_INDEL_REALIGN",
+        default_value = "off"
+    )]
     pub indel_realign: String,
 
     /// Recover indels the aligner hid as mismatches by local assembly in active
@@ -236,7 +240,10 @@ pub struct MpileupArgs {
     #[arg(long = "threads", default_value_t = 0)]
     pub threads: usize,
 
-    #[arg(long = "stream", help = "Streaming mode: spawn reader thread per BAM (no full Vec<Record> in RAM)")]
+    #[arg(
+        long = "stream",
+        help = "Streaming mode: spawn reader thread per BAM (no full Vec<Record> in RAM)"
+    )]
     pub stream: bool,
 
     #[arg(long = "verbosity", default_value_t = 1)]

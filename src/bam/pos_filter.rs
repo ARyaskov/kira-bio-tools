@@ -28,7 +28,9 @@ impl InterestingMap {
 
     #[inline]
     pub fn contains(&self, ref_id: usize, pos: u32) -> bool {
-        self.per_ref.get(&ref_id).is_some_and(|v| v.binary_search(&pos).is_ok())
+        self.per_ref
+            .get(&ref_id)
+            .is_some_and(|v| v.binary_search(&pos).is_ok())
     }
 
     /// Union with another map (positions from all samples are interesting).
@@ -73,7 +75,9 @@ pub fn pre_scan(
 
     if total_reads == 0 {
         return PreScan {
-            pos_filter: InterestingMap { per_ref: FxHashMap::default() },
+            pos_filter: InterestingMap {
+                per_ref: FxHashMap::default(),
+            },
             needs_baq: Vec::new(),
             skipped_baq: 0,
         };
@@ -82,10 +86,16 @@ pub fn pre_scan(
     let no_pb = std::env::var("KIRA_BT_NO_PROGRESS").is_ok();
     let pb = ProgressBar::new(total_reads as u64);
     pb.set_style(
-        ProgressStyle::with_template("[SCAN] {bar:40.green/blue} {pos}/{len} reads ({per_sec}, ETA {eta})")
-            .unwrap_or_else(|_| ProgressStyle::default_bar()),
+        ProgressStyle::with_template(
+            "[SCAN] {bar:40.green/blue} {pos}/{len} reads ({per_sec}, ETA {eta})",
+        )
+        .unwrap_or_else(|_| ProgressStyle::default_bar()),
     );
-    pb.set_draw_target(if no_pb { ProgressDrawTarget::hidden() } else { ProgressDrawTarget::stderr_with_hz(2) });
+    pb.set_draw_target(if no_pb {
+        ProgressDrawTarget::hidden()
+    } else {
+        ProgressDrawTarget::stderr_with_hz(2)
+    });
     let counter = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let ticker = {
@@ -132,7 +142,10 @@ pub fn pre_scan(
                 needs_baq_range.push((gbase + k, nb));
             }
             counter.fetch_add((hi - lo) as u64, Ordering::Relaxed);
-            Partial { positions, needs_baq_range }
+            Partial {
+                positions,
+                needs_baq_range,
+            }
         })
         .collect();
 
@@ -164,7 +177,9 @@ pub fn pre_scan(
         while i < v.len() {
             let p = v[i];
             let mut j = i + 1;
-            while j < v.len() && v[j] == p { j += 1; }
+            while j < v.len() && v[j] == p {
+                j += 1;
+            }
             if (j - i) as u32 >= min_alt_reads {
                 filtered.push(p);
             }
@@ -175,7 +190,9 @@ pub fn pre_scan(
 
     let skipped_baq = needs_baq.iter().filter(|&&b| !b).count();
     PreScan {
-        pos_filter: InterestingMap { per_ref: all_positions },
+        pos_filter: InterestingMap {
+            per_ref: all_positions,
+        },
         needs_baq,
         skipped_baq,
     }
@@ -190,19 +207,29 @@ fn scan_read(
     ref_names: &[String],
     out: &mut FxHashMap<usize, Vec<u32>>,
 ) -> bool {
-    let Some(chr) = ref_names.get(lr.ref_id) else { return false };
+    let Some(chr) = ref_names.get(lr.ref_id) else {
+        return false;
+    };
     let mut span: u32 = 0;
     let mut has_indel = false;
     for &(k, l) in &lr.cigar_pairs {
         match k {
-            Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch | Kind::Deletion | Kind::Skip => {
+            Kind::Match
+            | Kind::SequenceMatch
+            | Kind::SequenceMismatch
+            | Kind::Deletion
+            | Kind::Skip => {
                 span += l;
             }
             _ => {}
         }
-        if matches!(k, Kind::Insertion | Kind::Deletion) { has_indel = true; }
+        if matches!(k, Kind::Insertion | Kind::Deletion) {
+            has_indel = true;
+        }
     }
-    if span == 0 { return has_indel; }
+    if span == 0 {
+        return has_indel;
+    }
     let Some(ref_slice) = fasta.slice(chr, lr.ref_start + 1, span as usize) else {
         return has_indel;
     };
@@ -216,8 +243,17 @@ fn scan_read(
         match kind {
             Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch => {
                 for i in 0..l {
-                    let qb = lr.seq().get(q_off + i).copied().unwrap_or(b'N').to_ascii_uppercase();
-                    let rb = ref_slice.get(r_off + i).copied().unwrap_or(b'N').to_ascii_uppercase();
+                    let qb = lr
+                        .seq()
+                        .get(q_off + i)
+                        .copied()
+                        .unwrap_or(b'N')
+                        .to_ascii_uppercase();
+                    let rb = ref_slice
+                        .get(r_off + i)
+                        .copied()
+                        .unwrap_or(b'N')
+                        .to_ascii_uppercase();
                     if rb != b'N' && qb != b'N' && qb != rb {
                         entry.push(lr.ref_start + (r_off + i) as u32);
                         has_mismatch = true;
@@ -315,7 +351,16 @@ fn for_each_aligned(lr: &LiveRead, mut f: impl FnMut(usize, usize)) {
 fn read_ref_span(lr: &LiveRead) -> u32 {
     lr.cigar_pairs
         .iter()
-        .filter(|(k, _)| matches!(k, Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch | Kind::Deletion | Kind::Skip))
+        .filter(|(k, _)| {
+            matches!(
+                k,
+                Kind::Match
+                    | Kind::SequenceMatch
+                    | Kind::SequenceMismatch
+                    | Kind::Deletion
+                    | Kind::Skip
+            )
+        })
         .map(|(_, l)| *l)
         .sum()
 }
@@ -323,7 +368,10 @@ fn read_ref_span(lr: &LiveRead) -> u32 {
 impl RecalTable {
     fn new() -> Self {
         let cells = RECAL_Q * RECAL_CTX * 2 * RECAL_CYCLES;
-        Self { n: vec![0; cells], mism: vec![0; cells] }
+        Self {
+            n: vec![0; cells],
+            mism: vec![0; cells],
+        }
     }
 
     fn merge(&mut self, other: &RecalTable) {
@@ -351,12 +399,16 @@ impl RecalTable {
             .map(|reads| {
                 let mut t = RecalTable::new();
                 for lr in reads.iter() {
-                    let Some(chr) = ref_names.get(lr.ref_id) else { continue };
+                    let Some(chr) = ref_names.get(lr.ref_id) else {
+                        continue;
+                    };
                     let span = read_ref_span(lr);
                     if span == 0 {
                         continue;
                     }
-                    let Some(rs) = fasta.slice(chr, lr.ref_start + 1, span as usize) else { continue };
+                    let Some(rs) = fasta.slice(chr, lr.ref_start + 1, span as usize) else {
+                        continue;
+                    };
                     let (seq, qual) = (lr.seq(), lr.qual());
                     let len = seq.len().max(1);
                     let rev = lr.is_reverse();
@@ -408,15 +460,24 @@ impl RecalTable {
     }
 
     /// Replace reported qualities by the empirical ones in place.
-    pub fn apply(&self, reads: &mut [LiveRead], fasta: &(impl FastaLike + Sync), ref_names: &[String]) {
+    pub fn apply(
+        &self,
+        reads: &mut [LiveRead],
+        fasta: &(impl FastaLike + Sync),
+        ref_names: &[String],
+    ) {
         reads.par_chunks_mut(4096).for_each(|chunk| {
             for lr in chunk.iter_mut() {
-                let Some(chr) = ref_names.get(lr.ref_id) else { continue };
+                let Some(chr) = ref_names.get(lr.ref_id) else {
+                    continue;
+                };
                 let span = read_ref_span(lr);
                 if span == 0 {
                     continue;
                 }
-                let Some(rs) = fasta.slice(chr, lr.ref_start + 1, span as usize) else { continue };
+                let Some(rs) = fasta.slice(chr, lr.ref_start + 1, span as usize) else {
+                    continue;
+                };
                 let rev = lr.is_reverse();
                 let mut updates: Vec<(usize, u8)> = Vec::new();
                 {
@@ -429,7 +490,9 @@ impl RecalTable {
                         }
                         let Some(ctx) = tri_ctx(rs, ri) else { return };
                         let cycle = if rev { len - 1 - qi } else { qi } * RECAL_CYCLES / len;
-                        if let Some(nq) = self.empirical(qual[qi], ctx, rev, cycle.min(RECAL_CYCLES - 1)) {
+                        if let Some(nq) =
+                            self.empirical(qual[qi], ctx, rev, cycle.min(RECAL_CYCLES - 1))
+                        {
                             updates.push((qi, nq));
                         }
                     });

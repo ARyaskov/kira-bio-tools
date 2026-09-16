@@ -409,7 +409,15 @@ impl AniIndex {
         need_format: bool,
     ) -> Option<AnnotationBundle> {
         self.lookup_exact_by_chr_id_pos_index_opts_filtered(
-            chr_id, pos, rf, rf_hash, alt, field_meta, need_info, need_format, None,
+            chr_id,
+            pos,
+            rf,
+            rf_hash,
+            alt,
+            field_meta,
+            need_info,
+            need_format,
+            None,
         )
     }
 
@@ -449,7 +457,10 @@ impl AniIndex {
                 let alt_str = self.read_cstring(e.alt_ofs as usize);
                 // An unsplit multi-allelic entry (tab sources) matches when
                 // it carries the allele; the A/R merge then maps by allele.
-                if alt != "." && alt_str.as_ref() != alt && !alt_str.as_ref().split(',').any(|a| a == alt) {
+                if alt != "."
+                    && alt_str.as_ref() != alt
+                    && !alt_str.as_ref().split(',').any(|a| a == alt)
+                {
                     continue;
                 }
                 return Some(self.build_bundle_from_entry_idx_opts_with_meta_filtered(
@@ -473,16 +484,11 @@ impl AniIndex {
                     continue;
                 }
                 let rf_str = self.read_cstring(e.ref_ofs as usize);
-                let Some(diff) = vcmp::diff_refs(rf.as_bytes(), rf_str.as_ref().as_bytes())
-                else {
+                let Some(diff) = vcmp::diff_refs(rf.as_bytes(), rf_str.as_ref().as_bytes()) else {
                     continue;
                 };
                 let alt_str = self.read_cstring(e.alt_ofs as usize);
-                if !vcmp::matches_allele(
-                    alt.as_bytes(),
-                    alt_str.as_ref().as_bytes(),
-                    &diff,
-                ) {
+                if !vcmp::matches_allele(alt.as_bytes(), alt_str.as_ref().as_bytes(), &diff) {
                     continue;
                 }
                 if std::env::var("KIRA_BT_DEBUG").is_ok() {

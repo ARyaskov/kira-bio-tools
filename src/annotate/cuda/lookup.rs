@@ -12,12 +12,12 @@ use crate::annotate::constants::{BATCH_SIZE, CHANNEL_DEPTH};
 use crate::annotate::cpu_v2::annotation::{annotate_line, annotate_record_with_bundles_and_info};
 use crate::annotate::cpu_v2::field_metadata::{iter_ani_header_lines, load_and_infer_metadata};
 use crate::annotate::cpu_v2::{
-    ColumnSpec, annotate_record_with_bundles, build_sample_map, expand_column_specs,
-    extract_samples_from_headers, merge_annotation_headers,
+    AnnotatedBatch, ParsedVcfRecord, ReadBatch, parse_vcf_record_simd, patch_samples_from_line,
+    writer_thread, writer_thread_annotated,
 };
 use crate::annotate::cpu_v2::{
-    AnnotatedBatch, ParsedVcfRecord, ReadBatch, parse_vcf_record_simd,
-    patch_samples_from_line, writer_thread, writer_thread_annotated,
+    ColumnSpec, annotate_record_with_bundles, build_sample_map, expand_column_specs,
+    extract_samples_from_headers, merge_annotation_headers,
 };
 use crate::annotate::reader::{StreamingVcfReader, VcfAnnotationReader};
 use crate::annotate::structs::ani::{AniIndex, AniPosBlock, AniPosContig};
@@ -269,7 +269,11 @@ impl GpuAni {
                 eprintln!(
                     "[gpu] init: pinned host pages for DMA (values: {}, str_data: {})",
                     if pinned_values.is_some() { "yes" } else { "no" },
-                    if pinned_str_data.is_some() { "yes" } else { "no" }
+                    if pinned_str_data.is_some() {
+                        "yes"
+                    } else {
+                        "no"
+                    }
                 );
             }
 
@@ -350,9 +354,7 @@ impl GpuAni {
             match self.lookup_batch_gpu(keys) {
                 Ok(v) => return Ok(v),
                 Err(e) => {
-                    eprintln!(
-                        "[gpu] kernel launch failed ({e}); falling back to CPU SIMD batch"
-                    );
+                    eprintln!("[gpu] kernel launch failed ({e}); falling back to CPU SIMD batch");
                 }
             }
         }
@@ -387,8 +389,7 @@ impl GpuAni {
         let mut d_out: DeviceBuffer<u32> = unsafe { DeviceBuffer::uninitialized(n)? };
         let func = self.module.get_function("ani_ptrhash25_lookup_kernel")?;
         let threads_per_block: u32 = 256;
-        let blocks: u32 =
-            ((n as u32) + threads_per_block - 1) / threads_per_block;
+        let blocks: u32 = ((n as u32) + threads_per_block - 1) / threads_per_block;
         let stream = &self.stream;
         let pilots_ptr = state.pilots.as_device_ptr();
         let bloom_ptr = state
@@ -1455,13 +1456,10 @@ fn worker_loop_gpu(
     };
     // CPU-annotate fallback needed only when FORMAT must merge AND
     // sample_map has gaps. For INFO-only annotation we stay on GPU.
-    let use_cpu_annotate =
-        need_format && sample_map.iter().any(|v| v.is_none());
+    let use_cpu_annotate = need_format && sample_map.iter().any(|v| v.is_none());
     if timing {
         if use_cpu_annotate {
-            eprintln!(
-                "[gpu] cpu-annotate: enabled (need_format + sample_map gaps)"
-            );
+            eprintln!("[gpu] cpu-annotate: enabled (need_format + sample_map gaps)");
         } else if need_format && !sample_map.iter().any(|v| v.is_none()) {
             eprintln!("[gpu] cpu-annotate: not needed (format + samples align)");
         } else {
@@ -1519,8 +1517,12 @@ fn worker_loop_gpu(
 
         let batch_start = Instant::now();
         let parse_start = Instant::now();
-        let mins: Vec<Option<MinParsed>> =
-            pool.install(|| lines.par_iter().map(|line| fast_parse_min(line, ani)).collect());
+        let mins: Vec<Option<MinParsed>> = pool.install(|| {
+            lines
+                .par_iter()
+                .map(|line| fast_parse_min(line, ani))
+                .collect()
+        });
         parse_total += parse_start.elapsed().as_secs_f64();
 
         // `KIRA_BT_GPU_FORCE_MPH=1` skips pos-index, forcing the MPH kernel.
@@ -1735,7 +1737,8 @@ fn worker_loop_gpu(
                 // immediately rather than after 2s of silence. Also print
                 // batch wall-clock so multi-second per-batch processing
                 // is visible.
-                let force_first = total_lines > 0 && parse_total + lookup_total + bundle_total + annotate_total > 0.0
+                let force_first = total_lines > 0
+                    && parse_total + lookup_total + bundle_total + annotate_total > 0.0
                     && last_report.elapsed().as_secs_f64() >= 2.0;
                 if force_first {
                     eprintln!(
@@ -1755,11 +1758,7 @@ fn worker_loop_gpu(
                 if total_lines == batch_len {
                     eprintln!(
                         "[gpu] first batch processed: {} lines, parse: {:.3}s, lookup: {:.3}s, bundle: {:.3}s, annotate: {:.3}s",
-                        batch_len,
-                        parse_total,
-                        lookup_total,
-                        bundle_total,
-                        annotate_total,
+                        batch_len, parse_total, lookup_total, bundle_total, annotate_total,
                     );
                 }
             }
@@ -1799,8 +1798,7 @@ fn worker_loop_gpu(
                 }
             }
             if start < alt_end {
-                let key =
-                    make_variant_key(min.chr_id, min.pos, ref_bytes, &bytes[start..alt_end]);
+                let key = make_variant_key(min.chr_id, min.pos, ref_bytes, &bytes[start..alt_end]);
                 keys.push(key);
                 key_line_idx.push(line_idx);
                 key_alt_idx.push(alt_idx);
@@ -2350,8 +2348,7 @@ fn worker_loop_gpu_multi(
                 || k.eq_ignore_ascii_case("FMT")
                 || k.eq_ignore_ascii_case("FORMAT"))
         });
-    let use_cpu_annotate =
-        need_format && sample_maps.iter().any(|m| m.iter().any(|v| v.is_none()));
+    let use_cpu_annotate = need_format && sample_maps.iter().any(|m| m.iter().any(|v| v.is_none()));
     if timing && use_cpu_annotate {
         eprintln!("[gpu] cpu-annotate: enabled (multi-job, need_format + gaps)");
     } else if timing {
@@ -2584,12 +2581,8 @@ fn worker_loop_gpu_multi(
                     }
                 }
                 if start < alt_end {
-                    let key = make_variant_key(
-                        min.chr_id,
-                        min.pos,
-                        ref_bytes,
-                        &bytes[start..alt_end],
-                    );
+                    let key =
+                        make_variant_key(min.chr_id, min.pos, ref_bytes, &bytes[start..alt_end]);
                     keys.push(key);
                     key_batch_idx.push(batch_idx);
                     key_line_idx.push(line_idx);
@@ -2907,8 +2900,7 @@ fn build_entry_keys(ani: &AniIndex) -> Vec<u64> {
             let ref_str = ani.read_cstring(entry.ref_ofs as usize);
             let alt_str = ani.read_cstring(entry.alt_ofs as usize);
             let key = make_key(entry.chr_id, entry.pos, ref_str.as_ref(), alt_str.as_ref());
-            let prev = progress
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let prev = progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if (prev + 1) % report_every == 0 {
                 eprintln!(
                     "[gpu] init: entry_keys progress {}/{} ({:.0}%)",

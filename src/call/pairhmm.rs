@@ -7,7 +7,11 @@ use crate::align::{GlocalParams, encode_nt, glocal_loglik};
 
 fn params(read_len: usize, hap_len: usize) -> GlocalParams {
     // Band wide enough for the read to sit anywhere in the haplotype.
-    GlocalParams { d: 0.001, e: 0.1, bw: hap_len.abs_diff(read_len) + 10 }
+    GlocalParams {
+        d: 0.001,
+        e: 0.1,
+        bw: hap_len.abs_diff(read_len) + 10,
+    }
 }
 
 /// log P(read | haplotype). `quals` are phred base qualities (30 when short).
@@ -17,7 +21,9 @@ pub fn read_vs_hap_loglik(read: &[u8], quals: &[u8], hap: &[u8]) -> f64 {
     }
     let r: Vec<u8> = hap.iter().map(|&b| encode_nt(b)).collect();
     let q: Vec<u8> = read.iter().map(|&b| encode_nt(b)).collect();
-    let iq: Vec<u8> = (0..read.len()).map(|i| quals.get(i).copied().unwrap_or(30).max(1)).collect();
+    let iq: Vec<u8> = (0..read.len())
+        .map(|i| quals.get(i).copied().unwrap_or(30).max(1))
+        .collect();
     glocal_loglik(&r, &q, Some(&iq), &params(read.len(), hap.len()))
 }
 

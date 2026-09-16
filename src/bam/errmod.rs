@@ -73,7 +73,10 @@ fn cal_coef(depcorr: f64, eps: f64) -> Coef {
             let mut k = n as i64 - 1;
             while k >= 0 {
                 let ku = k as usize;
-                let sum = sum1 + (lc[n << 8 | ku] + ku as f64 * le + (n - ku) as f64 * le1 - sum1).exp().ln_1p();
+                let sum = sum1
+                    + (lc[n << 8 | ku] + ku as f64 * le + (n - ku) as f64 * le1 - sum1)
+                        .exp()
+                        .ln_1p();
                 beta[base + ku] = -10.0 / std::f64::consts::LN_10 * (sum1 - sum);
                 sum1 = sum;
                 k -= 1;
@@ -143,7 +146,9 @@ impl Default for ErrorModel {
 
 impl ErrorModel {
     pub fn new() -> Self {
-        Self { coef: COEF.get_or_init(|| cal_coef(DEPCORR, EPS)) }
+        Self {
+            coef: COEF.get_or_init(|| cal_coef(DEPCORR, EPS)),
+        }
     }
 
     /// `errmod_cal`: phred-scaled genotype likelihoods `q[i * m + j]` over
@@ -207,7 +212,11 @@ impl ErrorModel {
                     tmp2 += c[i];
                 }
                 let lhet = coef.lhet[cjk.min(255) << 8 | (c[k] as usize).min(255)];
-                let v = if tmp2 > 0 { -4.343 * lhet + tmp1 } else { -4.343 * lhet };
+                let v = if tmp2 > 0 {
+                    -4.343 * lhet + tmp1
+                } else {
+                    -4.343 * lhet
+                };
                 q[j * m + k] = v as f32;
                 q[k * m + j] = v as f32;
             }
@@ -236,7 +245,9 @@ impl ErrorModel {
             }
         }
         let min = raw.iter().copied().fold(f32::INFINITY, f32::min);
-        raw.iter().map(|&x| ((x - min + 0.499) as i64).clamp(0, 255) as u32).collect()
+        raw.iter()
+            .map(|&x| ((x - min + 0.499) as i64).clamp(0, 255) as u32)
+            .collect()
     }
 }
 

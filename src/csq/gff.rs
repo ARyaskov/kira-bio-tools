@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::Path;
 
-use anyhow::{Result, bail};
 use crate::fx::FxHashMap;
+use anyhow::{Result, bail};
 
 pub const STRAND_REV: u8 = 0;
 pub const STRAND_FWD: u8 = 1;
@@ -433,10 +433,7 @@ pub fn parse_biotype(s: Option<&[u8]>) -> i32 {
                 0
             }
         }
-        b'b'
-            if eq("bidirectional_promoter_lncRNA") => {
-                GF_BIDIRECTIONAL_PROMOTER_LNCRNA
-            }
+        b'b' if eq("bidirectional_promoter_lncRNA") => GF_BIDIRECTIONAL_PROMOTER_LNCRNA,
         _ => 0,
     };
     t as i32

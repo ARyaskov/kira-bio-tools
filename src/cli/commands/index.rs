@@ -27,10 +27,17 @@ pub fn cmd_index(args: IndexArgs) -> Result<()> {
         return print_num(&args.input);
     }
 
-    let kind = if cfg.tbi { IndexKind::Tbi } else { IndexKind::Csi };
+    let kind = if cfg.tbi {
+        IndexKind::Tbi
+    } else {
+        IndexKind::Csi
+    };
     let out = resolve_index_output(&args.input, &cfg, kind);
     if out.exists() && !cfg.force {
-        bail!("index file already exists (use -f to overwrite): {}", out.display());
+        bail!(
+            "index file already exists (use -f to overwrite): {}",
+            out.display()
+        );
     }
     if !(1..=30).contains(&cfg.min_shift) {
         bail!("--min-shift must be between 1 and 30");
@@ -62,12 +69,18 @@ fn apply_passthrough(cfg: &mut IndexCompatCfg, args: &[String]) -> Result<()> {
             "-a" | "--all" => cfg.all = true,
             "-m" | "--min-shift" => {
                 i += 1;
-                let v = args.get(i).ok_or_else(|| anyhow::anyhow!("missing value for -m/--min-shift"))?;
-                cfg.min_shift = v.parse().with_context(|| format!("bad --min-shift {v:?}"))?;
+                let v = args
+                    .get(i)
+                    .ok_or_else(|| anyhow::anyhow!("missing value for -m/--min-shift"))?;
+                cfg.min_shift = v
+                    .parse()
+                    .with_context(|| format!("bad --min-shift {v:?}"))?;
             }
             "-o" | "--output" => {
                 i += 1;
-                let p = args.get(i).ok_or_else(|| anyhow::anyhow!("missing value for -o/--output"))?;
+                let p = args
+                    .get(i)
+                    .ok_or_else(|| anyhow::anyhow!("missing value for -o/--output"))?;
                 cfg.output = Some(PathBuf::from(p));
             }
             "--threads" => {
@@ -75,7 +88,9 @@ fn apply_passthrough(cfg: &mut IndexCompatCfg, args: &[String]) -> Result<()> {
             }
             other => {
                 if let Some(v) = other.strip_prefix("-m") {
-                    cfg.min_shift = v.parse().with_context(|| format!("bad --min-shift {v:?}"))?;
+                    cfg.min_shift = v
+                        .parse()
+                        .with_context(|| format!("bad --min-shift {v:?}"))?;
                 } else {
                     bail!("index: unknown option {other:?}");
                 }
@@ -112,7 +127,8 @@ fn strip_index_suffix(path: &Path) -> Option<PathBuf> {
 /// or the index itself. Builds the index in memory when none is on disk.
 fn load_data_and_index(input: &Path) -> Result<(PathBuf, BinIndex)> {
     if let Some(base) = strip_index_suffix(input) {
-        let idx = BinIndex::load(input).with_context(|| format!("read index {}", input.display()))?;
+        let idx =
+            BinIndex::load(input).with_context(|| format!("read index {}", input.display()))?;
         return Ok((base, idx));
     }
     if let Some(p) = find_index_for(input) {
@@ -143,7 +159,9 @@ fn contig_table(data: &Path, idx: &BinIndex) -> Result<Vec<(String, Option<u64>)
     Ok(names
         .into_iter()
         .map(|n| {
-            let len = info.as_ref().and_then(|i| i.contigs.id(&n).and_then(|id| i.contigs.length(id)));
+            let len = info
+                .as_ref()
+                .and_then(|i| i.contigs.id(&n).and_then(|id| i.contigs.length(id)));
             (n, len)
         })
         .collect())

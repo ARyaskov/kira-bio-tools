@@ -24,9 +24,10 @@ pub fn merge_default_values(
     }
 
     if let Some(val) = vcf_value
-        && (!is_missing_value(val) || mode.carry_over_missing) {
-            return val.to_string();
-        }
+        && (!is_missing_value(val) || mode.carry_over_missing)
+    {
+        return val.to_string();
+    }
 
     db_val.to_string()
 }

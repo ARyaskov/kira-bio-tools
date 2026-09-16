@@ -8,14 +8,21 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::cli::args::ConsensusArgs;
-use crate::consensus::{Consensus, Mark, Mask, MaskWith, Opts, PICK_ALT, PICK_IUPAC, PICK_LONG, PICK_REF, PICK_SHORT, Rec};
+use crate::consensus::{
+    Consensus, Mark, Mask, MaskWith, Opts, PICK_ALT, PICK_IUPAC, PICK_LONG, PICK_REF, PICK_SHORT,
+    Rec,
+};
 use crate::filter::FilterEngine;
 use crate::regions::RegionSet;
 use crate::vcf::{HeaderInfo, UnifiedVcfReader, parse_vcf_line};
 
 pub fn cmd_consensus(args: ConsensusArgs) -> Result<()> {
-    let Some(ref_path) = args.fasta_ref.as_ref() else { bail!("missing -f <ref.fa>") };
-    let Some(input) = args.input.as_ref() else { bail!("missing input VCF/BCF for consensus") };
+    let Some(ref_path) = args.fasta_ref.as_ref() else {
+        bail!("missing -f <ref.fa>")
+    };
+    let Some(input) = args.input.as_ref() else {
+        bail!("missing input VCF/BCF for consensus")
+    };
 
     let (haplotype, allele) = parse_haplotype(args.haplotype.as_deref())?;
     let mut masks = Vec::new();
@@ -35,37 +42,64 @@ pub fn cmd_consensus(args: ConsensusArgs) -> Result<()> {
     };
 
     // Records per chromosome, filtered like next_vcf_line().
-    let mut reader = UnifiedVcfReader::open(input).with_context(|| format!("open {}", input.display()))?;
+    let mut reader =
+        UnifiedVcfReader::open(input).with_context(|| format!("open {}", input.display()))?;
     let headers: Vec<String> = reader.header()?.to_vec();
     let hdr = HeaderInfo::parse(&headers);
     let (filter, exclude) = match (&args.include, &args.exclude) {
-        (Some(_), Some(_)) => bail!("Error: only one -i or -e expression can be given, and they cannot be combined"),
+        (Some(_), Some(_)) => {
+            bail!("Error: only one -i or -e expression can be given, and they cannot be combined")
+        }
         (Some(i), None) => (Some(i.as_str()), false),
         (None, Some(e)) => (Some(e.as_str()), true),
         (None, None) => (None, false),
     };
-    let engine = filter.map(|f| FilterEngine::new(&headers, Some(f), exclude)).transpose()?;
+    let engine = filter
+        .map(|f| FilterEngine::new(&headers, Some(f), exclude))
+        .transpose()?;
     let regions = RegionSet::from_args(args.regions.as_deref(), args.regions_file.as_deref())?;
 
-    let (isample, iupac_gts) = resolve_samples(&hdr.samples, args.samples.as_deref(), args.samples_file.as_deref(), haplotype != 0 || allele != 0)?;
+    let (isample, iupac_gts) = resolve_samples(
+        &hdr.samples,
+        args.samples.as_deref(),
+        args.samples_file.as_deref(),
+        haplotype != 0 || allele != 0,
+    )?;
 
     let mut vcf: HashMap<String, Vec<Rec>> = HashMap::new();
     while let Some(line) = reader.read_line()? {
         if line.is_empty() || line.as_bytes()[0] == b'#' {
             continue;
         }
-        let Some(rec) = parse_vcf_line(&line) else { bail!("cannot parse VCF line: {line}") };
+        let Some(rec) = parse_vcf_line(&line) else {
+            bail!("cannot parse VCF line: {line}")
+        };
         if let Some(rf) = &regions
-            && !rf.record_passes(&rec.chrom, rec.pos, &rec.ref_allele, &rec.alt, args.regions_overlap) {
-                continue;
-            }
+            && !rf.record_passes(
+                &rec.chrom,
+                rec.pos,
+                &rec.ref_allele,
+                &rec.alt,
+                args.regions_overlap,
+            )
+        {
+            continue;
+        }
         if let Some(e) = &engine
-            && !e.eval(&rec)?.pass_site {
-                continue;
-            }
-        vcf.entry(rec.chrom.clone()).or_default().push(Rec::from_record(&rec));
+            && !e.eval(&rec)?.pass_site
+        {
+            continue;
+        }
+        vcf.entry(rec.chrom.clone())
+            .or_default()
+            .push(Rec::from_record(&rec));
     }
-    let contigs: HashMap<String, ()> = hdr.contigs.names().iter().map(|n| (n.clone(), ())).collect();
+    let contigs: HashMap<String, ()> = hdr
+        .contigs
+        .names()
+        .iter()
+        .map(|n| (n.clone(), ()))
+        .collect();
 
     let opts = Opts {
         output_iupac: args.iupac_codes,
@@ -76,18 +110,33 @@ pub fn cmd_consensus(args: ConsensusArgs) -> Result<()> {
         missing_allele: one_char(args.missing.as_ref(), "M")?,
         absent_allele: one_char(args.absent.as_ref(), "a")?,
         mark_del: args.mark_del.as_deref().and_then(|s| s.bytes().next()),
-        mark_ins: args.mark_ins.as_deref().map(|s| Mark::parse(s, "mark-ins")).transpose()?.unwrap_or(Mark::None),
-        mark_snv: args.mark_snv.as_deref().map(|s| Mark::parse(s, "mark-snv")).transpose()?.unwrap_or(Mark::None),
+        mark_ins: args
+            .mark_ins
+            .as_deref()
+            .map(|s| Mark::parse(s, "mark-ins"))
+            .transpose()?
+            .unwrap_or(Mark::None),
+        mark_snv: args
+            .mark_snv
+            .as_deref()
+            .map(|s| Mark::parse(s, "mark-snv"))
+            .transpose()?
+            .unwrap_or(Mark::None),
         chr_prefix: args.prefix.clone(),
         masks,
     };
 
     let out: Box<dyn Write> = match &args.output {
-        Some(p) => Box::new(BufWriter::with_capacity(1 << 20, File::create(p).with_context(|| format!("create {}", p.display()))?)),
+        Some(p) => Box::new(BufWriter::with_capacity(
+            1 << 20,
+            File::create(p).with_context(|| format!("create {}", p.display()))?,
+        )),
         None => Box::new(BufWriter::with_capacity(1 << 20, std::io::stdout())),
     };
     let chain_out: Option<Box<dyn Write>> = match &args.chain {
-        Some(p) => Some(Box::new(BufWriter::new(File::create(p).with_context(|| format!("create {}", p.display()))?))),
+        Some(p) => Some(Box::new(BufWriter::new(
+            File::create(p).with_context(|| format!("create {}", p.display()))?,
+        ))),
         None => None,
     };
     let fasta = crate::util::open_text_maybe_gz(ref_path)?;
@@ -115,7 +164,9 @@ fn parse_haplotype(h: Option<&str>) -> Result<(i64, u32)> {
             let digits = h.bytes().take_while(u8::is_ascii_digit).count();
             let (num, rest) = h.split_at(digits);
             if digits == 0 || !(rest.is_empty() || rest.eq_ignore_ascii_case("pIu")) {
-                bail!("Error: Could not parse \"--haplotype {h}\", expected number of number followed with \"pIu\"");
+                bail!(
+                    "Error: Could not parse \"--haplotype {h}\", expected number of number followed with \"pIu\""
+                );
             }
             let n: i64 = num.parse()?;
             if n <= 0 {
@@ -147,11 +198,17 @@ fn resolve_samples(
             wanted.extend(l.split(',').filter(|s| !s.is_empty()).map(str::to_string));
         }
         (None, Some(f)) => {
-            let text = std::fs::read_to_string(f).with_context(|| format!("read {}", f.display()))?;
+            let text =
+                std::fs::read_to_string(f).with_context(|| format!("read {}", f.display()))?;
             for line in text.lines() {
                 let s = line.split_whitespace().next().unwrap_or("");
                 if !s.is_empty() {
-                    wanted.push(s.strip_prefix('^').inspect(|_| negate = true).unwrap_or(s).to_string());
+                    wanted.push(
+                        s.strip_prefix('^')
+                            .inspect(|_| negate = true)
+                            .unwrap_or(s)
+                            .to_string(),
+                    );
                 }
             }
         }

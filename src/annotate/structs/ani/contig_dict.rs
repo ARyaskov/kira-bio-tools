@@ -167,19 +167,28 @@ impl ContigDict {
     /// Zero-copy parse from a slice (mmap-load path).
     pub fn parse_bytes(bytes: &[u8]) -> io::Result<Self> {
         if bytes.len() < 4 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "contig dict too short"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "contig dict too short",
+            ));
         }
         let n = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
         let mut pos = 4usize;
         let mut names = Vec::with_capacity(n);
         for _ in 0..n {
             if pos + 2 > bytes.len() {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "contig name length"));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "contig name length",
+                ));
             }
             let len = u16::from_le_bytes(bytes[pos..pos + 2].try_into().unwrap()) as usize;
             pos += 2;
             if pos + len > bytes.len() {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "contig name bytes"));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "contig name bytes",
+                ));
             }
             let name = std::str::from_utf8(&bytes[pos..pos + len])
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "contig name UTF-8"))?

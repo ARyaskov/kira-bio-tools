@@ -12,11 +12,7 @@ pub fn logsumexp2(a: f32, b: f32) -> f32 {
         return a;
     }
     let (m, d) = if a >= b { (a, b - a) } else { (b, a - b) };
-    if d < -80.0 {
-        m
-    } else {
-        m + (d.exp()).ln_1p()
-    }
+    if d < -80.0 { m } else { m + (d.exp()).ln_1p() }
 }
 
 #[inline(always)]

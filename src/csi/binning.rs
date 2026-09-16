@@ -33,11 +33,26 @@ pub struct TabixHeader {
 impl TabixHeader {
     /// `tbx_conf_vcf`.
     pub fn vcf(names: Vec<String>) -> Self {
-        Self { format: 2, col_seq: 1, col_beg: 2, col_end: 0, meta: b'#' as i32, skip: 0, names }
+        Self {
+            format: 2,
+            col_seq: 1,
+            col_beg: 2,
+            col_end: 0,
+            meta: b'#' as i32,
+            skip: 0,
+            names,
+        }
     }
 
     fn write_to(&self, out: &mut Vec<u8>) {
-        for v in [self.format, self.col_seq, self.col_beg, self.col_end, self.meta, self.skip] {
+        for v in [
+            self.format,
+            self.col_seq,
+            self.col_beg,
+            self.col_end,
+            self.meta,
+            self.skip,
+        ] {
             out.extend_from_slice(&v.to_le_bytes());
         }
         let l_nm: usize = self.names.iter().map(|n| n.len() + 1).sum();
@@ -65,7 +80,15 @@ impl TabixHeader {
             .filter(|s| !s.is_empty())
             .map(|s| String::from_utf8_lossy(s).into_owned())
             .collect();
-        Ok(Self { format, col_seq, col_beg, col_end, meta, skip, names })
+        Ok(Self {
+            format,
+            col_seq,
+            col_beg,
+            col_end,
+            meta,
+            skip,
+            names,
+        })
     }
 }
 
@@ -130,7 +153,9 @@ impl<'a> Cursor<'a> {
     }
     fn u64(&mut self) -> io::Result<u64> {
         let b = self.bytes(8)?;
-        Ok(u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+        Ok(u64::from_le_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
     }
     fn remaining(&self) -> usize {
         self.data.len() - self.pos
@@ -204,7 +229,12 @@ impl BinIndex {
                     let end_off = c.u64()?;
                     let n_mapped = c.u64()?;
                     let n_unmapped = c.u64()?;
-                    r.meta = Some(RefMeta { beg_off, end_off, n_mapped, n_unmapped });
+                    r.meta = Some(RefMeta {
+                        beg_off,
+                        end_off,
+                        n_mapped,
+                        n_unmapped,
+                    });
                     continue;
                 }
                 let mut chunks = Vec::with_capacity(n_chunk);
@@ -217,8 +247,19 @@ impl BinIndex {
             }
             refs.push(r);
         }
-        let n_no_coor = if c.remaining() >= 8 { Some(c.u64()?) } else { None };
-        Ok(Self { kind: IndexKind::Csi, min_shift, depth, header, refs, n_no_coor })
+        let n_no_coor = if c.remaining() >= 8 {
+            Some(c.u64()?)
+        } else {
+            None
+        };
+        Ok(Self {
+            kind: IndexKind::Csi,
+            min_shift,
+            depth,
+            header,
+            refs,
+            n_no_coor,
+        })
     }
 
     fn parse_tbi(c: &mut Cursor<'_>) -> io::Result<Self> {
@@ -241,7 +282,12 @@ impl BinIndex {
                     let end_off = c.u64()?;
                     let n_mapped = c.u64()?;
                     let n_unmapped = c.u64()?;
-                    r.meta = Some(RefMeta { beg_off, end_off, n_mapped, n_unmapped });
+                    r.meta = Some(RefMeta {
+                        beg_off,
+                        end_off,
+                        n_mapped,
+                        n_unmapped,
+                    });
                     continue;
                 }
                 let mut chunks = Vec::with_capacity(n_chunk);
@@ -260,8 +306,19 @@ impl BinIndex {
             r.linear = linear;
             refs.push(r);
         }
-        let n_no_coor = if c.remaining() >= 8 { Some(c.u64()?) } else { None };
-        Ok(Self { kind: IndexKind::Tbi, min_shift, depth, header: Some(header), refs, n_no_coor })
+        let n_no_coor = if c.remaining() >= 8 {
+            Some(c.u64()?)
+        } else {
+            None
+        };
+        Ok(Self {
+            kind: IndexKind::Tbi,
+            min_shift,
+            depth,
+            header: Some(header),
+            refs,
+            n_no_coor,
+        })
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -304,7 +361,10 @@ impl BinIndex {
             IndexKind::Tbi => {
                 out.extend_from_slice(&TBI_MAGIC);
                 out.extend_from_slice(&(self.refs.len() as i32).to_le_bytes());
-                let header = self.header.clone().unwrap_or_else(|| TabixHeader::vcf(Vec::new()));
+                let header = self
+                    .header
+                    .clone()
+                    .unwrap_or_else(|| TabixHeader::vcf(Vec::new()));
                 header.write_to(&mut out);
                 for r in &self.refs {
                     let n_bin = r.bins.len() + usize::from(r.meta.is_some());
@@ -353,7 +413,10 @@ impl BinIndex {
     }
 
     pub fn names(&self) -> &[String] {
-        self.header.as_ref().map(|h| h.names.as_slice()).unwrap_or(&[])
+        self.header
+            .as_ref()
+            .map(|h| h.names.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn ref_id(&self, name: &str) -> Option<usize> {
@@ -365,11 +428,16 @@ impl BinIndex {
     }
 
     pub fn n_records(&self, ref_id: usize) -> Option<u64> {
-        self.refs.get(ref_id).and_then(|r| r.meta.map(|m| m.n_mapped))
+        self.refs
+            .get(ref_id)
+            .and_then(|r| r.meta.map(|m| m.n_mapped))
     }
 
     pub fn total_records(&self) -> u64 {
-        self.refs.iter().filter_map(|r| r.meta.map(|m| m.n_mapped)).sum()
+        self.refs
+            .iter()
+            .filter_map(|r| r.meta.map(|m| m.n_mapped))
+            .sum()
     }
 
     pub fn max_position(&self) -> u64 {
@@ -380,7 +448,9 @@ impl BinIndex {
     /// `[beg0, end0)` (0-based, half-open), merged and sorted (htslib
     /// `hts_itr_query`).
     pub fn query(&self, ref_id: usize, beg0: u64, end0: u64) -> Vec<(u64, u64)> {
-        let Some(r) = self.refs.get(ref_id) else { return Vec::new() };
+        let Some(r) = self.refs.get(ref_id) else {
+            return Vec::new();
+        };
         let end0 = end0.min(self.max_position());
         if beg0 >= end0 {
             return Vec::new();
@@ -421,9 +491,10 @@ impl BinIndex {
                     }
                 }
                 if found.is_none()
-                    && let Some(e) = r.bins.get(&0) {
-                        found = Some(e.loffset);
-                    }
+                    && let Some(e) = r.bins.get(&0)
+                {
+                    found = Some(e.loffset);
+                }
                 found.unwrap_or(0)
             }
         };
@@ -447,12 +518,13 @@ impl BinIndex {
         let mut merged: Vec<(u64, u64)> = Vec::with_capacity(chunks.len());
         for (s, e) in chunks {
             if let Some(last) = merged.last_mut()
-                && (s <= last.1 || (s >> 16) == (last.1 >> 16)) {
-                    if e > last.1 {
-                        last.1 = e;
-                    }
-                    continue;
+                && (s <= last.1 || (s >> 16) == (last.1 >> 16))
+            {
+                if e > last.1 {
+                    last.1 = e;
                 }
+                continue;
+            }
             merged.push((s, e));
         }
         merged

@@ -4,7 +4,10 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use crate::cli::args::TabixArgs;
-use crate::csi::{BinIndex, IndexKind, IndexedVcfReader, TabixConf, build_index, build_tabix_index, find_index_for};
+use crate::csi::{
+    BinIndex, IndexKind, IndexedVcfReader, TabixConf, build_index, build_tabix_index,
+    find_index_for,
+};
 use crate::util::Region;
 use crate::vcf::VcfReader;
 
@@ -36,12 +39,17 @@ fn index_path_for(input: &Path, kind: IndexKind) -> PathBuf {
 fn index_conf(args: &TabixArgs) -> Result<TabixConf> {
     let custom = args.sequence_col.is_some() || args.begin_col.is_some() || args.end_col.is_some();
     let mut conf = if let Some(p) = &args.preset {
-        TabixConf::preset(p).ok_or_else(|| anyhow::anyhow!("unknown preset {p:?}; expected gff, bed, sam or vcf"))?
+        TabixConf::preset(p)
+            .ok_or_else(|| anyhow::anyhow!("unknown preset {p:?}; expected gff, bed, sam or vcf"))?
     } else if custom {
         TabixConf::GFF
     } else {
-        TabixConf::from_extension(&args.input)
-            .ok_or_else(|| anyhow::anyhow!("cannot guess the format of {}; use -p gff|bed|sam|vcf or -s/-b/-e", args.input.display()))?
+        TabixConf::from_extension(&args.input).ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot guess the format of {}; use -p gff|bed|sam|vcf or -s/-b/-e",
+                args.input.display()
+            )
+        })?
     };
     if let Some(c) = args.sequence_col {
         conf.sc = c as i32;
@@ -68,9 +76,10 @@ fn index_conf(args: &TabixArgs) -> Result<TabixConf> {
 fn header_conf(args: &TabixArgs) -> Result<TabixConf> {
     if let Some(idx) = find_index_for(&args.input)
         && let Ok(index) = BinIndex::load(&idx)
-            && let Some(h) = index.tabix_header() {
-                return Ok(TabixConf::from_header(h));
-            }
+        && let Some(h) = index.tabix_header()
+    {
+        return Ok(TabixConf::from_header(h));
+    }
     Ok(index_conf(args).unwrap_or(TabixConf::VCF))
 }
 
@@ -79,17 +88,25 @@ fn cmd_index_tabix(args: &TabixArgs) -> Result<()> {
         bail!("Input file does not exist: {}", args.input.display());
     }
     let conf = index_conf(args)?;
-    let kind = if args.csi { IndexKind::Csi } else { IndexKind::Tbi };
+    let kind = if args.csi {
+        IndexKind::Csi
+    } else {
+        IndexKind::Tbi
+    };
     let out = index_path_for(&args.input, kind);
     if out.exists() && !args.force {
-        bail!("the index file exists; use -f to overwrite: {}", out.display());
+        bail!(
+            "the index file exists; use -f to overwrite: {}",
+            out.display()
+        );
     }
     if conf == TabixConf::VCF {
         // VCF and BCF (CSI only) through the VCF/BCF driver.
         build_index(&args.input, &out, kind, args.min_shift)?;
     } else {
         let idx = build_tabix_index(&args.input, &conf, kind, args.min_shift)?;
-        idx.save(&out).with_context(|| format!("write {}", out.display()))?;
+        idx.save(&out)
+            .with_context(|| format!("write {}", out.display()))?;
     }
     Ok(())
 }
@@ -113,19 +130,33 @@ pub fn read_region_file(path: &Path) -> Result<Vec<(String, u32, u32)>> {
     for line in reader.lines() {
         let line = line?;
         let t = line.trim();
-        if t.is_empty() || t.starts_with('#') || t.starts_with("track") || t.starts_with("browser") {
+        if t.is_empty() || t.starts_with('#') || t.starts_with("track") || t.starts_with("browser")
+        {
             continue;
         }
         let cols: Vec<&str> = t.split('\t').collect();
         if cols.len() >= 3 {
-            let b: u32 = cols[1].trim().parse().with_context(|| format!("region file: bad start {:?}", cols[1]))?;
-            let e: u32 = cols[2].trim().parse().with_context(|| format!("region file: bad end {:?}", cols[2]))?;
+            let b: u32 = cols[1]
+                .trim()
+                .parse()
+                .with_context(|| format!("region file: bad start {:?}", cols[1]))?;
+            let e: u32 = cols[2]
+                .trim()
+                .parse()
+                .with_context(|| format!("region file: bad end {:?}", cols[2]))?;
             let beg = if is_bed { b + 1 } else { b };
             out.push((cols[0].to_string(), beg.max(1), e));
         } else if cols.len() == 2 {
-            let p: u32 = cols[1].trim().parse().with_context(|| format!("region file: bad position {:?}", cols[1]))?;
+            let p: u32 = cols[1]
+                .trim()
+                .parse()
+                .with_context(|| format!("region file: bad position {:?}", cols[1]))?;
             let beg = if is_bed { p + 1 } else { p };
-            out.push((cols[0].to_string(), beg.max(1), if is_bed { u32::MAX } else { p }));
+            out.push((
+                cols[0].to_string(),
+                beg.max(1),
+                if is_bed { u32::MAX } else { p },
+            ));
         } else {
             let r = Region::parse(t).ok_or_else(|| anyhow::anyhow!("invalid region {t:?}"))?;
             let (b, e) = r.bounds();
@@ -141,7 +172,8 @@ fn cmd_query_tabix(args: &TabixArgs) -> Result<()> {
 
     let mut regions: Vec<(String, u32, u32)> = Vec::new();
     for s in &args.regions {
-        let r = Region::parse_with(s, false).ok_or_else(|| anyhow::anyhow!("invalid region {s:?}"))?;
+        let r =
+            Region::parse_with(s, false).ok_or_else(|| anyhow::anyhow!("invalid region {s:?}"))?;
         let (mut b, mut e) = r.bounds();
         if args.zero_based && r.start.is_some() {
             b += 1;
@@ -178,7 +210,9 @@ fn cmd_query_tabix(args: &TabixArgs) -> Result<()> {
 
     for (chrom, beg, end) in &regions {
         let label = format!("{chrom}:{beg}-{end}");
-        if let Some(1) = args.regions_overlap { writeln!(out, "#{label}")? }
+        if let Some(1) = args.regions_overlap {
+            writeln!(out, "#{label}")?
+        }
         let prefix = args.regions_overlap == Some(2);
         reader.query(chrom, *beg, *end, |line| {
             if prefix {

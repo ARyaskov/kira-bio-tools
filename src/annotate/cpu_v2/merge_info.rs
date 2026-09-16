@@ -57,9 +57,7 @@ struct BundleInfoLookup<'a> {
     by_key: BundleFieldIndex<'a>,
 }
 
-fn build_bundle_lookups<'a>(
-    bundles: &'a [(usize, AnnotationBundle)],
-) -> Vec<BundleInfoLookup<'a>> {
+fn build_bundle_lookups<'a>(bundles: &'a [(usize, AnnotationBundle)]) -> Vec<BundleInfoLookup<'a>> {
     bundles
         .iter()
         .map(|(vcf_idx, bundle)| BundleInfoLookup {
@@ -167,9 +165,10 @@ pub fn merge_info_fields(
         for field in lookup.by_key.iter(lookup.bundle) {
             if let Some(field_number) = field_meta.get(&field.key)
                 && *field_number == FieldNumber::R
-                    && let Some(ref_val) = field.values.first() {
-                        bundle_ref_values.insert(field.key.as_str(), ref_val.as_str());
-                    }
+                && let Some(ref_val) = field.values.first()
+            {
+                bundle_ref_values.insert(field.key.as_str(), ref_val.as_str());
+            }
         }
     }
 
@@ -179,10 +178,11 @@ pub fn merge_info_fields(
         for field in by_key.iter(bundle) {
             if let Some(field_number) = field_meta.get(&field.key)
                 && *field_number == FieldNumber::R
-                    && !bundle_ref_values.contains_key(field.key.as_str())
-                    && let Some(ref_val) = field.values.first() {
-                        bundle_ref_values.insert(field.key.as_str(), ref_val.as_str());
-                    }
+                && !bundle_ref_values.contains_key(field.key.as_str())
+                && let Some(ref_val) = field.values.first()
+            {
+                bundle_ref_values.insert(field.key.as_str(), ref_val.as_str());
+            }
         }
     }
 
@@ -225,10 +225,9 @@ pub fn merge_info_fields(
         };
         let field_type = infer_field_type(src_key);
         let is_integer = field_type == "Integer";
-        if is_integer
-            && let Some(idx) = existing_parts.iter().position(|v| is_missing_value(v)) {
-                existing_parts.truncate(idx + 1);
-            }
+        if is_integer && let Some(idx) = existing_parts.iter().position(|v| is_missing_value(v)) {
+            existing_parts.truncate(idx + 1);
+        }
 
         if field_number == FieldNumber::Zero {
             let has_flag = bundle_lookups
@@ -267,7 +266,10 @@ pub fn merge_info_fields(
         // Guess a per-allele layout only for tags the annotation header does
         // not describe; a declared Number=1 or Number=. vector is copied whole.
         let mut effective_number = field_number;
-        if effective_number != FieldNumber::A && effective_number != FieldNumber::R && !field_meta.contains_key(src_key) {
+        if effective_number != FieldNumber::A
+            && effective_number != FieldNumber::R
+            && !field_meta.contains_key(src_key)
+        {
             if existing_parts.len() == vcf_alt_alleles.len() {
                 effective_number = FieldNumber::A;
             } else if existing_parts.len() == vcf_alt_alleles.len() + 1 {
@@ -280,10 +282,11 @@ pub fn merge_info_fields(
             for lookup in &bundle_lookups {
                 if let Some(joined) =
                     read_record_value_from_bundle(lookup.bundle, &lookup.by_key, src_raw, src_key)
-                    && !is_missing_value(&joined) {
-                        annotated_val = Some(joined);
-                        break;
-                    }
+                    && !is_missing_value(&joined)
+                {
+                    annotated_val = Some(joined);
+                    break;
+                }
             }
 
             let has_annotation_data = annotated_val
@@ -307,10 +310,9 @@ pub fn merge_info_fields(
                 false,
             );
 
-            if should_transfer
-                && let Some(val) = annotated_val {
-                    dirty |= insert_if_changed(&mut info_map, dst_key, val);
-                }
+            if should_transfer && let Some(val) = annotated_val {
+                dirty |= insert_if_changed(&mut info_map, dst_key, val);
+            }
 
             continue;
         }
@@ -389,8 +391,7 @@ pub fn merge_info_fields(
         }
 
         if !final_values.is_empty() && !final_values.iter().all(|v| is_missing_value(v)) {
-            dirty |=
-                insert_if_changed(&mut info_map, dst_key, join_values_commas(&final_values));
+            dirty |= insert_if_changed(&mut info_map, dst_key, join_values_commas(&final_values));
             if debug {
                 eprintln!("[MERGE] Field {}: inserted into info_map", dst_key);
             }
@@ -415,11 +416,7 @@ pub fn merge_info_fields(
 /// Inserts `value` under `key` in `info_map`, returning `true` if the map
 /// actually changed (new key, or replaced a different existing value).
 /// Returns `false` for a no-op insert (same key, same value).
-fn insert_if_changed(
-    info_map: &mut IndexMap<String, String>,
-    key: &str,
-    value: String,
-) -> bool {
+fn insert_if_changed(info_map: &mut IndexMap<String, String>, key: &str, value: String) -> bool {
     match info_map.get(key) {
         Some(existing) if existing == &value => false,
         _ => {
@@ -462,30 +459,33 @@ fn collect_annotations_for_field<'a>(
             match field_number {
                 FieldNumber::A => {
                     if let Some(val) = field.values.first()
-                        && lookup.vcf_idx < values.len() {
-                            values[lookup.vcf_idx] = Some(val.as_str());
-                        }
+                        && lookup.vcf_idx < values.len()
+                    {
+                        values[lookup.vcf_idx] = Some(val.as_str());
+                    }
                 }
                 FieldNumber::R => {
                     if let Some(alt_val) = field.values.get(1)
-                        && lookup.vcf_idx < values.len() {
-                            values[lookup.vcf_idx] = Some(alt_val.as_str());
+                        && lookup.vcf_idx < values.len()
+                    {
+                        values[lookup.vcf_idx] = Some(alt_val.as_str());
 
-                            if debug {
-                                eprintln!(
-                                    "[COLLECT] R field exact match: REF={:?}, ALT[{}]={}",
-                                    field.values.first(),
-                                    lookup.vcf_idx,
-                                    alt_val
-                                );
-                            }
+                        if debug {
+                            eprintln!(
+                                "[COLLECT] R field exact match: REF={:?}, ALT[{}]={}",
+                                field.values.first(),
+                                lookup.vcf_idx,
+                                alt_val
+                            );
                         }
+                    }
                 }
                 _ => {
                     if let Some(val) = field.values.first()
-                        && lookup.vcf_idx < values.len() {
-                            values[lookup.vcf_idx] = Some(val.as_str());
-                        }
+                        && lookup.vcf_idx < values.len()
+                    {
+                        values[lookup.vcf_idx] = Some(val.as_str());
+                    }
                 }
             }
         }
@@ -636,10 +636,7 @@ fn merge_field_number_r(
 ) -> Vec<String> {
     let mut result = Vec::with_capacity(vcf_values.len() + 1);
 
-    let ref_value = bundle_ref_values
-        .get(key)
-        .copied()
-        .unwrap_or(".");
+    let ref_value = bundle_ref_values.get(key).copied().unwrap_or(".");
 
     result.push(ref_value.to_string());
 
@@ -740,7 +737,9 @@ fn push_info_pair(
     }
     // The bounds sit on ASCII delimiters, so slicing the `&str` is exact.
     let (key, value) = match eq_pos {
-        Some(eq) if eq > pair_start && eq < pair_end => (&info[pair_start..eq], &info[eq + 1..pair_end]),
+        Some(eq) if eq > pair_start && eq < pair_end => {
+            (&info[pair_start..eq], &info[eq + 1..pair_end])
+        }
         _ => (&info[pair_start..pair_end], ""),
     };
     map.insert(key.to_string(), value.to_string());

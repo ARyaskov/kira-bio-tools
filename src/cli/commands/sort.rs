@@ -19,7 +19,12 @@ pub fn cmd_sort(args: SortArgs) -> Result<()> {
     };
     apply_passthrough(&mut cfg, &args.passthrough)?;
 
-    let kind = cfg.output_type.as_deref().map(parse_output_type).transpose()?.unwrap_or(OutputKind::Vcf);
+    let kind = cfg
+        .output_type
+        .as_deref()
+        .map(parse_output_type)
+        .transpose()?
+        .unwrap_or(OutputKind::Vcf);
     let max_mem_bytes = parse_max_mem(&cfg.max_mem)?;
     let temp_dir = cfg.temp_dir.clone().unwrap_or_else(std::env::temp_dir);
 
@@ -54,9 +59,14 @@ pub fn cmd_sort(args: SortArgs) -> Result<()> {
 
     if let (Some(kind_s), Some(out)) = (cfg.write_index.as_deref(), cfg.output.as_deref()) {
         if matches!(kind, OutputKind::VcfGz(_) | OutputKind::Bcf(_)) && out != Path::new("-") {
-            let (ik, ext) = if kind_s == "tbi" { (IndexKind::Tbi, "tbi") } else { (IndexKind::Csi, "csi") };
+            let (ik, ext) = if kind_s == "tbi" {
+                (IndexKind::Tbi, "tbi")
+            } else {
+                (IndexKind::Csi, "csi")
+            };
             let idx_path = PathBuf::from(format!("{}.{}", out.display(), ext));
-            build_index(out, &idx_path, ik, None).with_context(|| format!("-W: write {}", idx_path.display()))?;
+            build_index(out, &idx_path, ik, None)
+                .with_context(|| format!("-W: write {}", idx_path.display()))?;
         } else {
             eprintln!("[sort] -W: index requires BGZF/BCF output to a file; skipping");
         }
@@ -78,14 +88,28 @@ fn apply_passthrough(cfg: &mut SortCfg, args: &[String]) -> Result<()> {
         let a = args[i].as_str();
         let mut take = |cfg_field: &mut dyn FnMut(&str) -> Result<()>| -> Result<()> {
             i += 1;
-            let v = args.get(i).ok_or_else(|| anyhow::anyhow!("missing value for {a}"))?;
+            let v = args
+                .get(i)
+                .ok_or_else(|| anyhow::anyhow!("missing value for {a}"))?;
             cfg_field(v)
         };
         match a {
-            "-o" | "--output" => take(&mut |v| { cfg.output = Some(PathBuf::from(v)); Ok(()) })?,
-            "-O" | "--output-type" => take(&mut |v| { cfg.output_type = Some(v.to_string()); Ok(()) })?,
-            "-m" | "--max-mem" => take(&mut |v| { cfg.max_mem = v.to_string(); Ok(()) })?,
-            "-T" | "--temp-dir" => take(&mut |v| { cfg.temp_dir = Some(PathBuf::from(v)); Ok(()) })?,
+            "-o" | "--output" => take(&mut |v| {
+                cfg.output = Some(PathBuf::from(v));
+                Ok(())
+            })?,
+            "-O" | "--output-type" => take(&mut |v| {
+                cfg.output_type = Some(v.to_string());
+                Ok(())
+            })?,
+            "-m" | "--max-mem" => take(&mut |v| {
+                cfg.max_mem = v.to_string();
+                Ok(())
+            })?,
+            "-T" | "--temp-dir" => take(&mut |v| {
+                cfg.temp_dir = Some(PathBuf::from(v));
+                Ok(())
+            })?,
             "-W" | "--write-index" => cfg.write_index = Some("csi".into()),
             "--no-version" | "--verbosity" | "-v" => {}
             other => {
@@ -105,7 +129,11 @@ fn apply_passthrough(cfg: &mut SortCfg, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn kway_merge_sink(paths: &[PathBuf], sink: &mut VcfSink, contig_order: &HashMap<String, usize>) -> Result<()> {
+fn kway_merge_sink(
+    paths: &[PathBuf],
+    sink: &mut VcfSink,
+    contig_order: &HashMap<String, usize>,
+) -> Result<()> {
     let mut readers: Vec<std::io::Lines<BufReader<File>>> = paths
         .iter()
         .map(|p| Ok::<_, std::io::Error>(BufReader::new(File::open(p)?).lines()))
@@ -113,13 +141,21 @@ fn kway_merge_sink(paths: &[PathBuf], sink: &mut VcfSink, contig_order: &HashMap
     let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
     for (i, r) in readers.iter_mut().enumerate() {
         if let Some(Ok(line)) = r.next() {
-            heap.push(HeapEntry { key: sort_key(&line, 0, contig_order), line, src: i });
+            heap.push(HeapEntry {
+                key: sort_key(&line, 0, contig_order),
+                line,
+                src: i,
+            });
         }
     }
     while let Some(e) = heap.pop() {
         sink.write_line(&e.line)?;
         if let Some(Ok(line)) = readers[e.src].next() {
-            heap.push(HeapEntry { key: sort_key(&line, 0, contig_order), line, src: e.src });
+            heap.push(HeapEntry {
+                key: sort_key(&line, 0, contig_order),
+                line,
+                src: e.src,
+            });
         }
     }
     Ok(())
@@ -127,8 +163,13 @@ fn kway_merge_sink(paths: &[PathBuf], sink: &mut VcfSink, contig_order: &HashMap
 
 fn parse_max_mem(s: &str) -> Result<usize> {
     let s = s.trim();
-    let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(s.len()));
-    let n: f64 = num.parse().with_context(|| format!("parse --max-mem {s:?}"))?;
+    let (num, unit) = s.split_at(
+        s.find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(s.len()),
+    );
+    let n: f64 = num
+        .parse()
+        .with_context(|| format!("parse --max-mem {s:?}"))?;
     let mult: f64 = match unit.to_ascii_uppercase().as_str() {
         "" | "B" => 1.0,
         "K" | "KB" => 1024.0,
@@ -154,8 +195,15 @@ fn ensure_pass_filter(mut header: Vec<String>) -> Vec<String> {
     if header.iter().any(|h| h.starts_with("##FILTER=<ID=PASS,")) {
         return header;
     }
-    let insert_at = header.iter().position(|h| h.starts_with("##reference=")).unwrap_or(1).min(header.len());
-    header.insert(insert_at, "##FILTER=<ID=PASS,Description=\"All filters passed\">".to_string());
+    let insert_at = header
+        .iter()
+        .position(|h| h.starts_with("##reference="))
+        .unwrap_or(1)
+        .min(header.len());
+    header.insert(
+        insert_at,
+        "##FILTER=<ID=PASS,Description=\"All filters passed\">".to_string(),
+    );
     header
 }
 
@@ -173,12 +221,21 @@ struct SortKey {
 fn sort_key(line: &str, idx: usize, contig_order: &HashMap<String, usize>) -> SortKey {
     let mut parts = line.split('\t');
     let chrom = parts.next().unwrap_or("");
-    let pos = parts.next().and_then(|x| x.parse::<u32>().ok()).unwrap_or(u32::MAX);
+    let pos = parts
+        .next()
+        .and_then(|x| x.parse::<u32>().ok())
+        .unwrap_or(u32::MAX);
     let _id = parts.next();
     let refa = parts.next().unwrap_or("").to_string();
     let alt = parts.next().unwrap_or("").to_string();
     let rank = contig_order.get(chrom).copied().unwrap_or(usize::MAX);
-    SortKey { rank, pos, refa, alt, idx }
+    SortKey {
+        rank,
+        pos,
+        refa,
+        alt,
+        idx,
+    }
 }
 
 fn chunk_and_sort(
@@ -215,10 +272,18 @@ fn chunk_and_sort(
     Ok(paths)
 }
 
-fn flush_chunk(buf: &mut [(SortKey, String)], temp_dir: &Path, idx: usize, paths: &mut Vec<PathBuf>) -> Result<()> {
+fn flush_chunk(
+    buf: &mut [(SortKey, String)],
+    temp_dir: &Path,
+    idx: usize,
+    paths: &mut Vec<PathBuf>,
+) -> Result<()> {
     buf.sort_by(|a, b| a.0.cmp(&b.0));
     let p = temp_dir.join(format!("kira-sort-{}-{}.vcf", std::process::id(), idx));
-    let mut w = BufWriter::with_capacity(1 << 20, File::create(&p).with_context(|| format!("create temp {}", p.display()))?);
+    let mut w = BufWriter::with_capacity(
+        1 << 20,
+        File::create(&p).with_context(|| format!("create temp {}", p.display()))?,
+    );
     for (_, l) in buf.iter() {
         writeln!(w, "{}", l)?;
     }

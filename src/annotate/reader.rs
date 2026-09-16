@@ -42,9 +42,7 @@ impl StreamingVcfReader {
     /// (chr_id, pos) metadata if available. Returns `None` metadata for
     /// sources without it (BGZF, Plain). Consumer can skip its own
     /// fast_parse_min when meta is `Some`.
-    pub fn read_line_with_meta(
-        &mut self,
-    ) -> Result<Option<(String, Option<(u32, u32)>)>> {
+    pub fn read_line_with_meta(&mut self) -> Result<Option<(String, Option<(u32, u32)>)>> {
         Ok(self.reader.read_line_with_meta()?)
     }
 

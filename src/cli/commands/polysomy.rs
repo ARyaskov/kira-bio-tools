@@ -54,7 +54,9 @@ pub fn cmd_polysomy(args: PolysomyArgs) -> Result<()> {
         }
     }
 
-    println!("#CHROM\tN_SITES\tHET\tHOM_REF\tHOM_ALT\tMEAN_AF\tABN_FRAC\tHET_RATE\tSCORE\tSTATUS\tCN_PRED\tPEAKS");
+    println!(
+        "#CHROM\tN_SITES\tHET\tHOM_REF\tHOM_ALT\tMEAN_AF\tABN_FRAC\tHET_RATE\tSCORE\tSTATUS\tCN_PRED\tPEAKS"
+    );
     if let Some(dir) = &cfg.plot_dir {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -118,8 +120,17 @@ pub fn cmd_polysomy(args: PolysomyArgs) -> Result<()> {
 
         println!(
             "{chrom}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.3}\t{}\t{}\t{}",
-            st.n_sites, st.het, st.hom_ref, st.hom_alt, mean, abn_frac, het_rate, score, status,
-            cn_pred, peaks,
+            st.n_sites,
+            st.het,
+            st.hom_ref,
+            st.hom_alt,
+            mean,
+            abn_frac,
+            het_rate,
+            score,
+            status,
+            cn_pred,
+            peaks,
         );
     }
 
@@ -146,16 +157,20 @@ fn fit_gmm_baf(bafs: &[f64]) -> GmmFit {
 }
 
 fn em_gmm(data: &[f64], k: usize, iters: usize) -> GmmFit {
-    let mut means: Vec<f64> = if k == 1 {
-        vec![0.5]
-    } else {
-        vec![0.4, 0.6]
-    };
+    let mut means: Vec<f64> = if k == 1 { vec![0.5] } else { vec![0.4, 0.6] };
     let mut weights: Vec<f64> = vec![1.0 / k as f64; k];
     let mut sigma = 0.05f64;
     let n = data.len();
     if n == 0 {
-        return GmmFit { peaks: means.iter().zip(weights.iter()).map(|(m, w)| (*m, *w)).collect(), sigma, log_lik: 0.0 };
+        return GmmFit {
+            peaks: means
+                .iter()
+                .zip(weights.iter())
+                .map(|(m, w)| (*m, *w))
+                .collect(),
+            sigma,
+            log_lik: 0.0,
+        };
     }
 
     let mut last_ll = f64::NEG_INFINITY;
@@ -171,9 +186,13 @@ fn em_gmm(data: &[f64], k: usize, iters: usize) -> GmmFit {
                 z += p;
             }
             if z > 0.0 {
-                for j in 0..k { row[j] /= z; }
+                for j in 0..k {
+                    row[j] /= z;
+                }
             } else {
-                for j in 0..k { row[j] = 1.0 / k as f64; }
+                for j in 0..k {
+                    row[j] = 1.0 / k as f64;
+                }
             }
             resp[i] = row;
         }
@@ -214,13 +233,23 @@ fn em_gmm(data: &[f64], k: usize, iters: usize) -> GmmFit {
         means = new_means;
         weights = new_weights;
         sigma = new_sigma;
-        if (ll - last_ll).abs() < 1e-5 { break; }
+        if (ll - last_ll).abs() < 1e-5 {
+            break;
+        }
         last_ll = ll;
     }
 
-    let mut peaks: Vec<(f64, f64)> = means.iter().zip(weights.iter()).map(|(m, w)| (*m, *w)).collect();
+    let mut peaks: Vec<(f64, f64)> = means
+        .iter()
+        .zip(weights.iter())
+        .map(|(m, w)| (*m, *w))
+        .collect();
     peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    GmmFit { peaks, sigma, log_lik: last_ll }
+    GmmFit {
+        peaks,
+        sigma,
+        log_lik: last_ll,
+    }
 }
 
 fn gaussian_pdf(x: f64, mu: f64, sigma: f64) -> f64 {
@@ -241,17 +270,28 @@ fn infer_cn_from_peaks(peaks: &[(f64, f64)]) -> u8 {
         _ => {
             let (lo, hi) = (peaks[0].0, peaks[peaks.len() - 1].0);
             let split = (hi - lo).abs();
-            if split < 0.1 { 2 }
-            else if (lo - 1.0 / 3.0).abs() < 0.06 && (hi - 2.0 / 3.0).abs() < 0.06 { 3 }
-            else if (lo - 0.25).abs() < 0.06 && (hi - 0.75).abs() < 0.06 { 4 }
-            else if split > 0.55 { 4 }
-            else { 3 }
+            if split < 0.1 {
+                2
+            } else if (lo - 1.0 / 3.0).abs() < 0.06 && (hi - 2.0 / 3.0).abs() < 0.06 {
+                3
+            } else if (lo - 0.25).abs() < 0.06 && (hi - 0.75).abs() < 0.06 {
+                4
+            } else if split > 0.55 {
+                4
+            } else {
+                3
+            }
         }
     }
 }
 
 /// Minimal SVG histogram + fitted Gaussian curves for the BAF distribution.
-fn write_baf_svg(path: &std::path::Path, chrom: &str, bafs: &[f64], fit: &GmmFit) -> std::io::Result<()> {
+fn write_baf_svg(
+    path: &std::path::Path,
+    chrom: &str,
+    bafs: &[f64],
+    fit: &GmmFit,
+) -> std::io::Result<()> {
     let w = 640usize;
     let h = 360usize;
     let pad = 30usize;
@@ -269,7 +309,9 @@ fn write_baf_svg(path: &std::path::Path, chrom: &str, bafs: &[f64], fit: &GmmFit
     ));
     svg.push_str(&format!(
         "<text x=\"{}\" y=\"15\">polysomy BAF — {} (n={})</text>",
-        pad, chrom, bafs.len()
+        pad,
+        chrom,
+        bafs.len()
     ));
     let plot_w = w - 2 * pad;
     let plot_h = h - 2 * pad;
@@ -280,7 +322,10 @@ fn write_baf_svg(path: &std::path::Path, chrom: &str, bafs: &[f64], fit: &GmmFit
         let y = (h - pad) as f64 - bh;
         svg.push_str(&format!(
             "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"#4a8\"/>",
-            x, y, bin_w - 0.5, bh
+            x,
+            y,
+            bin_w - 0.5,
+            bh
         ));
     }
     // overlay fitted curves
@@ -315,7 +360,9 @@ fn write_baf_svg(path: &std::path::Path, chrom: &str, bafs: &[f64], fit: &GmmFit
         let lab = format!("{:.1}", t as f64 / 5.0);
         svg.push_str(&format!(
             "<text x=\"{:.1}\" y=\"{}\">{}</text>",
-            x - 8.0, h - 8, lab
+            x - 8.0,
+            h - 8,
+            lab
         ));
     }
     // peaks annotation
@@ -327,7 +374,10 @@ fn write_baf_svg(path: &std::path::Path, chrom: &str, bafs: &[f64], fit: &GmmFit
         ));
         svg.push_str(&format!(
             "<text x=\"{:.1}\" y=\"{}\" fill=\"#33c\">μ={:.2} w={:.2}</text>",
-            xpos + 2.0, pad + 12, mu, wgt
+            xpos + 2.0,
+            pad + 12,
+            mu,
+            wgt
         ));
     }
     svg.push_str("</svg>");
@@ -380,9 +430,10 @@ impl Region {
 
     fn contains(&self, chrom: &str, pos: u32) -> bool {
         if let Some(c) = &self.chrom
-            && c != chrom {
-                return false;
-            }
+            && c != chrom
+        {
+            return false;
+        }
         pos >= self.start && pos <= self.end
     }
 }
@@ -485,25 +536,27 @@ fn site_alt_fraction(rec: &crate::vcf::structs::VcfRecord, sample_idx: usize) ->
     let vals = sample.split(':').collect::<Vec<_>>();
 
     if let Some(ad_i) = keys.iter().position(|k| *k == "AD")
-        && let Some(ad) = vals.get(ad_i) {
-            let parts = ad
-                .split(',')
-                .filter_map(|x| x.parse::<f64>().ok())
-                .collect::<Vec<_>>();
-            if parts.len() >= 2 {
-                let ref_dp = parts[0];
-                let alt_dp = parts[1..].iter().sum::<f64>();
-                let d = ref_dp + alt_dp;
-                if d > 0.0 {
-                    return Some(alt_dp / d);
-                }
+        && let Some(ad) = vals.get(ad_i)
+    {
+        let parts = ad
+            .split(',')
+            .filter_map(|x| x.parse::<f64>().ok())
+            .collect::<Vec<_>>();
+        if parts.len() >= 2 {
+            let ref_dp = parts[0];
+            let alt_dp = parts[1..].iter().sum::<f64>();
+            let d = ref_dp + alt_dp;
+            if d > 0.0 {
+                return Some(alt_dp / d);
             }
         }
+    }
 
     if let Some(gt_i) = keys.iter().position(|k| *k == "GT")
-        && let Some(gt) = vals.get(gt_i) {
-            return gt_to_fraction(gt);
-        }
+        && let Some(gt) = vals.get(gt_i)
+    {
+        return gt_to_fraction(gt);
+    }
 
     None
 }
@@ -547,7 +600,11 @@ fn parse_sample_names(headers: &[String]) -> Vec<String> {
 
 fn parse_region(s: &str) -> Region {
     if let Ok((chrom, start, end)) = crate::regions::parse_region_spec(s) {
-        return Region { chrom: Some(chrom), start, end };
+        return Region {
+            chrom: Some(chrom),
+            start,
+            end,
+        };
     }
     Region {
         chrom: Some(s.to_string()),

@@ -170,7 +170,18 @@ impl<'a> VcfRecordRef<'a> {
         let info = it.next()?;
         let format = it.next();
         let samples: Vec<&'a str> = it.collect();
-        Some(Self { chrom, pos, id, ref_allele, alt, qual, filter, info, format, samples })
+        Some(Self {
+            chrom,
+            pos,
+            id,
+            ref_allele,
+            alt,
+            qual,
+            filter,
+            info,
+            format,
+            samples,
+        })
     }
 
     /// Borrow the fields of an owned record.
@@ -204,7 +215,11 @@ impl<'a> VcfRecordRef<'a> {
             filter: cols[6],
             info: cols[7],
             format: cols.get(8).copied(),
-            samples: if cols.len() > 9 { cols[9..].to_vec() } else { Vec::new() },
+            samples: if cols.len() > 9 {
+                cols[9..].to_vec()
+            } else {
+                Vec::new()
+            },
         })
     }
 }
@@ -225,9 +240,6 @@ pub fn fast_parse_u32(bytes: &[u8]) -> Option<u32> {
 
     Some(result)
 }
-
-
-
 
 #[cfg(test)]
 #[path = "../../../tests/unit/vcf_record_ref.rs"]

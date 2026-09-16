@@ -12,7 +12,14 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RmDups { None, Exact, Snps, Indels, Both, All }
+enum RmDups {
+    None,
+    Exact,
+    Snps,
+    Indels,
+    Both,
+    All,
+}
 
 impl RmDups {
     fn parse(s: Option<&str>, flag_d: bool) -> Result<Self> {
@@ -37,13 +44,22 @@ pub fn cmd_concat(args: ConcatArgs) -> Result<()> {
         for line in BufReader::new(File::open(fl)?).lines() {
             let l = line?;
             let t = l.trim();
-            if t.is_empty() || t.starts_with('#') { continue; }
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
             inputs.push(PathBuf::from(t));
         }
     }
-    if inputs.is_empty() { bail!("concat: no inputs"); }
+    if inputs.is_empty() {
+        bail!("concat: no inputs");
+    }
 
-    let kind = args.output_type.as_deref().map(parse_output_type).transpose()?.unwrap_or(OutputKind::Vcf);
+    let kind = args
+        .output_type
+        .as_deref()
+        .map(parse_output_type)
+        .transpose()?
+        .unwrap_or(OutputKind::Vcf);
     let rm_dups = RmDups::parse(args.rm_dups.as_deref(), args.remove_duplicates)?;
     let region = if let Some(s) = &args.regions {
         Some(RegionFilter::from_cli(s)?)
@@ -65,16 +81,33 @@ pub fn cmd_concat(args: ConcatArgs) -> Result<()> {
         let s = extract_samples(&h);
         (h, s)
     };
-    let mut meta: Vec<String> = headers.iter().filter(|h| h.starts_with("##")).cloned().collect();
-    let chrom_line = headers.iter().find(|h| h.starts_with("#CHROM")).cloned().unwrap_or_default();
+    let mut meta: Vec<String> = headers
+        .iter()
+        .filter(|h| h.starts_with("##"))
+        .cloned()
+        .collect();
+    let chrom_line = headers
+        .iter()
+        .find(|h| h.starts_with("#CHROM"))
+        .cloned()
+        .unwrap_or_default();
     for p in &inputs[1..] {
         let r = UnifiedVcfReader::open(p).with_context(|| format!("open {:?}", p))?;
         let h = r.header()?;
         if extract_samples(&h) != samples {
-            bail!("concat: sample names differ between {} and {}", inputs[0].display(), p.display());
+            bail!(
+                "concat: sample names differ between {} and {}",
+                inputs[0].display(),
+                p.display()
+            );
         }
-        for l in h.iter().filter(|l| l.starts_with("##") && !l.starts_with("##fileformat")) {
-            if !meta.contains(l) { meta.push(l.clone()); }
+        for l in h
+            .iter()
+            .filter(|l| l.starts_with("##") && !l.starts_with("##fileformat"))
+        {
+            if !meta.contains(l) {
+                meta.push(l.clone());
+            }
         }
     }
     let ligate = args.ligate || args.ligate_force || args.ligate_warn;
@@ -88,15 +121,28 @@ pub fn cmd_concat(args: ConcatArgs) -> Result<()> {
     }
     let mut out_headers: Vec<String> = Vec::with_capacity(meta.len() + 2);
     for h in &meta {
-        if args.drop_genotypes && h.starts_with("##FORMAT=") { continue; }
+        if args.drop_genotypes && h.starts_with("##FORMAT=") {
+            continue;
+        }
         out_headers.push(h.clone());
     }
-    if !args.no_version { out_headers.push(version_header_line()); }
-    out_headers.push(if args.drop_genotypes { trim_chrom_samples(&chrom_line) } else { chrom_line.clone() });
+    if !args.no_version {
+        out_headers.push(version_header_line());
+    }
+    out_headers.push(if args.drop_genotypes {
+        trim_chrom_samples(&chrom_line)
+    } else {
+        chrom_line.clone()
+    });
     let mut sink = VcfSink::open(args.output.as_deref(), kind, &out_headers)?;
     sink.write_header(&out_headers)?;
 
-    let ctx = Ctx { drop_genotypes: args.drop_genotypes, region: region.as_ref(), regions_overlap: args.regions_overlap, rm_dups };
+    let ctx = Ctx {
+        drop_genotypes: args.drop_genotypes,
+        region: region.as_ref(),
+        regions_overlap: args.regions_overlap,
+        rm_dups,
+    };
 
     if ligate {
         concat_ligate(&inputs, &args, &samples, &out_headers, &ctx, &mut sink)?;
@@ -108,11 +154,18 @@ pub fn cmd_concat(args: ConcatArgs) -> Result<()> {
     sink.finish()?;
 
     if let (Some(kind_s), Some(out)) = (args.write_index.as_deref(), args.output.as_deref())
-        && matches!(kind, OutputKind::VcfGz(_) | OutputKind::Bcf(_)) && out != Path::new("-") {
-            let (ik, ext) = if kind_s == "tbi" { (crate::csi::IndexKind::Tbi, "tbi") } else { (crate::csi::IndexKind::Csi, "csi") };
-            let idx = PathBuf::from(format!("{}.{}", out.display(), ext));
-            crate::csi::build_index(out, &idx, ik, None).with_context(|| format!("-W: write {}", idx.display()))?;
-        }
+        && matches!(kind, OutputKind::VcfGz(_) | OutputKind::Bcf(_))
+        && out != Path::new("-")
+    {
+        let (ik, ext) = if kind_s == "tbi" {
+            (crate::csi::IndexKind::Tbi, "tbi")
+        } else {
+            (crate::csi::IndexKind::Csi, "csi")
+        };
+        let idx = PathBuf::from(format!("{}.{}", out.display(), ext));
+        crate::csi::build_index(out, &idx, ik, None)
+            .with_context(|| format!("-W: write {}", idx.display()))?;
+    }
     Ok(())
 }
 
@@ -132,7 +185,9 @@ struct DupWindow {
 
 impl DupWindow {
     fn check(&mut self, line: &str, mode: RmDups) -> bool {
-        if mode == RmDups::None { return false; }
+        if mode == RmDups::None {
+            return false;
+        }
         let mut it = line.splitn(6, '\t');
         let chrom = it.next().unwrap_or("").to_string();
         let pos = it.next().unwrap_or("").to_string();
@@ -144,7 +199,10 @@ impl DupWindow {
             self.key = (chrom, pos);
             self.recs.clear();
         }
-        let dup = self.recs.iter().any(|(r, a, pvt)| same_site(mode, r, a, *pvt, &refa, &alt, vt));
+        let dup = self
+            .recs
+            .iter()
+            .any(|(r, a, pvt)| same_site(mode, r, a, *pvt, &refa, &alt, vt));
         if !dup {
             self.recs.push((refa, alt, vt));
         }
@@ -156,8 +214,14 @@ impl DupWindow {
 fn same_site(mode: RmDups, r1: &str, a1: &str, t1: u32, r2: &str, a2: &str, t2: u32) -> bool {
     match mode {
         RmDups::All => true,
-        RmDups::Snps => (t1 & VT_SNP != 0 && t2 & VT_SNP != 0) || (r1.eq_ignore_ascii_case(r2) && a1.eq_ignore_ascii_case(a2)),
-        RmDups::Indels => (t1 & VT_INDEL != 0 && t2 & VT_INDEL != 0) || (r1.eq_ignore_ascii_case(r2) && a1.eq_ignore_ascii_case(a2)),
+        RmDups::Snps => {
+            (t1 & VT_SNP != 0 && t2 & VT_SNP != 0)
+                || (r1.eq_ignore_ascii_case(r2) && a1.eq_ignore_ascii_case(a2))
+        }
+        RmDups::Indels => {
+            (t1 & VT_INDEL != 0 && t2 & VT_INDEL != 0)
+                || (r1.eq_ignore_ascii_case(r2) && a1.eq_ignore_ascii_case(a2))
+        }
         RmDups::Both => {
             (t1 & VT_SNP != 0 && t2 & VT_SNP != 0)
                 || (t1 & VT_INDEL != 0 && t2 & VT_INDEL != 0)
@@ -185,7 +249,12 @@ fn line_site(line: &str) -> Option<(String, u32, String, String)> {
     Some((chrom, pos, refa, alt))
 }
 
-fn concat_streaming(inputs: &[PathBuf], headers: &[String], ctx: &Ctx<'_>, sink: &mut VcfSink) -> Result<()> {
+fn concat_streaming(
+    inputs: &[PathBuf],
+    headers: &[String],
+    ctx: &Ctx<'_>,
+    sink: &mut VcfSink,
+) -> Result<()> {
     let mut contigs = ContigDict::from_header_lines(headers.iter().map(String::as_str));
     let mut dups = DupWindow::default();
     let mut last: Option<(usize, u32)> = None;
@@ -194,9 +263,14 @@ fn concat_streaming(inputs: &[PathBuf], headers: &[String], ctx: &Ctx<'_>, sink:
         let _ = r.header()?;
         let mut first_in_file = true;
         while let Some(line) = r.read_line()? {
-            if line.is_empty() || line.as_bytes()[0] == b'#' { continue; }
+            if line.is_empty() || line.as_bytes()[0] == b'#' {
+                continue;
+            }
             if let Some(rf) = ctx.region
-                && !rf.line_passes_mode(&line, ctx.regions_overlap) { continue; }
+                && !rf.line_passes_mode(&line, ctx.regions_overlap)
+            {
+                continue;
+            }
             if first_in_file {
                 first_in_file = false;
                 if let (Some((c, pos)), Some((lr, lp))) = (record_key(&line), last) {
@@ -204,7 +278,9 @@ fn concat_streaming(inputs: &[PathBuf], headers: &[String], ctx: &Ctx<'_>, sink:
                     if (rank, pos) < (lr, lp) {
                         bail!(
                             "concat: {} starts before the end of the previous file ({}:{} after contig #{lr}:{lp}); use -a to sort overlapping inputs",
-                            p.display(), c, pos
+                            p.display(),
+                            c,
+                            pos
                         );
                     }
                 }
@@ -212,8 +288,14 @@ fn concat_streaming(inputs: &[PathBuf], headers: &[String], ctx: &Ctx<'_>, sink:
             if let Some((c, pos)) = record_key(&line) {
                 last = Some((contigs.insert(&c) as usize, pos));
             }
-            if dups.check(&line, ctx.rm_dups) { continue; }
-            let out_line = if ctx.drop_genotypes { drop_genotypes_line(&line) } else { line };
+            if dups.check(&line, ctx.rm_dups) {
+                continue;
+            }
+            let out_line = if ctx.drop_genotypes {
+                drop_genotypes_line(&line)
+            } else {
+                line
+            };
             sink.write_line(&out_line)?;
         }
     }
@@ -225,11 +307,12 @@ fn concat_streaming(inputs: &[PathBuf], headers: &[String], ctx: &Ctx<'_>, sink:
 fn chrom_order(p: &Path) -> Result<Vec<String>> {
     let is_bcf = is_bcf_file(p).unwrap_or(false);
     let index = crate::csi::find_index_for(p).and_then(|ip| crate::csi::BinIndex::load(&ip).ok());
-    if !is_bcf
-        && let Some(idx) = &index {
-            let names: Vec<String> = idx.names().to_vec();
-            if !names.is_empty() { return Ok(names); }
+    if !is_bcf && let Some(idx) = &index {
+        let names: Vec<String> = idx.names().to_vec();
+        if !names.is_empty() {
+            return Ok(names);
         }
+    }
     let mut r = UnifiedVcfReader::open(p).with_context(|| format!("open {:?}", p))?;
     let headers = r.header()?;
     if is_bcf {
@@ -237,18 +320,27 @@ fn chrom_order(p: &Path) -> Result<Vec<String>> {
         let contigs = ContigDict::from_header_lines(headers.iter().map(String::as_str));
         let names: Vec<String> = contigs.names().to_vec();
         if let Some(idx) = &index {
-            return Ok(names.into_iter().enumerate().filter(|(rid, _)| idx.n_records(*rid).unwrap_or(0) > 0).map(|(_, n)| n).collect());
+            return Ok(names
+                .into_iter()
+                .enumerate()
+                .filter(|(rid, _)| idx.n_records(*rid).unwrap_or(0) > 0)
+                .map(|(_, n)| n)
+                .collect());
         }
         let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
         while let Some(line) = r.read_line()? {
-            if line.is_empty() || line.as_bytes()[0] == b'#' { continue; }
+            if line.is_empty() || line.as_bytes()[0] == b'#' {
+                continue;
+            }
             present.insert(line.split('\t').next().unwrap_or("").to_string());
         }
         return Ok(names.into_iter().filter(|n| present.contains(n)).collect());
     }
     let mut order: Vec<String> = Vec::new();
     while let Some(line) = r.read_line()? {
-        if line.is_empty() || line.as_bytes()[0] == b'#' { continue; }
+        if line.is_empty() || line.as_bytes()[0] == b'#' {
+            continue;
+        }
         let chrom = line.split('\t').next().unwrap_or("");
         if order.last().map(String::as_str) != Some(chrom) && !order.iter().any(|c| c == chrom) {
             order.push(chrom.to_string());
@@ -264,7 +356,9 @@ fn concat_sorted(inputs: &[PathBuf], ctx: &Ctx<'_>, sink: &mut VcfSink) -> Resul
     let mut order: Vec<String> = Vec::new();
     for p in inputs {
         for c in chrom_order(p)? {
-            if !order.contains(&c) { order.push(c); }
+            if !order.contains(&c) {
+                order.push(c);
+            }
         }
     }
     // Inputs are not sorted by the same chromosome order, so each chromosome
@@ -273,34 +367,47 @@ fn concat_sorted(inputs: &[PathBuf], ctx: &Ctx<'_>, sink: &mut VcfSink) -> Resul
         let mut out = Vec::new();
         let mut push = |line: &str| {
             if let Some(rf) = ctx.region
-                && !rf.line_passes_mode(line, ctx.regions_overlap) { return; }
+                && !rf.line_passes_mode(line, ctx.regions_overlap)
+            {
+                return;
+            }
             if let Some((c, pos, refa, alt)) = line_site(line)
-                && c == chrom {
-                    let vt = record_type(&refa, &alt);
-                    out.push((pos, refa, alt, vt, line.to_string()));
-                }
+                && c == chrom
+            {
+                let vt = record_type(&refa, &alt);
+                out.push((pos, refa, alt, vt, line.to_string()));
+            }
         };
         if crate::csi::find_index_for(p).is_some()
-            && let Ok(mut ir) = crate::csi::IndexedVcfReader::open(p) {
-                ir.query(chrom, 1, u32::MAX, |line| { push(line); Ok(true) })?;
-                return Ok(out);
-            }
+            && let Ok(mut ir) = crate::csi::IndexedVcfReader::open(p)
+        {
+            ir.query(chrom, 1, u32::MAX, |line| {
+                push(line);
+                Ok(true)
+            })?;
+            return Ok(out);
+        }
         let mut r = UnifiedVcfReader::open(p).with_context(|| format!("open {:?}", p))?;
         let _ = r.header()?;
         while let Some(line) = r.read_line()? {
-            if line.is_empty() || line.as_bytes()[0] == b'#' { continue; }
+            if line.is_empty() || line.as_bytes()[0] == b'#' {
+                continue;
+            }
             push(&line);
         }
         Ok(out)
     };
 
     for chrom in &order {
-        let mut lists: Vec<std::collections::VecDeque<(u32, String, String, u32, String)>> = Vec::with_capacity(inputs.len());
+        let mut lists: Vec<std::collections::VecDeque<(u32, String, String, u32, String)>> =
+            Vec::with_capacity(inputs.len());
         for p in inputs {
             lists.push(fetch(p, chrom)?.into());
         }
         loop {
-            let Some(pos) = lists.iter().filter_map(|l| l.front().map(|r| r.0)).min() else { break };
+            let Some(pos) = lists.iter().filter_map(|l| l.front().map(|r| r.0)).min() else {
+                break;
+            };
             // All records at this position, per input.
             let mut recs: Vec<Vec<(String, String, u32, String)>> = vec![Vec::new(); lists.len()];
             for (i, l) in lists.iter_mut().enumerate() {
@@ -312,20 +419,39 @@ fn concat_sorted(inputs: &[PathBuf], ctx: &Ctx<'_>, sink: &mut VcfSink) -> Resul
             let mut used: Vec<Vec<bool>> = recs.iter().map(|v| vec![false; v.len()]).collect();
             for i in 0..recs.len() {
                 for j in 0..recs[i].len() {
-                    if used[i][j] { continue; }
+                    if used[i][j] {
+                        continue;
+                    }
                     used[i][j] = true;
                     let (r1, a1, t1, _) = &recs[i][j];
                     let mut set: Vec<(usize, usize)> = vec![(i, j)];
                     for k in i + 1..recs.len() {
-                        if let Some(m) = (0..recs[k].len()).find(|&m| !used[k][m] && same_site(ctx.rm_dups, r1, a1, *t1, &recs[k][m].0, &recs[k][m].1, recs[k][m].2)) {
+                        if let Some(m) = (0..recs[k].len()).find(|&m| {
+                            !used[k][m]
+                                && same_site(
+                                    ctx.rm_dups,
+                                    r1,
+                                    a1,
+                                    *t1,
+                                    &recs[k][m].0,
+                                    &recs[k][m].1,
+                                    recs[k][m].2,
+                                )
+                        }) {
                             used[k][m] = true;
                             set.push((k, m));
                         }
                     }
                     for (idx, (a, b)) in set.iter().enumerate() {
-                        if ctx.rm_dups != RmDups::None && idx > 0 { break; }
+                        if ctx.rm_dups != RmDups::None && idx > 0 {
+                            break;
+                        }
                         let line = &recs[*a][*b].3;
-                        let out_line = if ctx.drop_genotypes { drop_genotypes_line(line) } else { line.clone() };
+                        let out_line = if ctx.drop_genotypes {
+                            drop_genotypes_line(line)
+                        } else {
+                            line.clone()
+                        };
                         sink.write_line(&out_line)?;
                     }
                 }
@@ -355,19 +481,38 @@ impl LReader {
     fn open(p: &Path, ctx: &Ctx<'_>) -> Result<Self> {
         let reader = UnifiedVcfReader::open(p).with_context(|| format!("open {:?}", p))?;
         let _ = reader.header()?;
-        let mut r = Self { reader, peek: None, done: false };
+        let mut r = Self {
+            reader,
+            peek: None,
+            done: false,
+        };
         r.fill(ctx)?;
         Ok(r)
     }
 
     fn fill(&mut self, ctx: &Ctx<'_>) -> Result<()> {
-        if self.peek.is_some() || self.done { return Ok(()); }
+        if self.peek.is_some() || self.done {
+            return Ok(());
+        }
         while let Some(line) = self.reader.read_line()? {
-            if line.is_empty() || line.as_bytes()[0] == b'#' { continue; }
+            if line.is_empty() || line.as_bytes()[0] == b'#' {
+                continue;
+            }
             if let Some(rf) = ctx.region
-                && !rf.line_passes_mode(&line, ctx.regions_overlap) { continue; }
-            let Some((chrom, pos, refa, alt)) = line_site(&line) else { continue };
-            self.peek = Some(LLine { chrom, pos, refa, alt, text: line });
+                && !rf.line_passes_mode(&line, ctx.regions_overlap)
+            {
+                continue;
+            }
+            let Some((chrom, pos, refa, alt)) = line_site(&line) else {
+                continue;
+            };
+            self.peek = Some(LLine {
+                chrom,
+                pos,
+                refa,
+                alt,
+                text: line,
+            });
             return Ok(());
         }
         self.done = true;
@@ -379,7 +524,9 @@ impl LReader {
         loop {
             self.fill(ctx)?;
             match &self.peek {
-                Some(l) if l.chrom == chrom && l.pos < pos => { self.peek = None; }
+                Some(l) if l.chrom == chrom && l.pos < pos => {
+                    self.peek = None;
+                }
                 _ => return Ok(()),
             }
         }
@@ -408,26 +555,42 @@ struct Ligator<'a> {
 
 impl<'a> Ligator<'a> {
     fn write(&mut self, l: &LLine, with_pq: bool) -> Result<()> {
-        let mut text = if self.nswap > 0 { phase_update(&l.text, &self.swap) } else { l.text.clone() };
+        let mut text = if self.nswap > 0 {
+            phase_update(&l.text, &self.swap)
+        } else {
+            l.text.clone()
+        };
         if with_pq {
             let vals: Vec<String> = self.phase_qual.iter().map(|q| q.to_string()).collect();
             text = add_format_field(&text, "PQ", &vals);
         }
         if !self.compact_ps || self.phase_set_changed {
-            let vals: Vec<String> = self.phase_set.iter().map(|p| p.map(|v| v.to_string()).unwrap_or_else(|| ".".into())).collect();
+            let vals: Vec<String> = self
+                .phase_set
+                .iter()
+                .map(|p| p.map(|v| v.to_string()).unwrap_or_else(|| ".".into()))
+                .collect();
             text = add_format_field(&text, "PS", &vals);
             self.phase_set_changed = false;
         }
-        let out = if self.drop_genotypes { drop_genotypes_line(&text) } else { text };
+        let out = if self.drop_genotypes {
+            drop_genotypes_line(&text)
+        } else {
+            text
+        };
         self.sink.write_line(&out)
     }
 
     fn push(&mut self, a: Option<LLine>, b: Option<LLine>, is_overlap: bool) -> Result<()> {
         let first = a.as_ref().or(b.as_ref()).expect("push needs a record");
         if self.prev_chr.as_deref() != Some(first.chrom.as_str()) {
-            if self.prev_chr.is_some() { self.flush()?; }
+            if self.prev_chr.is_some() {
+                self.flush()?;
+            }
             let ps = first.pos;
-            for p in self.phase_set.iter_mut() { *p = Some(ps); }
+            for p in self.phase_set.iter_mut() {
+                *p = Some(ps);
+            }
             self.phase_set_changed = true;
             if self.seen.contains(&first.chrom) {
                 bail!("The chromosome block {} is not contiguous", first.chrom);
@@ -444,20 +607,36 @@ impl<'a> Ligator<'a> {
     }
 
     fn flush(&mut self) -> Result<()> {
-        if self.buf.is_empty() { return Ok(()); }
+        if self.buf.is_empty() {
+            return Ok(());
+        }
         let n = self.n;
         // Phase agreement over the overlap, relative to the current swap state.
         for (a, b) in &self.buf {
             let (Some(a), Some(b)) = (a, b) else { continue };
-            let (Some(ga), Some(gb)) = (diploid_gts(&a.text, n), diploid_gts(&b.text, n)) else { continue };
+            let (Some(ga), Some(gb)) = (diploid_gts(&a.text, n), diploid_gts(&b.text, n)) else {
+                continue;
+            };
             for j in 0..n {
-                let (Some((a0, a1, pa)), Some((b0, b1, pb))) = (ga[j], gb[j]) else { continue };
-                if !pa || !pb || a0 == a1 || b0 == b1 { continue; }
+                let (Some((a0, a1, pa)), Some((b0, b1, pb))) = (ga[j], gb[j]) else {
+                    continue;
+                };
+                if !pa || !pb || a0 == a1 || b0 == b1 {
+                    continue;
+                }
                 if a0 == b0 && a1 == b1 {
-                    if self.swap[j] { self.nmism[j] += 1 } else { self.nmatch[j] += 1 }
+                    if self.swap[j] {
+                        self.nmism[j] += 1
+                    } else {
+                        self.nmatch[j] += 1
+                    }
                 }
                 if a0 == b1 && a1 == b0 {
-                    if self.swap[j] { self.nmatch[j] += 1 } else { self.nmism[j] += 1 }
+                    if self.swap[j] {
+                        self.nmatch[j] += 1
+                    } else {
+                        self.nmism[j] += 1
+                    }
                 }
             }
         }
@@ -526,7 +705,9 @@ impl<'a> Ligator<'a> {
 /// missing or non-diploid entries, or when GT is absent / ploidy is not two.
 fn diploid_gts(line: &str, n: usize) -> Option<Vec<Option<(usize, usize, bool)>>> {
     let cols: Vec<&str> = line.split('\t').collect();
-    if cols.len() < 10 { return None; }
+    if cols.len() < 10 {
+        return None;
+    }
     let gi = cols[8].split(':').position(|k| k == "GT")?;
     let mut out = Vec::with_capacity(n);
     let mut max_ploidy = 0;
@@ -534,22 +715,32 @@ fn diploid_gts(line: &str, n: usize) -> Option<Vec<Option<(usize, usize, bool)>>
         let gt = s.split(':').nth(gi).unwrap_or(".");
         let al = gt_alleles(gt);
         max_ploidy = max_ploidy.max(al.len());
-        out.push(match (al.first().copied().flatten(), al.get(1).copied().flatten()) {
-            (Some(a), Some(b)) if al.len() == 2 => Some((a, b, gt.contains('|'))),
-            _ => None,
-        });
+        out.push(
+            match (al.first().copied().flatten(), al.get(1).copied().flatten()) {
+                (Some(a), Some(b)) if al.len() == 2 => Some((a, b, gt.contains('|'))),
+                _ => None,
+            },
+        );
     }
-    while out.len() < n { out.push(None); }
-    if max_ploidy != 2 { return None; }
+    while out.len() < n {
+        out.push(None);
+    }
+    if max_ploidy != 2 {
+        return None;
+    }
     Some(out)
 }
 
 /// Swap the haplotypes of phased diploid genotypes for the flagged samples.
 fn phase_update(line: &str, swap: &[bool]) -> String {
     let cols: Vec<&str> = line.split('\t').collect();
-    if cols.len() < 10 { return line.to_string(); }
+    if cols.len() < 10 {
+        return line.to_string();
+    }
     let fmt: Vec<&str> = cols[8].split(':').collect();
-    let Some(gi) = fmt.iter().position(|k| *k == "GT") else { return line.to_string() };
+    let Some(gi) = fmt.iter().position(|k| *k == "GT") else {
+        return line.to_string();
+    };
     let mut out: Vec<String> = cols[..9].iter().map(|s| s.to_string()).collect();
     for (i, samp) in cols[9..].iter().enumerate() {
         if !swap.get(i).copied().unwrap_or(false) {
@@ -574,17 +765,32 @@ fn phase_update(line: &str, swap: &[bool]) -> String {
 /// sample columns are padded with `.` first.
 fn add_format_field(line: &str, key: &str, vals: &[String]) -> String {
     let cols: Vec<&str> = line.split('\t').collect();
-    if cols.len() < 9 { return line.to_string(); }
-    let mut fmt: Vec<&str> = if cols[8].is_empty() || cols[8] == "." { Vec::new() } else { cols[8].split(':').collect() };
+    if cols.len() < 9 {
+        return line.to_string();
+    }
+    let mut fmt: Vec<&str> = if cols[8].is_empty() || cols[8] == "." {
+        Vec::new()
+    } else {
+        cols[8].split(':').collect()
+    };
     let idx = match fmt.iter().position(|k| *k == key) {
         Some(i) => i,
-        None => { fmt.push(key); fmt.len() - 1 }
+        None => {
+            fmt.push(key);
+            fmt.len() - 1
+        }
     };
     let mut out: Vec<String> = cols[..8].iter().map(|s| s.to_string()).collect();
     out.push(fmt.join(":"));
     for (i, samp) in cols[9..].iter().enumerate() {
-        let mut parts: Vec<String> = if samp.is_empty() { Vec::new() } else { samp.split(':').map(|s| s.to_string()).collect() };
-        while parts.len() < fmt.len() { parts.push(".".into()); }
+        let mut parts: Vec<String> = if samp.is_empty() {
+            Vec::new()
+        } else {
+            samp.split(':').map(|s| s.to_string()).collect()
+        };
+        while parts.len() < fmt.len() {
+            parts.push(".".into());
+        }
         parts[idx] = vals.get(i).cloned().unwrap_or_else(|| ".".into());
         out.push(parts.join(":"));
     }
@@ -595,7 +801,14 @@ fn add_format_field(line: &str, key: &str, vals: &[String]) -> String {
 /// time, the overlap is buffered, the phase is compared per sample, the first
 /// half of the overlap comes from the earlier file and the second half from
 /// the later one (with PQ at the switch and PS phase sets).
-fn concat_ligate(inputs_all: &[PathBuf], args: &ConcatArgs, samples: &[String], headers: &[String], ctx: &Ctx<'_>, sink: &mut VcfSink) -> Result<()> {
+fn concat_ligate(
+    inputs_all: &[PathBuf],
+    args: &ConcatArgs,
+    samples: &[String],
+    headers: &[String],
+    ctx: &Ctx<'_>,
+    sink: &mut VcfSink,
+) -> Result<()> {
     let n = samples.len();
     let contigs = ContigDict::from_header_lines(headers.iter().map(String::as_str));
     // First record of every non-empty file; `None` marks a file starting a new chromosome.
@@ -605,7 +818,11 @@ fn concat_ligate(inputs_all: &[PathBuf], args: &ConcatArgs, samples: &[String], 
     for p in inputs_all {
         let r = LReader::open(p, ctx)?;
         if let Some(l) = &r.peek {
-            start_pos.push(if prev_chr.as_deref() == Some(l.chrom.as_str()) { Some(l.pos) } else { None });
+            start_pos.push(if prev_chr.as_deref() == Some(l.chrom.as_str()) {
+                Some(l.pos)
+            } else {
+                None
+            });
             prev_chr = Some(l.chrom.clone());
             inputs.push(p.clone());
         }
@@ -638,33 +855,54 @@ fn concat_ligate(inputs_all: &[PathBuf], args: &ConcatArgs, samples: &[String], 
         while readers.len() < 2 && ifname < inputs.len() {
             readers.push(LReader::open(&inputs[ifname], ctx)?);
             ifname += 1;
-            if start_pos[ifname - 1].is_none() { break; }
-            if ifname < inputs.len() && start_pos[ifname].is_none() { break; }
+            if start_pos[ifname - 1].is_none() {
+                break;
+            }
+            if ifname < inputs.len() && start_pos[ifname].is_none() {
+                break;
+            }
         }
         // Continue from the position the previous round stopped at.
         let mut seek: Option<(String, u32)> = None;
         if let Some(l) = readers[0].peek.clone() {
-            for r in readers.iter_mut() { r.seek(&l.chrom, l.pos, ctx)?; }
+            for r in readers.iter_mut() {
+                r.seek(&l.chrom, l.pos, ctx)?;
+            }
             seek = Some((l.chrom, l.pos));
         }
 
         loop {
-            for r in readers.iter_mut() { r.fill(ctx)?; }
+            for r in readers.iter_mut() {
+                r.fill(ctx)?;
+            }
             // Next position across the open readers.
             let Some((chrom, pos)) = readers
                 .iter()
-                .filter_map(|r| r.peek.as_ref().map(|l| (rank(&l.chrom), l.pos, l.chrom.clone())))
+                .filter_map(|r| {
+                    r.peek
+                        .as_ref()
+                        .map(|l| (rank(&l.chrom), l.pos, l.chrom.clone()))
+                })
                 .min()
                 .map(|(_, p, c)| (c, p))
-            else { break };
+            else {
+                break;
+            };
             if let Some((sc, sp)) = &seek
-                && *sc == chrom && *sp > pos {
-                    // Records starting before the seek position are skipped (bcftools seek semantics).
-                    for r in readers.iter_mut() {
-                        if r.peek.as_ref().is_some_and(|l| l.chrom == chrom && l.pos == pos) { r.peek = None; }
+                && *sc == chrom
+                && *sp > pos
+            {
+                // Records starting before the seek position are skipped (bcftools seek semantics).
+                for r in readers.iter_mut() {
+                    if r.peek
+                        .as_ref()
+                        .is_some_and(|l| l.chrom == chrom && l.pos == pos)
+                    {
+                        r.peek = None;
                     }
-                    continue;
                 }
+                continue;
+            }
             seek = None;
             // Open the next file once its first position is reached; it joins this position.
             while ifname < inputs.len() && start_pos[ifname].is_some_and(|s| pos >= s) {
@@ -680,7 +918,9 @@ fn concat_ligate(inputs_all: &[PathBuf], args: &ConcatArgs, samples: &[String], 
                 loop {
                     r.fill(ctx)?;
                     match &r.peek {
-                        Some(l) if l.chrom == chrom && l.pos == pos => v.push(r.peek.take().unwrap()),
+                        Some(l) if l.chrom == chrom && l.pos == pos => {
+                            v.push(r.peek.take().unwrap())
+                        }
                         _ => break,
                     }
                 }
@@ -688,19 +928,28 @@ fn concat_ligate(inputs_all: &[PathBuf], args: &ConcatArgs, samples: &[String], 
             }
             let mut sets: Vec<(Option<LLine>, Option<LLine>)> = Vec::new();
             if here.len() == 1 {
-                for l in here[0].drain(..) { sets.push((Some(l), None)); }
+                for l in here[0].drain(..) {
+                    sets.push((Some(l), None));
+                }
             } else {
                 let second: Vec<LLine> = std::mem::take(&mut here[1]);
                 let first: Vec<LLine> = std::mem::take(&mut here[0]);
                 let mut used = vec![false; second.len()];
                 for a in first {
-                    match (0..second.len()).find(|&m| !used[m] && second[m].refa == a.refa && second[m].alt == a.alt) {
-                        Some(m) => { used[m] = true; sets.push((Some(a), Some(second[m].clone()))); }
+                    match (0..second.len())
+                        .find(|&m| !used[m] && second[m].refa == a.refa && second[m].alt == a.alt)
+                    {
+                        Some(m) => {
+                            used[m] = true;
+                            sets.push((Some(a), Some(second[m].clone())));
+                        }
                         None => sets.push((Some(a), None)),
                     }
                 }
                 for (m, b) in second.into_iter().enumerate() {
-                    if !used[m] { sets.push((None, Some(b))); }
+                    if !used[m] {
+                        sets.push((None, Some(b)));
+                    }
                 }
             }
 
@@ -714,33 +963,57 @@ fn concat_ligate(inputs_all: &[PathBuf], args: &ConcatArgs, samples: &[String], 
                         is_overlap = false;
                         // The remaining records of this position now belong to the first reader.
                         for s in sets.iter_mut() {
-                            if s.0.is_none() { s.0 = s.1.take(); }
+                            if s.0.is_none() {
+                                s.0 = s.1.take();
+                            }
                         }
                     } else if args.ligate_warn {
                         if !warned {
                             let l = b.as_ref().unwrap();
-                            eprintln!("Warning: Dropping the site {}:{}. The --ligate option is intended for VCFs with perfect\n         overlap, sites in overlapping regions present in one but missing in other are dropped.\n         This warning is printed only once.", l.chrom, l.pos);
+                            eprintln!(
+                                "Warning: Dropping the site {}:{}. The --ligate option is intended for VCFs with perfect\n         overlap, sites in overlapping regions present in one but missing in other are dropped.\n         This warning is printed only once.",
+                                l.chrom, l.pos
+                            );
                             warned = true;
                         }
                         continue;
                     } else if !args.ligate_force {
                         let l = b.as_ref().unwrap();
-                        bail!("Error: The --ligate option is intended for VCFs with perfect overlap, the site {}:{} breaks the assumption", l.chrom, l.pos);
+                        bail!(
+                            "Error: The --ligate option is intended for VCFs with perfect overlap, the site {}:{} breaks the assumption",
+                            l.chrom,
+                            l.pos
+                        );
                     }
                 }
                 let line = a.as_ref().or(b.as_ref()).unwrap().clone();
-                if readers.len() > 1 && b.is_none() && !(readers[1].done && readers[1].peek.is_none()) && !args.ligate_force {
+                if readers.len() > 1
+                    && b.is_none()
+                    && !(readers[1].done && readers[1].peek.is_none())
+                    && !args.ligate_force
+                {
                     if args.ligate_warn {
                         if !warned {
-                            eprintln!("Warning: Dropping the site {}:{}. The --ligate option is intended for VCFs with perfect\n         overlap, sites in overlapping regions present in one but missing in other are dropped.\n         This warning is printed only once.", line.chrom, line.pos);
+                            eprintln!(
+                                "Warning: Dropping the site {}:{}. The --ligate option is intended for VCFs with perfect\n         overlap, sites in overlapping regions present in one but missing in other are dropped.\n         This warning is printed only once.",
+                                line.chrom, line.pos
+                            );
                             warned = true;
                         }
                     } else {
-                        bail!("Error: The --ligate option is intended for VCFs with perfect overlap, the site {}:{} breaks the assumption", line.chrom, line.pos);
+                        bail!(
+                            "Error: The --ligate option is intended for VCFs with perfect overlap, the site {}:{} breaks the assumption",
+                            line.chrom,
+                            line.pos
+                        );
                     }
                     continue;
                 }
-                let (a, b) = if readers.len() == 1 || !is_overlap { (a.or(b), None) } else { (a, b) };
+                let (a, b) = if readers.len() == 1 || !is_overlap {
+                    (a.or(b), None)
+                } else {
+                    (a, b)
+                };
                 lig.push(a, b, is_overlap)?;
             }
         }
@@ -768,7 +1041,10 @@ fn concat_naive(inputs: &[PathBuf], args: &ConcatArgs, kind: OutputKind) -> Resu
         let s = extract_samples(&r.header()?);
         match &first_samples {
             None => first_samples = Some(s),
-            Some(f) if *f != s && !args.naive_force => bail!("concat --naive: sample names differ in {} (use --naive-force)", p.display()),
+            Some(f) if *f != s && !args.naive_force => bail!(
+                "concat --naive: sample names differ in {} (use --naive-force)",
+                p.display()
+            ),
             _ => {}
         }
     }
@@ -776,8 +1052,13 @@ fn concat_naive(inputs: &[PathBuf], args: &ConcatArgs, kind: OutputKind) -> Resu
     let out_path = args.output.as_deref();
     if can_copy {
         let mut out: Box<dyn Write> = match out_path {
-            Some(p) if p != Path::new("-") => Box::new(std::io::BufWriter::with_capacity(1 << 20, File::create(p)?)),
-            _ => Box::new(std::io::BufWriter::with_capacity(1 << 20, std::io::stdout())),
+            Some(p) if p != Path::new("-") => {
+                Box::new(std::io::BufWriter::with_capacity(1 << 20, File::create(p)?))
+            }
+            _ => Box::new(std::io::BufWriter::with_capacity(
+                1 << 20,
+                std::io::stdout(),
+            )),
         };
         for (i, p) in inputs.iter().enumerate() {
             copy_bgzf_data(p, i == 0, &mut out)?;
@@ -793,13 +1074,17 @@ fn concat_naive(inputs: &[PathBuf], args: &ConcatArgs, kind: OutputKind) -> Resu
     let mut sink = VcfSink::open(out_path, kind, &headers)?;
     sink.write_header(&headers)?;
     while let Some(line) = first.read_line()? {
-        if !line.starts_with('#') { sink.write_line(&line)?; }
+        if !line.starts_with('#') {
+            sink.write_line(&line)?;
+        }
     }
     for p in &inputs[1..] {
         let mut r = UnifiedVcfReader::open(p)?;
         let _ = r.header()?;
         while let Some(line) = r.read_line()? {
-            if !line.starts_with('#') { sink.write_line(&line)?; }
+            if !line.starts_with('#') {
+                sink.write_line(&line)?;
+            }
         }
     }
     sink.finish()
@@ -822,9 +1107,15 @@ fn copy_bgzf_data(path: &Path, with_header: bool, out: &mut dyn Write) -> Result
         let vpos = r.virtual_position();
         line.clear();
         let n = r.read_line(&mut line)?;
-        if n == 0 || !line.starts_with('#') { break vpos; }
+        if n == 0 || !line.starts_with('#') {
+            break vpos;
+        }
     };
-    let start = if with_header { noodles_bgzf::VirtualPosition::from(0) } else { first_data };
+    let start = if with_header {
+        noodles_bgzf::VirtualPosition::from(0)
+    } else {
+        first_data
+    };
     let block_off = start.compressed();
     let in_block = start.uncompressed() as usize;
 
@@ -836,7 +1127,9 @@ fn copy_bgzf_data(path: &Path, with_header: bool, out: &mut dyn Write) -> Result
         f.seek(SeekFrom::Start(len - 28))?;
         let mut tail = [0u8; 28];
         f.read_exact(&mut tail)?;
-        if tail == BGZF_EOF { end = len - 28; }
+        if tail == BGZF_EOF {
+            end = len - 28;
+        }
     }
     let mut copy_from = block_off;
     if in_block > 0 {
@@ -846,9 +1139,13 @@ fn copy_bgzf_data(path: &Path, with_header: bool, out: &mut dyn Write) -> Result
             let mut buf = Vec::new();
             loop {
                 let cur = r.virtual_position();
-                if cur.compressed() != block_off { break; }
+                if cur.compressed() != block_off {
+                    break;
+                }
                 let avail = r.fill_buf()?;
-                if avail.is_empty() { break; }
+                if avail.is_empty() {
+                    break;
+                }
                 let n = avail.len();
                 buf.extend_from_slice(avail);
                 r.consume(n);
@@ -859,7 +1156,11 @@ fn copy_bgzf_data(path: &Path, with_header: bool, out: &mut dyn Write) -> Result
         w.write_all(&rest)?;
         let bytes = w.finish()?;
         // Drop the EOF block the noodles writer appends.
-        let cut = if bytes.ends_with(&BGZF_EOF) { bytes.len() - 28 } else { bytes.len() };
+        let cut = if bytes.ends_with(&BGZF_EOF) {
+            bytes.len() - 28
+        } else {
+            bytes.len()
+        };
         out.write_all(&bytes[..cut])?;
         copy_from = r.virtual_position().compressed();
     }
@@ -870,7 +1171,9 @@ fn copy_bgzf_data(path: &Path, with_header: bool, out: &mut dyn Write) -> Result
         while remaining > 0 {
             let want = buf.len().min(remaining as usize);
             let n = f.read(&mut buf[..want])?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             out.write_all(&buf[..n])?;
             remaining -= n as u64;
         }

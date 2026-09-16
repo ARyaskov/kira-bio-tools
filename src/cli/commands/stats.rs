@@ -6,7 +6,9 @@ use crate::cli::args::StatsArgs;
 use crate::filter::FilterEngine;
 use crate::vcf::alleles::gt_alleles;
 use crate::vcf::header::{ContigDict, extract_samples};
-use crate::vcf::variant_type::{VT_INDEL, VT_MNP, VT_OTHER, VT_REF, VT_SNP, allele_type, record_type};
+use crate::vcf::variant_type::{
+    VT_INDEL, VT_MNP, VT_OTHER, VT_REF, VT_SNP, allele_type, record_type,
+};
 use crate::vcf::{UnifiedVcfReader, parse_vcf_line};
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
@@ -46,10 +48,21 @@ impl Site {
         };
         let alt_types: Vec<u32> = alts.iter().map(|a| allele_type(&refa, a).ty).collect();
         let rtype = record_type(&refa, cols[4]);
-        let qual = if cols[5] == "." { None } else { cols[5].parse().ok() };
-        let format: Vec<String> = if cols.len() > 8 { cols[8].split(':').map(|s| s.to_string()).collect() } else { Vec::new() };
+        let qual = if cols[5] == "." {
+            None
+        } else {
+            cols[5].parse().ok()
+        };
+        let format: Vec<String> = if cols.len() > 8 {
+            cols[8].split(':').map(|s| s.to_string()).collect()
+        } else {
+            Vec::new()
+        };
         let samples: Vec<Vec<String>> = if cols.len() > 9 {
-            cols[9..].iter().map(|s| s.split(':').map(|v| v.to_string()).collect()).collect()
+            cols[9..]
+                .iter()
+                .map(|s| s.split(':').map(|v| v.to_string()).collect())
+                .collect()
         } else {
             Vec::new()
         };
@@ -97,7 +110,11 @@ fn gt_type(gt: &str) -> (Gt, Option<usize>, Option<usize>) {
         return (Gt::Unknown, None, None);
     }
     if called.len() == 1 {
-        return if called[0] == 0 { (Gt::HaplR, Some(0), None) } else { (Gt::HaplA, Some(called[0]), None) };
+        return if called[0] == 0 {
+            (Gt::HaplR, Some(0), None)
+        } else {
+            (Gt::HaplA, Some(called[0]), None)
+        };
     }
     let (a, b) = (called[0], called[1]);
     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
@@ -112,7 +129,10 @@ fn gt_type(gt: &str) -> (Gt, Option<usize>, Option<usize>) {
 }
 
 fn is_ts(r: u8, a: u8) -> bool {
-    matches!((r, a), (b'A', b'G') | (b'G', b'A') | (b'C', b'T') | (b'T', b'C'))
+    matches!(
+        (r, a),
+        (b'A', b'G') | (b'G', b'A') | (b'C', b'T') | (b'T', b'C')
+    )
 }
 
 /// REF/ALT bases of a SNP allele the way bcftools sees them: the first base of
@@ -258,13 +278,23 @@ impl Stats {
         if s.alts.is_empty() || rt == VT_REF {
             self.n_no_alts += 1;
         }
-        if rt & VT_SNP != 0 { self.n_snps += 1; }
-        if rt & VT_MNP != 0 { self.n_mnps += 1; }
-        if rt & VT_INDEL != 0 { self.n_indels += 1; }
-        if rt & VT_OTHER != 0 { self.n_others += 1; }
+        if rt & VT_SNP != 0 {
+            self.n_snps += 1;
+        }
+        if rt & VT_MNP != 0 {
+            self.n_mnps += 1;
+        }
+        if rt & VT_INDEL != 0 {
+            self.n_indels += 1;
+        }
+        if rt & VT_OTHER != 0 {
+            self.n_others += 1;
+        }
         if s.alts.len() > 1 {
             self.n_multi += 1;
-            if s.alt_types.iter().all(|t| *t == VT_SNP) { self.n_multi_snps += 1; }
+            if s.alt_types.iter().all(|t| *t == VT_SNP) {
+                self.n_multi_snps += 1;
+            }
         }
 
         let n_al = s.alts.len() + 1;
@@ -282,31 +312,55 @@ impl Stats {
             let singleton = an > 0 && ac_i == 1;
             let bin = alt_bin(s, &ac, an, af_tag, i);
             if t == VT_SNP {
-                let Some((r, b)) = snp_bases(&s.refa, a) else { continue };
+                let Some((r, b)) = snp_bases(&s.refa, a) else {
+                    continue;
+                };
                 let ts = is_ts(r, b);
                 *self.subst.entry((r, b)).or_default() += 1;
-                if ts { self.ts += 1 } else { self.tv += 1 }
+                if ts {
+                    self.ts += 1
+                } else {
+                    self.tv += 1
+                }
                 if i == 0 {
                     alt1_ts = Some(ts);
-                    if ts { self.ts_alt1 += 1 } else { self.tv_alt1 += 1 }
+                    if ts {
+                        self.ts_alt1 += 1
+                    } else {
+                        self.tv_alt1 += 1
+                    }
                 }
                 self.af.entry(bin).or_default().add_snp(ts);
-                if singleton { self.singletons.add_snp(ts) }
+                if singleton {
+                    self.singletons.add_snp(ts)
+                }
             } else if t == VT_INDEL {
                 self.af.entry(bin).or_default().add_indel();
-                if singleton { self.singletons.add_indel() }
+                if singleton {
+                    self.singletons.add_indel()
+                }
                 self.idd.entry(s.indel_len(i + 1)).or_insert((0, 0, 0.0)).0 += 1;
             }
         }
 
-        let q = self.qual.entry(s.qual.map(|q| q.floor() as i64)).or_default();
+        let q = self
+            .qual
+            .entry(s.qual.map(|q| q.floor() as i64))
+            .or_default();
         if let Some(ts) = alt1_ts {
             q.0 += 1;
             if ts { q.1 += 1 } else { q.2 += 1 }
         }
-        if rt & VT_INDEL != 0 { q.3 += 1; }
+        if rt & VT_INDEL != 0 {
+            q.3 += 1;
+        }
 
-        if let Some(dp) = s.info.split(';').find_map(|kv| kv.strip_prefix("DP=")).and_then(|v| v.parse::<u32>().ok()) {
+        if let Some(dp) = s
+            .info
+            .split(';')
+            .find_map(|kv| kv.strip_prefix("DP="))
+            .and_then(|v| v.parse::<u32>().ok())
+        {
             *self.dp_site.entry(cfg.dp.bin(dp)).or_default() += 1;
             self.dp_site_total += 1;
         }
@@ -320,10 +374,14 @@ impl Stats {
         let (mut n_rr, mut n_ra, mut n_aa) = (0u32, 0u32, 0u32);
         let mut nonref: Vec<usize> = Vec::new();
         for (k, &si) in selected.iter().enumerate() {
-            let Some(smp) = s.samples.get(si) else { continue };
+            let Some(smp) = s.samples.get(si) else {
+                continue;
+            };
             let st = &mut self.samples[k];
             let ad: Option<Vec<f64>> = ad_idx.and_then(|i| smp.get(i)).map(|v| {
-                v.split(',').map(|x| x.parse::<f64>().unwrap_or(0.0)).collect()
+                v.split(',')
+                    .map(|x| x.parse::<f64>().unwrap_or(0.0))
+                    .collect()
             });
             let dp = dp_idx
                 .and_then(|i| smp.get(i))
@@ -338,18 +396,31 @@ impl Stats {
             let Some(gi) = gt_idx else { continue };
             let (g, ial, jal) = gt_type(smp.get(gi).map(String::as_str).unwrap_or("."));
             match g {
-                Gt::Unknown => { st.missing += 1; continue; }
-                Gt::HaplR => { st.hap_ref += 1; continue; }
-                Gt::HaplA => { st.hap_alt += 1; continue; }
+                Gt::Unknown => {
+                    st.missing += 1;
+                    continue;
+                }
+                Gt::HaplR => {
+                    st.hap_ref += 1;
+                    continue;
+                }
+                Gt::HaplA => {
+                    st.hap_alt += 1;
+                    continue;
+                }
                 Gt::HomRR => n_rr += 1,
                 Gt::HetRA => n_ra += 1,
                 Gt::HomAA => n_aa += 1,
                 Gt::HetAA => {}
             }
-            if g != Gt::HomRR { nonref.push(k); }
+            if g != Gt::HomRR {
+                nonref.push(k);
+            }
             let mut alleles: Vec<usize> = Vec::with_capacity(2);
             for a in [ial, jal].into_iter().flatten() {
-                if a > 0 && a <= s.alts.len() && !alleles.contains(&a) { alleles.push(a); }
+                if a > 0 && a <= s.alts.len() && !alleles.contains(&a) {
+                    alleles.push(a);
+                }
             }
             // Class counters follow the sample's own allele types (VT_REF for 0/0).
             let var_type = alleles.iter().fold(VT_REF, |m, &a| m | s.alt_types[a - 1]);
@@ -371,7 +442,11 @@ impl Stats {
                         }
                     }
                     VT_INDEL => {
-                        if s.indel_len(a) > 0 { has_ins = true } else { has_del = true }
+                        if s.indel_len(a) > 0 {
+                            has_ins = true
+                        } else {
+                            has_del = true
+                        }
                     }
                     _ => {}
                 }
@@ -379,11 +454,19 @@ impl Stats {
             if has_ins || has_del {
                 st.indels += 1;
                 if is_het {
-                    if has_ins { st.ins_hets += 1 }
-                    if has_del { st.del_hets += 1 }
+                    if has_ins {
+                        st.ins_hets += 1
+                    }
+                    if has_del {
+                        st.del_hets += 1
+                    }
                 } else {
-                    if has_ins { st.ins_homs += 1 }
-                    if has_del { st.del_homs += 1 }
+                    if has_ins {
+                        st.ins_homs += 1
+                    }
+                    if has_del {
+                        st.del_homs += 1
+                    }
                 }
             }
             // VAF from AD: per carried allele, SNVs and indels binned separately.
@@ -392,7 +475,9 @@ impl Stats {
                 if tot > 0.0 {
                     for &a in &alleles {
                         let x = ad.get(a).copied().unwrap_or(0.0);
-                        if x <= 0.0 { continue; }
+                        if x <= 0.0 {
+                            continue;
+                        }
                         let vaf = x / tot;
                         match s.alt_types[a - 1] {
                             VT_SNP => st.vaf_snv[vaf_bin(vaf)] += 1,
@@ -429,14 +514,20 @@ fn allele_counts(s: &Site, selected: &[usize], n_al: usize) -> (Vec<u32>, u32) {
     let mut info_an: Option<u32> = None;
     for kv in s.info.split(';') {
         if let Some(v) = kv.strip_prefix("AC=") {
-            info_ac = Some(v.split(',').map(|x| x.parse::<u32>().unwrap_or(0)).collect());
+            info_ac = Some(
+                v.split(',')
+                    .map(|x| x.parse::<u32>().unwrap_or(0))
+                    .collect(),
+            );
         } else if let Some(v) = kv.strip_prefix("AN=") {
             info_an = v.parse().ok();
         }
     }
     if let (Some(iac), Some(an)) = (info_ac, info_an) {
         for (i, c) in iac.iter().enumerate() {
-            if i + 1 < ac.len() { ac[i + 1] = *c; }
+            if i + 1 < ac.len() {
+                ac[i + 1] = *c;
+            }
         }
         ac[0] = an.saturating_sub(iac.iter().sum());
         return (ac, an);
@@ -447,7 +538,9 @@ fn allele_counts(s: &Site, selected: &[usize], n_al: usize) -> (Vec<u32>, u32) {
             let gt = smp.get(gi).map(String::as_str).unwrap_or(".");
             for a in gt_alleles(gt).into_iter().flatten() {
                 an += 1;
-                if a < ac.len() { ac[a] += 1; }
+                if a < ac.len() {
+                    ac[a] += 1;
+                }
             }
         }
     }
@@ -457,9 +550,13 @@ fn allele_counts(s: &Site, selected: &[usize], n_al: usize) -> (Vec<u32>, u32) {
 fn info_af_bin(info: &str, tag: &str, alt_idx: usize) -> usize {
     for kv in info.split(';') {
         if let Some(v) = kv.strip_prefix(tag).and_then(|r| r.strip_prefix('='))
-            && let Some(af) = v.split(',').nth(alt_idx).and_then(|x| x.parse::<f64>().ok()) {
-                return ((af * (AF_BINS as f64 - 1.0)) as usize).min(AF_BINS - 1);
-            }
+            && let Some(af) = v
+                .split(',')
+                .nth(alt_idx)
+                .and_then(|x| x.parse::<f64>().ok())
+        {
+            return ((af * (AF_BINS as f64 - 1.0)) as usize).min(AF_BINS - 1);
+        }
     }
     0
 }
@@ -472,9 +569,19 @@ struct DpBins {
 
 impl DpBins {
     fn parse(s: &str) -> Result<Self> {
-        let v: Vec<u32> = s.split(',').map(|x| x.trim().parse::<u32>()).collect::<Result<_, _>>().context("-d/--depth")?;
-        if v.len() != 3 || v[2] == 0 { bail!("--depth expects min,max,step"); }
-        Ok(Self { min: v[0], max: v[1], step: v[2] })
+        let v: Vec<u32> = s
+            .split(',')
+            .map(|x| x.trim().parse::<u32>())
+            .collect::<Result<_, _>>()
+            .context("-d/--depth")?;
+        if v.len() != 3 || v[2] == 0 {
+            bail!("--depth expects min,max,step");
+        }
+        Ok(Self {
+            min: v[0],
+            max: v[1],
+            step: v[2],
+        })
     }
 
     /// Bin value printed in the DP section; depths beyond `max` collapse into `max+step`.
@@ -530,14 +637,28 @@ impl Concordance {
     }
 
     fn add(&mut self, a: &Site, b: &Site, sel_a: &[usize], sel_b: &[usize], af_bin: usize) {
-        let (Some(ga), Some(gb)) = (a.fmt_idx("GT"), b.fmt_idx("GT")) else { return };
+        let (Some(ga), Some(gb)) = (a.fmt_idx("GT"), b.fmt_idx("GT")) else {
+            return;
+        };
         for (k, (&sa, &sb)) in sel_a.iter().zip(sel_b.iter()).enumerate() {
-            let gta = a.samples.get(sa).and_then(|s| s.get(ga)).map(String::as_str).unwrap_or(".");
-            let gtb = b.samples.get(sb).and_then(|s| s.get(gb)).map(String::as_str).unwrap_or(".");
+            let gta = a
+                .samples
+                .get(sa)
+                .and_then(|s| s.get(ga))
+                .map(String::as_str)
+                .unwrap_or(".");
+            let gtb = b
+                .samples
+                .get(sb)
+                .and_then(|s| s.get(gb))
+                .map(String::as_str)
+                .unwrap_or(".");
             let (ta, ..) = gt_type(gta);
             let (tb, ..) = gt_type(gtb);
             self.table[k][Self::class(ta)][Self::class(tb)] += 1;
-            if matches!(ta, Gt::Unknown | Gt::HaplR | Gt::HaplA) || matches!(tb, Gt::Unknown | Gt::HaplR | Gt::HaplA) {
+            if matches!(ta, Gt::Unknown | Gt::HaplR | Gt::HaplA)
+                || matches!(tb, Gt::Unknown | Gt::HaplR | Gt::HaplA)
+            {
                 continue;
             }
             let ca = Self::class(ta).min(2);
@@ -548,10 +669,23 @@ impl Concordance {
             e[idx] += 1;
             self.by_sample[k][idx] += 1;
             if let (Some(da), Some(db)) = (Self::dosage(ta), Self::dosage(tb)) {
-                let d = self.by_af_dosage.entry(af_bin).or_insert((0.0, 0.0, 0.0, 0.0, 0.0, 0));
-                d.0 += da; d.1 += db; d.2 += da * da; d.3 += db * db; d.4 += da * db; d.5 += 1;
+                let d = self
+                    .by_af_dosage
+                    .entry(af_bin)
+                    .or_insert((0.0, 0.0, 0.0, 0.0, 0.0, 0));
+                d.0 += da;
+                d.1 += db;
+                d.2 += da * da;
+                d.3 += db * db;
+                d.4 += da * db;
+                d.5 += 1;
                 let s = &mut self.by_sample_dosage[k];
-                s.0 += da; s.1 += db; s.2 += da * da; s.3 += db * db; s.4 += da * db; s.5 += 1;
+                s.0 += da;
+                s.1 += db;
+                s.2 += da * da;
+                s.3 += db * db;
+                s.4 += da * db;
+                s.5 += 1;
             }
         }
     }
@@ -560,11 +694,15 @@ impl Concordance {
 /// Dosage r²; `None` when either file has no dosage variance.
 fn r_squared(d: &(f64, f64, f64, f64, f64, u64)) -> Option<f64> {
     let n = d.5 as f64;
-    if n < 2.0 { return None; }
+    if n < 2.0 {
+        return None;
+    }
     let cov = d.4 / n - (d.0 / n) * (d.1 / n);
     let va = d.2 / n - (d.0 / n).powi(2);
     let vb = d.3 / n - (d.1 / n).powi(2);
-    if va <= 1e-12 || vb <= 1e-12 { return None; }
+    if va <= 1e-12 || vb <= 1e-12 {
+        return None;
+    }
     Some((cov * cov / (va * vb)).clamp(0.0, 1.0))
 }
 
@@ -591,24 +729,48 @@ struct Input {
 impl Input {
     fn advance(&mut self, contigs: &mut ContigDict) -> Result<()> {
         loop {
-            let Some(line) = self.reader.read_line()? else { self.next = None; return Ok(()); };
-            if line.is_empty() || line.as_bytes()[0] == b'#' { continue; }
+            let Some(line) = self.reader.read_line()? else {
+                self.next = None;
+                return Ok(());
+            };
+            if line.is_empty() || line.as_bytes()[0] == b'#' {
+                continue;
+            }
             if let Some(rf) = &self.region
-                && !rf.line_passes_mode(&line, self.regions_overlap) { continue; }
+                && !rf.line_passes_mode(&line, self.regions_overlap)
+            {
+                continue;
+            }
             if let Some(tf) = &self.target
-                && tf.line_passes_mode(&line, 0) == self.target_inverse { continue; }
+                && tf.line_passes_mode(&line, 0) == self.target_inverse
+            {
+                continue;
+            }
             if let Some(af) = &self.apply_filters {
                 let f = line.split('\t').nth(6).unwrap_or(".");
-                let pass = if f == "." || f.is_empty() { af.iter().any(|a| a == ".") } else { f.split(';').any(|t| af.iter().any(|a| a == t)) };
-                if !pass { continue; }
+                let pass = if f == "." || f.is_empty() {
+                    af.iter().any(|a| a == ".")
+                } else {
+                    f.split(';').any(|t| af.iter().any(|a| a == t))
+                };
+                if !pass {
+                    continue;
+                }
             }
             if (self.include.is_some() || self.exclude.is_some())
-                && let Some(rec) = parse_vcf_line(&line) {
-                    if let Some(e) = &self.include
-                        && !e.eval(&rec).map(|r| r.pass_site).unwrap_or(true) { continue; }
-                    if let Some(e) = &self.exclude
-                        && e.eval(&rec).map(|r| r.pass_site).unwrap_or(false) { continue; }
+                && let Some(rec) = parse_vcf_line(&line)
+            {
+                if let Some(e) = &self.include
+                    && !e.eval(&rec).map(|r| r.pass_site).unwrap_or(true)
+                {
+                    continue;
                 }
+                if let Some(e) = &self.exclude
+                    && e.eval(&rec).map(|r| r.pass_site).unwrap_or(false)
+                {
+                    continue;
+                }
+            }
             if let Some(site) = Site::parse(&line, contigs) {
                 self.next = Some(site);
                 return Ok(());
@@ -626,8 +788,12 @@ impl Input {
 }
 
 pub fn cmd_stats(args: StatsArgs) -> Result<()> {
-    if args.inputs.is_empty() { bail!("stats: at least one input required"); }
-    if args.inputs.len() > 2 { bail!("stats: at most two input files can be compared"); }
+    if args.inputs.is_empty() {
+        bail!("stats: at least one input required");
+    }
+    if args.inputs.len() > 2 {
+        bail!("stats: at most two input files can be compared");
+    }
     let region = if let Some(s) = &args.regions {
         Some(RegionFilter::from_cli(s)?)
     } else if let Some(p) = &args.regions_file {
@@ -643,7 +809,10 @@ pub fn cmd_stats(args: StatsArgs) -> Result<()> {
         None
     };
     let target_inverse = args.targets.as_deref().is_some_and(|s| s.starts_with('^'));
-    let apply_filters: Option<Vec<String>> = args.apply_filters.as_deref().map(|s| s.split(',').map(|t| t.trim().to_string()).collect());
+    let apply_filters: Option<Vec<String>> = args
+        .apply_filters
+        .as_deref()
+        .map(|s| s.split(',').map(|t| t.trim().to_string()).collect());
 
     let mut contigs = ContigDict::new();
     let mut inputs: Vec<Input> = Vec::new();
@@ -657,8 +826,18 @@ pub fn cmd_stats(args: StatsArgs) -> Result<()> {
         let all = extract_samples(&headers);
         header_n.push(all.len());
         let selected = select_samples(&all, args.samples.as_deref(), args.samples_file.as_deref())?;
-        let include = args.include.as_deref().map(|e| FilterEngine::new(&headers, Some(e), false)).transpose().context("-i")?;
-        let exclude = args.exclude.as_deref().map(|e| FilterEngine::new(&headers, Some(e), false)).transpose().context("-e")?;
+        let include = args
+            .include
+            .as_deref()
+            .map(|e| FilterEngine::new(&headers, Some(e), false))
+            .transpose()
+            .context("-i")?;
+        let exclude = args
+            .exclude
+            .as_deref()
+            .map(|e| FilterEngine::new(&headers, Some(e), false))
+            .transpose()
+            .context("-e")?;
         names.push(selected.iter().map(|&i| all[i].clone()).collect());
         let mut inp = Input {
             reader: r,
@@ -690,7 +869,11 @@ pub fn cmd_stats(args: StatsArgs) -> Result<()> {
     let mut set_names: Vec<Vec<String>> = Vec::new();
     if two {
         // The shared set uses the samples common to both files.
-        let common: Vec<String> = names[0].iter().filter(|n| names[1].contains(n)).cloned().collect();
+        let common: Vec<String> = names[0]
+            .iter()
+            .filter(|n| names[1].contains(n))
+            .cloned()
+            .collect();
         sets.push(Stats::new(&names[0], header_n[0]));
         sets.push(Stats::new(&names[1], header_n[1]));
         sets.push(Stats::new(&common, common.len()));
@@ -711,13 +894,21 @@ pub fn cmd_stats(args: StatsArgs) -> Result<()> {
     let mut conc_indels = Concordance::new(n_common);
     let (sel_a, sel_b): (Vec<usize>, Vec<usize>) = if two {
         let common = &sets[2].sample_names;
-        let pick = |f: usize, n: &String| inputs[f].selected[names[f].iter().position(|x| x == n).unwrap()];
-        (common.iter().map(|n| pick(0, n)).collect(), common.iter().map(|n| pick(1, n)).collect())
+        let pick = |f: usize, n: &String| {
+            inputs[f].selected[names[f].iter().position(|x| x == n).unwrap()]
+        };
+        (
+            common.iter().map(|n| pick(0, n)).collect(),
+            common.iter().map(|n| pick(1, n)).collect(),
+        )
     } else {
         (Vec::new(), Vec::new())
     };
     let sel0 = inputs[0].selected.clone();
-    let sel1 = inputs.get(1).map(|i| i.selected.clone()).unwrap_or_default();
+    let sel1 = inputs
+        .get(1)
+        .map(|i| i.selected.clone())
+        .unwrap_or_default();
 
     if !two {
         while let Some(site) = inputs[0].take(&mut contigs)? {
@@ -754,10 +945,18 @@ pub fn cmd_stats(args: StatsArgs) -> Result<()> {
             // Same position: pair records by alleles, the rest stay file-private.
             let mut ra: Vec<Site> = Vec::new();
             let mut rb: Vec<Site> = Vec::new();
-            while inputs[0].next.as_ref().is_some_and(|s| (s.rank, s.pos) == a) {
+            while inputs[0]
+                .next
+                .as_ref()
+                .is_some_and(|s| (s.rank, s.pos) == a)
+            {
                 ra.push(inputs[0].take(&mut contigs)?.unwrap());
             }
-            while inputs[1].next.as_ref().is_some_and(|s| (s.rank, s.pos) == b) {
+            while inputs[1]
+                .next
+                .as_ref()
+                .is_some_and(|s| (s.rank, s.pos) == b)
+            {
                 rb.push(inputs[1].take(&mut contigs)?.unwrap());
             }
             let mut used_b = vec![false; rb.len()];
@@ -766,7 +965,11 @@ pub fn cmd_stats(args: StatsArgs) -> Result<()> {
                     !used_b[j]
                         && sa.refa.eq_ignore_ascii_case(&sb.refa)
                         && sa.alts.len() == sb.alts.len()
-                        && sa.alts.iter().zip(sb.alts.iter()).all(|(x, y)| x.eq_ignore_ascii_case(y))
+                        && sa
+                            .alts
+                            .iter()
+                            .zip(sb.alts.iter())
+                            .all(|(x, y)| x.eq_ignore_ascii_case(y))
                 });
                 match m {
                     Some(j) => {
@@ -792,7 +995,17 @@ pub fn cmd_stats(args: StatsArgs) -> Result<()> {
         }
     }
 
-    print_stats(&args, &sets, &set_names, &cfg, if two { Some((&conc_snps, &conc_indels)) } else { None })
+    print_stats(
+        &args,
+        &sets,
+        &set_names,
+        &cfg,
+        if two {
+            Some((&conc_snps, &conc_indels))
+        } else {
+            None
+        },
+    )
 }
 
 fn select_samples(all: &[String], cli: Option<&str>, file: Option<&Path>) -> Result<Vec<usize>> {
@@ -800,13 +1013,23 @@ fn select_samples(all: &[String], cli: Option<&str>, file: Option<&Path>) -> Res
     match cli {
         Some("-") => return Ok((0..all.len()).collect()),
         Some(s) => {
-            let (inv, body) = match s.strip_prefix('^') { Some(b) => (true, b), None => (false, s) };
+            let (inv, body) = match s.strip_prefix('^') {
+                Some(b) => (true, b),
+                None => (false, s),
+            };
             for t in body.split(',') {
                 let t = t.trim();
-                if !t.is_empty() { names.push(t.to_string()); }
+                if !t.is_empty() {
+                    names.push(t.to_string());
+                }
             }
             if inv {
-                return Ok(all.iter().enumerate().filter(|(_, n)| !names.contains(n)).map(|(i, _)| i).collect());
+                return Ok(all
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, n)| !names.contains(n))
+                    .map(|(i, _)| i)
+                    .collect());
             }
         }
         None => {}
@@ -815,7 +1038,9 @@ fn select_samples(all: &[String], cli: Option<&str>, file: Option<&Path>) -> Res
         let text = std::fs::read_to_string(p).with_context(|| format!("-S {}", p.display()))?;
         for l in text.lines() {
             let t = l.trim();
-            if !t.is_empty() && !t.starts_with('#') { names.push(t.split_whitespace().next().unwrap_or("").to_string()); }
+            if !t.is_empty() && !t.starts_with('#') {
+                names.push(t.split_whitespace().next().unwrap_or("").to_string());
+            }
         }
     }
     if names.is_empty() && file.is_none() && cli.is_none() {
@@ -831,13 +1056,27 @@ fn select_samples(all: &[String], cli: Option<&str>, file: Option<&Path>) -> Res
     Ok(out)
 }
 
-fn print_stats(args: &StatsArgs, sets: &[Stats], set_names: &[Vec<String>], cfg: &Cfg, conc: Option<(&Concordance, &Concordance)>) -> Result<()> {
+fn print_stats(
+    args: &StatsArgs,
+    sets: &[Stats],
+    set_names: &[Vec<String>],
+    cfg: &Cfg,
+    conc: Option<(&Concordance, &Concordance)>,
+) -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::with_capacity(64 * 1024, stdout.lock());
     let cmd: Vec<String> = std::env::args().skip(2).filter(|a| a != "--").collect();
 
-    writeln!(out, "# This file was produced by kira-bt stats ({}) and can be plotted using plot-vcfstats.", env!("CARGO_PKG_VERSION"))?;
-    writeln!(out, "# The command line was:\tkira-bt stats {}", cmd.join(" "))?;
+    writeln!(
+        out,
+        "# This file was produced by kira-bt stats ({}) and can be plotted using plot-vcfstats.",
+        env!("CARGO_PKG_VERSION")
+    )?;
+    writeln!(
+        out,
+        "# The command line was:\tkira-bt stats {}",
+        cmd.join(" ")
+    )?;
     writeln!(out, "#")?;
     writeln!(out, "# Definition of sets:")?;
     writeln!(out, "# ID\t[2]id\t[3]tab-separated file names")?;
@@ -845,25 +1084,57 @@ fn print_stats(args: &StatsArgs, sets: &[Stats], set_names: &[Vec<String>], cfg:
         writeln!(out, "ID\t{}\t{}", i, n.join("\t"))?;
     }
     writeln!(out, "# SN, Summary numbers:")?;
-    writeln!(out, "#   number of records   .. number of data rows in the VCF")?;
-    writeln!(out, "#   number of no-ALTs   .. reference-only sites, ALT is either \".\" or identical to REF")?;
+    writeln!(
+        out,
+        "#   number of records   .. number of data rows in the VCF"
+    )?;
+    writeln!(
+        out,
+        "#   number of no-ALTs   .. reference-only sites, ALT is either \".\" or identical to REF"
+    )?;
     writeln!(out, "#   number of SNPs      .. number of rows with a SNP")?;
-    writeln!(out, "#   number of MNPs      .. number of rows with a MNP, such as CC>TT")?;
-    writeln!(out, "#   number of indels    .. number of rows with an indel")?;
-    writeln!(out, "#   number of others    .. number of rows with other type, for example a symbolic allele or")?;
-    writeln!(out, "#                          a complex substitution, such as ACT>TCGA")?;
-    writeln!(out, "#   number of multiallelic sites     .. number of rows with multiple alternate alleles")?;
-    writeln!(out, "#   number of multiallelic SNP sites .. number of rows with multiple alternate alleles, all SNPs")?;
+    writeln!(
+        out,
+        "#   number of MNPs      .. number of rows with a MNP, such as CC>TT"
+    )?;
+    writeln!(
+        out,
+        "#   number of indels    .. number of rows with an indel"
+    )?;
+    writeln!(
+        out,
+        "#   number of others    .. number of rows with other type, for example a symbolic allele or"
+    )?;
+    writeln!(
+        out,
+        "#                          a complex substitution, such as ACT>TCGA"
+    )?;
+    writeln!(
+        out,
+        "#   number of multiallelic sites     .. number of rows with multiple alternate alleles"
+    )?;
+    writeln!(
+        out,
+        "#   number of multiallelic SNP sites .. number of rows with multiple alternate alleles, all SNPs"
+    )?;
     writeln!(out, "# ")?;
-    writeln!(out, "#   Note that rows containing multiple types will be counted multiple times, in each")?;
-    writeln!(out, "#   counter. For example, a row with a SNP and an indel increments both the SNP and")?;
+    writeln!(
+        out,
+        "#   Note that rows containing multiple types will be counted multiple times, in each"
+    )?;
+    writeln!(
+        out,
+        "#   counter. For example, a row with a SNP and an indel increments both the SNP and"
+    )?;
     writeln!(out, "#   the indel counter.")?;
     writeln!(out, "# ")?;
     writeln!(out, "# SN\t[2]id\t[3]key\t[4]value")?;
     let has_samples = args.samples.is_some() || args.samples_file.is_some();
     if has_samples {
         for (i, s) in sets.iter().enumerate() {
-            if sets.len() == 3 && i == 2 { continue; }
+            if sets.len() == 3 && i == 2 {
+                continue;
+            }
             writeln!(out, "SN\t{}\tnumber of samples:\t{}", i, s.n_header_samples)?;
         }
     }
@@ -874,47 +1145,115 @@ fn print_stats(args: &StatsArgs, sets: &[Stats], set_names: &[Vec<String>], cfg:
         writeln!(out, "SN\t{}\tnumber of MNPs:\t{}", i, s.n_mnps)?;
         writeln!(out, "SN\t{}\tnumber of indels:\t{}", i, s.n_indels)?;
         writeln!(out, "SN\t{}\tnumber of others:\t{}", i, s.n_others)?;
-        writeln!(out, "SN\t{}\tnumber of multiallelic sites:\t{}", i, s.n_multi)?;
-        writeln!(out, "SN\t{}\tnumber of multiallelic SNP sites:\t{}", i, s.n_multi_snps)?;
+        writeln!(
+            out,
+            "SN\t{}\tnumber of multiallelic sites:\t{}",
+            i, s.n_multi
+        )?;
+        writeln!(
+            out,
+            "SN\t{}\tnumber of multiallelic SNP sites:\t{}",
+            i, s.n_multi_snps
+        )?;
     }
 
     writeln!(out, "# TSTV, transitions/transversions:")?;
-    writeln!(out, "# TSTV\t[2]id\t[3]ts\t[4]tv\t[5]ts/tv\t[6]ts (1st ALT)\t[7]tv (1st ALT)\t[8]ts/tv (1st ALT)")?;
+    writeln!(
+        out,
+        "# TSTV\t[2]id\t[3]ts\t[4]tv\t[5]ts/tv\t[6]ts (1st ALT)\t[7]tv (1st ALT)\t[8]ts/tv (1st ALT)"
+    )?;
     for (i, s) in sets.iter().enumerate() {
-        writeln!(out, "TSTV\t{}\t{}\t{}\t{}\t{}\t{}\t{}", i, s.ts, s.tv, ratio(s.ts, s.tv), s.ts_alt1, s.tv_alt1, ratio(s.ts_alt1, s.tv_alt1))?;
+        writeln!(
+            out,
+            "TSTV\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            i,
+            s.ts,
+            s.tv,
+            ratio(s.ts, s.tv),
+            s.ts_alt1,
+            s.tv_alt1,
+            ratio(s.ts_alt1, s.tv_alt1)
+        )?;
     }
 
     writeln!(out, "# SiS, Singleton stats:")?;
-    writeln!(out, "# SiS\t[2]id\t[3]allele count\t[4]number of SNPs\t[5]number of transitions\t[6]number of transversions\t[7]number of indels\t[8]repeat-consistent\t[9]repeat-inconsistent\t[10]not applicable")?;
+    writeln!(
+        out,
+        "# SiS\t[2]id\t[3]allele count\t[4]number of SNPs\t[5]number of transitions\t[6]number of transversions\t[7]number of indels\t[8]repeat-consistent\t[9]repeat-inconsistent\t[10]not applicable"
+    )?;
     for (i, s) in sets.iter().enumerate() {
         let c = &s.singletons;
-        writeln!(out, "SiS\t{}\t1\t{}\t{}\t{}\t{}\t{}\t{}\t{}", i, c.snps, c.ts, c.tv, c.indels, c.repeat_consistent, c.repeat_inconsistent, c.not_applicable)?;
+        writeln!(
+            out,
+            "SiS\t{}\t1\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            i,
+            c.snps,
+            c.ts,
+            c.tv,
+            c.indels,
+            c.repeat_consistent,
+            c.repeat_inconsistent,
+            c.not_applicable
+        )?;
     }
 
     writeln!(out, "# AF, Stats by non-reference allele frequency:")?;
-    writeln!(out, "# AF\t[2]id\t[3]allele frequency\t[4]number of SNPs\t[5]number of transitions\t[6]number of transversions\t[7]number of indels\t[8]repeat-consistent\t[9]repeat-inconsistent\t[10]not applicable")?;
+    writeln!(
+        out,
+        "# AF\t[2]id\t[3]allele frequency\t[4]number of SNPs\t[5]number of transitions\t[6]number of transversions\t[7]number of indels\t[8]repeat-consistent\t[9]repeat-inconsistent\t[10]not applicable"
+    )?;
     for (i, s) in sets.iter().enumerate() {
         for (bin, c) in &s.af {
-            if c.snps == 0 && c.indels == 0 { continue; }
-            writeln!(out, "AF\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", i, *bin as f64 / AF_BINS as f64, c.snps, c.ts, c.tv, c.indels, c.repeat_consistent, c.repeat_inconsistent, c.not_applicable)?;
+            if c.snps == 0 && c.indels == 0 {
+                continue;
+            }
+            writeln!(
+                out,
+                "AF\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                i,
+                *bin as f64 / AF_BINS as f64,
+                c.snps,
+                c.ts,
+                c.tv,
+                c.indels,
+                c.repeat_consistent,
+                c.repeat_inconsistent,
+                c.not_applicable
+            )?;
         }
     }
 
     writeln!(out, "# QUAL, Stats by quality")?;
-    writeln!(out, "# QUAL\t[2]id\t[3]Quality\t[4]number of SNPs\t[5]number of transitions (1st ALT)\t[6]number of transversions (1st ALT)\t[7]number of indels")?;
+    writeln!(
+        out,
+        "# QUAL\t[2]id\t[3]Quality\t[4]number of SNPs\t[5]number of transitions (1st ALT)\t[6]number of transversions (1st ALT)\t[7]number of indels"
+    )?;
     for (i, s) in sets.iter().enumerate() {
         for (q, v) in &s.qual {
-            if v.0 == 0 && v.3 == 0 { continue; }
+            if v.0 == 0 && v.3 == 0 {
+                continue;
+            }
             let qs = q.map(|x| x.to_string()).unwrap_or_else(|| ".".into());
-            writeln!(out, "QUAL\t{}\t{}\t{}\t{}\t{}\t{}", i, qs, v.0, v.1, v.2, v.3)?;
+            writeln!(
+                out,
+                "QUAL\t{}\t{}\t{}\t{}\t{}\t{}",
+                i, qs, v.0, v.1, v.2, v.3
+            )?;
         }
     }
 
     writeln!(out, "# IDD, InDel distribution:")?;
-    writeln!(out, "# IDD\t[2]id\t[3]length (deletions negative)\t[4]number of sites\t[5]number of genotypes\t[6]mean VAF")?;
+    writeln!(
+        out,
+        "# IDD\t[2]id\t[3]length (deletions negative)\t[4]number of sites\t[5]number of genotypes\t[6]mean VAF"
+    )?;
     for (i, s) in sets.iter().enumerate() {
         for (len, (sites, gts, vaf)) in &s.idd {
-            let mean = if *gts > 0 { format!("{:.2}", vaf / *gts as f64) } else { ".".to_string() };
+            let mean = if *gts > 0 {
+                format!("{:.2}", vaf / *gts as f64)
+            } else {
+                ".".to_string()
+            };
             writeln!(out, "IDD\t{}\t{}\t{}\t{}\t{}", i, len, sites, gts, mean)?;
         }
     }
@@ -922,10 +1261,18 @@ fn print_stats(args: &StatsArgs, sets: &[Stats], set_names: &[Vec<String>], cfg:
     writeln!(out, "# ST, Substitution types:")?;
     writeln!(out, "# ST\t[2]id\t[3]type\t[4]count")?;
     let types = [
-        (b'A', b'C'), (b'A', b'G'), (b'A', b'T'),
-        (b'C', b'A'), (b'C', b'G'), (b'C', b'T'),
-        (b'G', b'A'), (b'G', b'C'), (b'G', b'T'),
-        (b'T', b'A'), (b'T', b'C'), (b'T', b'G'),
+        (b'A', b'C'),
+        (b'A', b'G'),
+        (b'A', b'T'),
+        (b'C', b'A'),
+        (b'C', b'G'),
+        (b'C', b'T'),
+        (b'G', b'A'),
+        (b'G', b'C'),
+        (b'G', b'T'),
+        (b'T', b'A'),
+        (b'T', b'C'),
+        (b'T', b'G'),
     ];
     for (i, s) in sets.iter().enumerate() {
         for (r, a) in &types {
@@ -942,7 +1289,10 @@ fn print_stats(args: &StatsArgs, sets: &[Stats], set_names: &[Vec<String>], cfg:
     }
 
     writeln!(out, "# DP, Depth distribution")?;
-    writeln!(out, "# DP\t[2]id\t[3]bin\t[4]number of genotypes\t[5]fraction of genotypes (%)\t[6]number of sites\t[7]fraction of sites (%)")?;
+    writeln!(
+        out,
+        "# DP\t[2]id\t[3]bin\t[4]number of genotypes\t[5]fraction of genotypes (%)\t[6]number of sites\t[7]fraction of sites (%)"
+    )?;
     for (i, s) in sets.iter().enumerate() {
         let mut bins: Vec<u32> = s.dp_gt.keys().chain(s.dp_site.keys()).copied().collect();
         bins.sort_unstable();
@@ -950,61 +1300,141 @@ fn print_stats(args: &StatsArgs, sets: &[Stats], set_names: &[Vec<String>], cfg:
         for bin in bins {
             let g = s.dp_gt.get(&bin).copied().unwrap_or(0);
             let st = s.dp_site.get(&bin).copied().unwrap_or(0);
-            let gf = if s.dp_gt_total > 0 { 100.0 * g as f64 / s.dp_gt_total as f64 } else { 0.0 };
-            let sf = if s.dp_site_total > 0 { 100.0 * st as f64 / s.dp_site_total as f64 } else { 0.0 };
-            let label = if bin > cfg.dp.max { format!(">{}", cfg.dp.max) } else { bin.to_string() };
-            writeln!(out, "DP\t{}\t{}\t{}\t{:.6}\t{}\t{:.6}", i, label, g, gf, st, sf)?;
+            let gf = if s.dp_gt_total > 0 {
+                100.0 * g as f64 / s.dp_gt_total as f64
+            } else {
+                0.0
+            };
+            let sf = if s.dp_site_total > 0 {
+                100.0 * st as f64 / s.dp_site_total as f64
+            } else {
+                0.0
+            };
+            let label = if bin > cfg.dp.max {
+                format!(">{}", cfg.dp.max)
+            } else {
+                bin.to_string()
+            };
+            writeln!(
+                out,
+                "DP\t{}\t{}\t{}\t{:.6}\t{}\t{:.6}",
+                i, label, g, gf, st, sf
+            )?;
         }
     }
 
-    writeln!(out, "# PSC, Per-sample counts. Note that the ref/het/hom counts include only SNPs, for indels see PSI. The rest include both SNPs and indels.")?;
-    writeln!(out, "# PSC\t[2]id\t[3]sample\t[4]nRefHom\t[5]nNonRefHom\t[6]nHets\t[7]nTransitions\t[8]nTransversions\t[9]nIndels\t[10]average depth\t[11]nSingletons\t[12]nHapRef\t[13]nHapAlt\t[14]nMissing")?;
+    writeln!(
+        out,
+        "# PSC, Per-sample counts. Note that the ref/het/hom counts include only SNPs, for indels see PSI. The rest include both SNPs and indels."
+    )?;
+    writeln!(
+        out,
+        "# PSC\t[2]id\t[3]sample\t[4]nRefHom\t[5]nNonRefHom\t[6]nHets\t[7]nTransitions\t[8]nTransversions\t[9]nIndels\t[10]average depth\t[11]nSingletons\t[12]nHapRef\t[13]nHapAlt\t[14]nMissing"
+    )?;
     for (i, s) in sets.iter().enumerate() {
         for (j, name) in s.sample_names.iter().enumerate() {
             let st = &s.samples[j];
-            let avg = if st.dp_n > 0 { st.dp_sum / st.dp_n as f64 } else { 0.0 };
-            writeln!(out, "PSC\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{}",
-                i, name, st.ref_hom, st.nonref_hom, st.hets, st.ts, st.tv, st.indels, avg, st.singletons, st.hap_ref, st.hap_alt, st.missing)?;
+            let avg = if st.dp_n > 0 {
+                st.dp_sum / st.dp_n as f64
+            } else {
+                0.0
+            };
+            writeln!(
+                out,
+                "PSC\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{}",
+                i,
+                name,
+                st.ref_hom,
+                st.nonref_hom,
+                st.hets,
+                st.ts,
+                st.tv,
+                st.indels,
+                avg,
+                st.singletons,
+                st.hap_ref,
+                st.hap_alt,
+                st.missing
+            )?;
         }
     }
 
-    writeln!(out, "# PSI, Per-Sample Indels. Note that alt-het genotypes with both ins and del allele are counted twice, in both nInsHets and nDelHets.")?;
-    writeln!(out, "# PSI\t[2]id\t[3]sample\t[4]in-frame\t[5]out-frame\t[6]not applicable\t[7]out/(in+out) ratio\t[8]nInsHets\t[9]nDelHets\t[10]nInsAltHoms\t[11]nDelAltHoms")?;
+    writeln!(
+        out,
+        "# PSI, Per-Sample Indels. Note that alt-het genotypes with both ins and del allele are counted twice, in both nInsHets and nDelHets."
+    )?;
+    writeln!(
+        out,
+        "# PSI\t[2]id\t[3]sample\t[4]in-frame\t[5]out-frame\t[6]not applicable\t[7]out/(in+out) ratio\t[8]nInsHets\t[9]nDelHets\t[10]nInsAltHoms\t[11]nDelAltHoms"
+    )?;
     for (i, s) in sets.iter().enumerate() {
         for (j, name) in s.sample_names.iter().enumerate() {
             let st = &s.samples[j];
-            writeln!(out, "PSI\t{}\t{}\t0\t0\t0\t0.00\t{}\t{}\t{}\t{}", i, name, st.ins_hets, st.del_hets, st.ins_homs, st.del_homs)?;
+            writeln!(
+                out,
+                "PSI\t{}\t{}\t0\t0\t0\t0.00\t{}\t{}\t{}\t{}",
+                i, name, st.ins_hets, st.del_hets, st.ins_homs, st.del_homs
+            )?;
         }
     }
 
     writeln!(out, "# HWE")?;
-    writeln!(out, "# HWE\t[2]id\t[3]1st ALT allele frequency\t[4]Number of observations\t[5]25th percentile\t[6]median\t[7]75th percentile")?;
+    writeln!(
+        out,
+        "# HWE\t[2]id\t[3]1st ALT allele frequency\t[4]Number of observations\t[5]25th percentile\t[6]median\t[7]75th percentile"
+    )?;
     for (i, s) in sets.iter().enumerate() {
         for (bin, v) in &s.hwe {
             let n: u64 = v.iter().sum();
-            if n == 0 { continue; }
+            if n == 0 {
+                continue;
+            }
             let pct = |p: f64| -> f64 {
                 let target = (n as f64 * p).ceil().max(1.0) as u64;
                 let mut acc = 0u64;
                 for (k, c) in v.iter().enumerate() {
                     acc += c;
-                    if acc >= target { return k as f64 / AF_BINS as f64; }
+                    if acc >= target {
+                        return k as f64 / AF_BINS as f64;
+                    }
                 }
                 0.0
             };
-            writeln!(out, "HWE\t{}\t{:.6}\t{}\t{:.6}\t{:.6}\t{:.6}", i, *bin as f64 / AF_BINS as f64, n, pct(0.25), pct(0.5), pct(0.75))?;
+            writeln!(
+                out,
+                "HWE\t{}\t{:.6}\t{}\t{:.6}\t{:.6}\t{:.6}",
+                i,
+                *bin as f64 / AF_BINS as f64,
+                n,
+                pct(0.25),
+                pct(0.5),
+                pct(0.75)
+            )?;
         }
     }
 
     if cfg.has_ad {
-        writeln!(out, "# VAF, Variant Allele Frequency determined as fraction of alternate reads in FORMAT/AD")?;
-        writeln!(out, "# VAF\t[2]id\t[3]sample\t[4]SNV VAF distribution\t[5]indel VAF distribution")?;
+        writeln!(
+            out,
+            "# VAF, Variant Allele Frequency determined as fraction of alternate reads in FORMAT/AD"
+        )?;
+        writeln!(
+            out,
+            "# VAF\t[2]id\t[3]sample\t[4]SNV VAF distribution\t[5]indel VAF distribution"
+        )?;
         for (i, s) in sets.iter().enumerate() {
             for (j, name) in s.sample_names.iter().enumerate() {
                 let st = &s.samples[j];
                 let snv: Vec<String> = st.vaf_snv.iter().map(u64::to_string).collect();
                 let ind: Vec<String> = st.vaf_indel.iter().map(u64::to_string).collect();
-                writeln!(out, "VAF\t{}\t{}\t{}\t{}", i, name, snv.join(","), ind.join(","))?;
+                writeln!(
+                    out,
+                    "VAF\t{}\t{}\t{}\t{}",
+                    i,
+                    name,
+                    snv.join(","),
+                    ind.join(",")
+                )?;
             }
         }
     }
@@ -1014,51 +1444,117 @@ fn print_stats(args: &StatsArgs, sets: &[Stats], set_names: &[Vec<String>], cfg:
 }
 
 fn ratio(a: u64, b: u64) -> String {
-    if b == 0 { "0.00".to_string() } else { format!("{:.2}", a as f64 / b as f64) }
+    if b == 0 {
+        "0.00".to_string()
+    } else {
+        format!("{:.2}", a as f64 / b as f64)
+    }
 }
 
 /// NRD and the three per-class discordance rates, in percent.
 fn nrd(m: &[u64; 6]) -> (f64, f64, f64, f64) {
-    let pct = |x: u64, tot: u64| if tot > 0 { 100.0 * x as f64 / tot as f64 } else { 0.0 };
+    let pct = |x: u64, tot: u64| {
+        if tot > 0 {
+            100.0 * x as f64 / tot as f64
+        } else {
+            0.0
+        }
+    };
     let nrd = pct(m[3] + m[4] + m[5], m[3] + m[4] + m[5] + m[1] + m[2]);
-    (nrd, pct(m[3], m[3] + m[0]), pct(m[4], m[4] + m[1]), pct(m[5], m[5] + m[2]))
+    (
+        nrd,
+        pct(m[3], m[3] + m[0]),
+        pct(m[4], m[4] + m[1]),
+        pct(m[5], m[5] + m[2]),
+    )
 }
 
 /// Two-file concordance sections in bcftools order: GC*AF/NRD*, GC*S, GCT*.
-fn print_concordance<W: Write>(out: &mut W, cs: &Concordance, ci: &Concordance, samples: &[String]) -> Result<()> {
+fn print_concordance<W: Write>(
+    out: &mut W,
+    cs: &Concordance,
+    ci: &Concordance,
+    samples: &[String],
+) -> Result<()> {
     let both = [(cs, "s", "SNPs"), (ci, "i", "indels")];
     for (c, tag, what) in both {
-        writeln!(out, "# GC{tag}AF, Genotype concordance by non-reference allele frequency ({what})")?;
-        writeln!(out, "# GC{tag}AF\t[2]id\t[3]allele frequency\t[4]RR Hom matches\t[5]RA Het matches\t[6]AA Hom matches\t[7]RR Hom mismatches\t[8]RA Het mismatches\t[9]AA Hom mismatches\t[10]dosage r-squared\t[11]number of genotypes")?;
+        writeln!(
+            out,
+            "# GC{tag}AF, Genotype concordance by non-reference allele frequency ({what})"
+        )?;
+        writeln!(
+            out,
+            "# GC{tag}AF\t[2]id\t[3]allele frequency\t[4]RR Hom matches\t[5]RA Het matches\t[6]AA Hom matches\t[7]RR Hom mismatches\t[8]RA Het mismatches\t[9]AA Hom mismatches\t[10]dosage r-squared\t[11]number of genotypes"
+        )?;
         for (bin, v) in &c.by_af {
             // Bin 0 (singletons) is accumulated but never printed here.
-            if *bin == 0 { continue; }
+            if *bin == 0 {
+                continue;
+            }
             let r2 = c.by_af_dosage.get(bin).and_then(r_squared);
-            writeln!(out, "GC{tag}AF\t2\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", *bin as f64 / AF_BINS as f64, v[0], v[1], v[2], v[3], v[4], v[5], fmt_r2(r2), v[6])?;
+            writeln!(
+                out,
+                "GC{tag}AF\t2\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                *bin as f64 / AF_BINS as f64,
+                v[0],
+                v[1],
+                v[2],
+                v[3],
+                v[4],
+                v[5],
+                fmt_r2(r2),
+                v[6]
+            )?;
         }
         if tag == "s" {
             writeln!(out, "# NRD and discordance is calculated as follows:")?;
             writeln!(out, "#   m .. number of matches")?;
             writeln!(out, "#   x .. number of mismatches")?;
-            writeln!(out, "#   NRD = 100 * (xRR + xRA + xAA) / (xRR + xRA + xAA + mRA + mAA)")?;
+            writeln!(
+                out,
+                "#   NRD = 100 * (xRR + xRA + xAA) / (xRR + xRA + xAA + mRA + mAA)"
+            )?;
             writeln!(out, "#   RR discordance = 100 * xRR / (xRR + mRR)")?;
             writeln!(out, "#   RA discordance = 100 * xRA / (xRA + mRA)")?;
             writeln!(out, "#   AA discordance = 100 * xAA / (xAA + mAA)")?;
         }
         writeln!(out, "# Non-Reference Discordance (NRD), {what}")?;
-        writeln!(out, "# NRD{tag}\t[2]id\t[3]NRD\t[4]Ref/Ref discordance\t[5]Ref/Alt discordance\t[6]Alt/Alt discordance")?;
-        let sum: [u64; 6] = c.by_sample.iter().fold([0; 6], |mut a, s| { for k in 0..6 { a[k] += s[k]; } a });
+        writeln!(
+            out,
+            "# NRD{tag}\t[2]id\t[3]NRD\t[4]Ref/Ref discordance\t[5]Ref/Alt discordance\t[6]Alt/Alt discordance"
+        )?;
+        let sum: [u64; 6] = c.by_sample.iter().fold([0; 6], |mut a, s| {
+            for k in 0..6 {
+                a[k] += s[k];
+            }
+            a
+        });
         let (a, b, cc, d) = nrd(&sum);
         writeln!(out, "NRD{tag}\t2\t{:.6}\t{:.6}\t{:.6}\t{:.6}", a, b, cc, d)?;
     }
     for (c, tag, what) in both {
         writeln!(out, "# GC{tag}S, Genotype concordance by sample ({what})")?;
-        writeln!(out, "# GC{tag}S\t[2]id\t[3]sample\t[4]non-reference discordance rate\t[5]RR Hom matches\t[6]RA Het matches\t[7]AA Hom matches\t[8]RR Hom mismatches\t[9]RA Het mismatches\t[10]AA Hom mismatches\t[11]dosage r-squared")?;
+        writeln!(
+            out,
+            "# GC{tag}S\t[2]id\t[3]sample\t[4]non-reference discordance rate\t[5]RR Hom matches\t[6]RA Het matches\t[7]AA Hom matches\t[8]RR Hom mismatches\t[9]RA Het mismatches\t[10]AA Hom mismatches\t[11]dosage r-squared"
+        )?;
         for (k, name) in samples.iter().enumerate() {
             let m = &c.by_sample[k];
             let (n, ..) = nrd(m);
             let r2 = r_squared(&c.by_sample_dosage[k]);
-            writeln!(out, "GC{tag}S\t2\t{}\t{:.3}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", name, n, m[0], m[1], m[2], m[3], m[4], m[5], fmt_r2(r2))?;
+            writeln!(
+                out,
+                "GC{tag}S\t2\t{}\t{:.3}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                name,
+                n,
+                m[0],
+                m[1],
+                m[2],
+                m[3],
+                m[4],
+                m[5],
+                fmt_r2(r2)
+            )?;
         }
     }
     let cls = ["RR Hom", "RA Het", "AA Hom", "AA Het", "missing"];
@@ -1075,7 +1571,10 @@ fn print_concordance<W: Write>(out: &mut W, cs: &Concordance, ci: &Concordance, 
         writeln!(out, "{hdr}")?;
         for (k, name) in samples.iter().enumerate() {
             let t = &c.table[k];
-            let cells: Vec<String> = t.iter().flat_map(|row| row.iter().map(|v| v.to_string())).collect();
+            let cells: Vec<String> = t
+                .iter()
+                .flat_map(|row| row.iter().map(|v| v.to_string()))
+                .collect();
             writeln!(out, "GCT{tag}\t{}\t{}", name, cells.join("\t"))?;
         }
     }

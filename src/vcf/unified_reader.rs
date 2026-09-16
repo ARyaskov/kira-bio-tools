@@ -59,10 +59,18 @@ impl BcfSourceReader {
                 }
             }
         }
-        Self { inner, header_lines, contigs, header_emitted: false, cursor_in_header: 0 }
+        Self {
+            inner,
+            header_lines,
+            contigs,
+            header_emitted: false,
+            cursor_in_header: 0,
+        }
     }
 
-    pub fn header(&self) -> &[String] { &self.header_lines }
+    pub fn header(&self) -> &[String] {
+        &self.header_lines
+    }
 
     /// Header lines first (once), then records.
     pub fn read_line(&mut self) -> Result<Option<String>> {
@@ -248,7 +256,9 @@ impl UnifiedVcfReader {
     }
 
     /// Next data line with its start/end virtual positions (BGZF indexing source only).
-    pub fn next_line_with_vpos(&mut self) -> Result<Option<(String, VirtualPosition, VirtualPosition)>> {
+    pub fn next_line_with_vpos(
+        &mut self,
+    ) -> Result<Option<(String, VirtualPosition, VirtualPosition)>> {
         match self {
             Self::BgzfIndexing(r) => r.next_line_with_vpos(),
             _ => Err(VcfError::InvalidFormat),
@@ -256,7 +266,10 @@ impl UnifiedVcfReader {
     }
 }
 
-fn peek_prefix(mut r: Box<dyn Read + Send>, n: usize) -> io::Result<(Vec<u8>, Box<dyn Read + Send>)> {
+fn peek_prefix(
+    mut r: Box<dyn Read + Send>,
+    n: usize,
+) -> io::Result<(Vec<u8>, Box<dyn Read + Send>)> {
     let mut head = vec![0u8; n];
     let mut got = 0usize;
     while got < n {
@@ -309,8 +322,16 @@ impl TextReader {
     pub fn new(mut reader: Box<dyn BufRead + Send>) -> Result<Self> {
         let mut buffer = String::new();
         let mut offset = 0u64;
-        let (headers, contigs, first_data_line) = read_header_lines(&mut *reader, &mut buffer, &mut offset)?;
-        Ok(Self { reader, buffer: String::new(), headers, contigs, offset, first_data_line })
+        let (headers, contigs, first_data_line) =
+            read_header_lines(&mut *reader, &mut buffer, &mut offset)?;
+        Ok(Self {
+            reader,
+            buffer: String::new(),
+            headers,
+            contigs,
+            offset,
+            first_data_line,
+        })
     }
 
     pub fn read_record(&mut self) -> Result<Option<VcfRecord>> {
@@ -384,7 +405,14 @@ impl BgzfIndexingReader {
             headers.push(buffer.trim_end_matches(['\r', '\n']).to_string());
         };
         let contigs = ContigDict::from_header_lines(headers.iter().map(String::as_str));
-        Ok(Self { reader, buffer: String::new(), headers, contigs, vpos, first_data_line })
+        Ok(Self {
+            reader,
+            buffer: String::new(),
+            headers,
+            contigs,
+            vpos,
+            first_data_line,
+        })
     }
 
     pub fn read_record(&mut self) -> Result<Option<VcfRecord>> {
@@ -440,7 +468,9 @@ impl BgzfIndexingReader {
     }
 
     /// Next data line with `(start, end)` virtual positions.
-    pub fn next_line_with_vpos(&mut self) -> Result<Option<(String, VirtualPosition, VirtualPosition)>> {
+    pub fn next_line_with_vpos(
+        &mut self,
+    ) -> Result<Option<(String, VirtualPosition, VirtualPosition)>> {
         if let Some(line) = self.first_data_line.take() {
             let start = self.vpos;
             let after = self.reader.virtual_position();
@@ -458,7 +488,11 @@ impl BgzfIndexingReader {
                 continue;
             }
             let after = self.reader.virtual_position();
-            return Ok(Some((self.buffer.trim_end_matches(['\r', '\n']).to_string(), start, after)));
+            return Ok(Some((
+                self.buffer.trim_end_matches(['\r', '\n']).to_string(),
+                start,
+                after,
+            )));
         }
     }
 }
@@ -471,7 +505,11 @@ pub fn parse_vcf_line(line: &str) -> Option<VcfRecord> {
     parse_vcf_record(line, 0, &mut dict).ok().flatten()
 }
 
-pub fn parse_vcf_record(line: &str, offset: u64, contigs: &mut ContigDict) -> Result<Option<VcfRecord>> {
+pub fn parse_vcf_record(
+    line: &str,
+    offset: u64,
+    contigs: &mut ContigDict,
+) -> Result<Option<VcfRecord>> {
     let cols: Vec<&str> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
     if cols.len() < 8 {
         return Ok(None);
@@ -531,7 +569,12 @@ impl KtileSourceReader {
             .map(|l| l.to_string())
             .collect();
         let contigs = ContigDict::from_header_lines(headers.iter().map(String::as_str));
-        Ok(Self { reader, cursor: 0, headers, contigs })
+        Ok(Self {
+            reader,
+            cursor: 0,
+            headers,
+            contigs,
+        })
     }
 
     pub fn read_line(&mut self) -> Result<Option<String>> {

@@ -227,9 +227,10 @@ pub fn cmd_csq(args: CsqArgs) -> Result<()> {
             return Ok(());
         }
         if let Some(tf) = &target_filter
-            && tf.line_passes_mode(line, args.targets_overlap) == targets_inverse {
-                return Ok(());
-            }
+            && tf.line_passes_mode(line, args.targets_overlap) == targets_inverse
+        {
+            return Ok(());
+        }
         let Some(rec) = parse_vcf_record(line, 0, contigs).map_err(|e| anyhow::anyhow!("{e}"))?
         else {
             return Ok(());
@@ -256,9 +257,9 @@ pub fn cmd_csq(args: CsqArgs) -> Result<()> {
                 && (line.is_empty()
                     || line.as_bytes()[0] == b'#'
                     || !rf.line_passes_mode(&line, args.regions_overlap))
-                {
-                    continue;
-                }
+            {
+                continue;
+            }
             handle(&line, &mut caller, &mut contigs)?;
         }
     }
@@ -268,16 +269,17 @@ pub fn cmd_csq(args: CsqArgs) -> Result<()> {
         CsqOutput::Text(mut w) => w.flush()?,
     }
     if args.write_index
-        && let Some(out) = args.output.as_deref() {
-            if matches!(kind, OutputKind::VcfGz(_) | OutputKind::Bcf(_)) && out != Path::new("-") {
-                let idx = std::path::PathBuf::from(format!("{}.csi", out.display()));
-                build_index(out, &idx, IndexKind::Csi, None)
-                    .with_context(|| format!("--write-index: write index {}", idx.display()))?;
-            } else {
-                eprintln!(
-                    "Warning: --write-index requires a compressed VCF or BCF written to a file; skipped"
-                );
-            }
+        && let Some(out) = args.output.as_deref()
+    {
+        if matches!(kind, OutputKind::VcfGz(_) | OutputKind::Bcf(_)) && out != Path::new("-") {
+            let idx = std::path::PathBuf::from(format!("{}.csi", out.display()));
+            build_index(out, &idx, IndexKind::Csi, None)
+                .with_context(|| format!("--write-index: write index {}", idx.display()))?;
+        } else {
+            eprintln!(
+                "Warning: --write-index requires a compressed VCF or BCF written to a file; skipped"
+            );
         }
+    }
     Ok(())
 }

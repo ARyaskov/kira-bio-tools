@@ -1,9 +1,9 @@
 //! Append-only compressed string pool for `.ani` building. Combines
 //! short-string interning with deflate-compressed blocks.
 
+use crate::fx::FxHashMap;
 use anyhow::Result;
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
-use crate::fx::FxHashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
@@ -66,9 +66,8 @@ impl StringPool {
             compressor: Compress::new(Compression::new(DEFLATE_LEVEL), false),
             scratch: Vec::new(),
             finished: false,
-            intern: intern_enabled.then(|| {
-                FxHashMap::with_capacity_and_hasher(8192, Default::default())
-            }),
+            intern: intern_enabled
+                .then(|| FxHashMap::with_capacity_and_hasher(8192, Default::default())),
             intern_hits: 0,
             intern_bytes_saved: 0,
         }

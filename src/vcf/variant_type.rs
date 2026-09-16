@@ -27,7 +27,10 @@ pub fn allele_type(r: &str, a: &str) -> AlleleType {
     let ab = a.as_bytes();
 
     if ab == b"*" {
-        return AlleleType { ty: VT_OVERLAP, n: 0 };
+        return AlleleType {
+            ty: VT_OVERLAP,
+            n: 0,
+        };
     }
     if rb.len() == 1 && ab.len() == 1 {
         if ab[0] == b'.' || eq_ic(rb[0], ab[0]) || ab[0] == b'X' {
@@ -57,10 +60,16 @@ pub fn allele_type(r: &str, a: &str) -> AlleleType {
         if aa[0] == b']' || aa[0] == b'[' {
             return AlleleType { ty: VT_BND, n: 0 };
         }
-        return AlleleType { ty: VT_INDEL, n: aa.len() as i32 };
+        return AlleleType {
+            ty: VT_INDEL,
+            n: aa.len() as i32,
+        };
     }
     if !rr.is_empty() && aa.is_empty() {
-        return AlleleType { ty: VT_INDEL, n: -(rr.len() as i32) };
+        return AlleleType {
+            ty: VT_INDEL,
+            n: -(rr.len() as i32),
+        };
     }
     if rr.is_empty() && aa.is_empty() {
         return AlleleType { ty: VT_REF, n: 0 };
@@ -79,15 +88,30 @@ pub fn allele_type(r: &str, a: &str) -> AlleleType {
         if re == 0 {
             return AlleleType { ty: VT_SNP, n: 1 };
         }
-        let ty = if eq_ic(rr[re], aa[ae]) { VT_INDEL } else { VT_OTHER };
-        return AlleleType { ty, n: -(re as i32) };
+        let ty = if eq_ic(rr[re], aa[ae]) {
+            VT_INDEL
+        } else {
+            VT_OTHER
+        };
+        return AlleleType {
+            ty,
+            n: -(re as i32),
+        };
     }
     if re == 0 {
-        let ty = if eq_ic(rr[re], aa[ae]) { VT_INDEL } else { VT_OTHER };
+        let ty = if eq_ic(rr[re], aa[ae]) {
+            VT_INDEL
+        } else {
+            VT_OTHER
+        };
         return AlleleType { ty, n: ae as i32 };
     }
     let ty = if re == ae { VT_MNP } else { VT_OTHER };
-    let n = if re > ae { -(re as i32 + 1) } else { ae as i32 + 1 };
+    let n = if re > ae {
+        -(re as i32 + 1)
+    } else {
+        ae as i32 + 1
+    };
     AlleleType { ty, n }
 }
 

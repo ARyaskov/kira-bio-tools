@@ -33,13 +33,13 @@ pub fn split_info_for_allele(
                         result.push(field.to_string());
                     }
                 }
-                Some(FieldNumber::R)
-                    if parts.len() == num_alts + 1 => {
-                        if let Some(ref_val) = parts.first()
-                            && let Some(alt_val) = parts.get(alt_idx + 1) {
-                                result.push(format!("{}={},{}", key, ref_val, alt_val));
-                            }
+                Some(FieldNumber::R) if parts.len() == num_alts + 1 => {
+                    if let Some(ref_val) = parts.first()
+                        && let Some(alt_val) = parts.get(alt_idx + 1)
+                    {
+                        result.push(format!("{}={},{}", key, ref_val, alt_val));
                     }
+                }
                 _ => {
                     result.push(field.to_string());
                 }

@@ -9,11 +9,22 @@ use anyhow::{Context, Result, bail};
 use std::path::Path;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum MultiMode { None, SplitAll, SplitSnps, SplitIndels, JoinAll, JoinSnps, JoinIndels, JoinBoth }
+enum MultiMode {
+    None,
+    SplitAll,
+    SplitSnps,
+    SplitIndels,
+    JoinAll,
+    JoinSnps,
+    JoinIndels,
+    JoinBoth,
+}
 
 impl MultiMode {
     fn parse(s: Option<&str>) -> Result<Self> {
-        let Some(s) = s else { return Ok(Self::None); };
+        let Some(s) = s else {
+            return Ok(Self::None);
+        };
         Ok(match s {
             "-" | "-any" | "-both" => Self::SplitAll,
             "-snps" => Self::SplitSnps,
@@ -27,28 +38,49 @@ impl MultiMode {
     }
 
     fn is_join(self) -> bool {
-        matches!(self, Self::JoinAll | Self::JoinSnps | Self::JoinIndels | Self::JoinBoth)
+        matches!(
+            self,
+            Self::JoinAll | Self::JoinSnps | Self::JoinIndels | Self::JoinBoth
+        )
     }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum CheckRef { Exit, Warn, Exclude, Set }
+enum CheckRef {
+    Exit,
+    Warn,
+    Exclude,
+    Set,
+}
 
 impl CheckRef {
     fn parse(s: &str) -> Result<Self> {
         Ok(match s {
-            "e" => Self::Exit, "w" => Self::Warn, "x" => Self::Exclude, "s" => Self::Set,
+            "e" => Self::Exit,
+            "w" => Self::Warn,
+            "x" => Self::Exclude,
+            "s" => Self::Set,
             o => bail!("-c, --check-ref: unknown {o:?} (expected e|w|x|s)"),
         })
     }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum RmDup { None, All, Exact, Snps, Indels, Both, AnyId }
+enum RmDup {
+    None,
+    All,
+    Exact,
+    Snps,
+    Indels,
+    Both,
+    AnyId,
+}
 
 impl RmDup {
     fn parse(s: Option<&str>) -> Result<Self> {
-        let Some(s) = s else { return Ok(Self::None); };
+        let Some(s) = s else {
+            return Ok(Self::None);
+        };
         Ok(match s {
             "none" => Self::None,
             "exact" => Self::Exact,
@@ -78,7 +110,12 @@ pub fn cmd_norm(args: NormArgs) -> Result<()> {
         keep_sum_keys: args
             .keep_sum
             .as_deref()
-            .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
+            .map(|s| {
+                s.split(',')
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect()
+            })
             .unwrap_or_default(),
         old_rec_tag: args.old_rec_tag.clone(),
     };
@@ -102,7 +139,12 @@ pub fn cmd_norm(args: NormArgs) -> Result<()> {
     let targets_inverse = args.targets.as_deref().is_some_and(|s| s.starts_with('^'));
 
     let out_path = args.output.clone();
-    let kind = args.output_type.as_deref().map(parse_output_type).transpose()?.unwrap_or(OutputKind::Vcf);
+    let kind = args
+        .output_type
+        .as_deref()
+        .map(parse_output_type)
+        .transpose()?
+        .unwrap_or(OutputKind::Vcf);
 
     let mut reader = UnifiedVcfReader::open(&args.input).context("open input")?;
     let headers = reader.header()?;
@@ -113,11 +155,12 @@ pub fn cmd_norm(args: NormArgs) -> Result<()> {
     for h in &headers {
         if h.starts_with("#CHROM") {
             if let Some(tag) = &split_opts.old_rec_tag
-                && !hdr.info.contains_key(tag) {
-                    out_headers.push(format!(
+                && !hdr.info.contains_key(tag)
+            {
+                out_headers.push(format!(
                         "##INFO=<ID={tag},Number=1,Type=String,Description=\"Original record before normalization (CHROM|POS|REF|ALT|USED_ALT_IDX)\">"
                     ));
-                }
+            }
             if !args.no_version {
                 out_headers.push(version.clone());
             }
@@ -132,11 +175,19 @@ pub fn cmd_norm(args: NormArgs) -> Result<()> {
     let mut outbuf = OutBuf::new(args.site_win);
 
     while let Some(line) = reader.read_line()? {
-        if line.is_empty() || line.as_bytes()[0] == b'#' { continue; }
+        if line.is_empty() || line.as_bytes()[0] == b'#' {
+            continue;
+        }
         if let Some(rf) = &region_filter
-            && !rf.line_passes_mode(&line, args.regions_overlap) { continue; }
+            && !rf.line_passes_mode(&line, args.regions_overlap)
+        {
+            continue;
+        }
         if let Some(tf) = &target_filter
-            && tf.line_passes_mode(&line, 0) == targets_inverse { continue; }
+            && tf.line_passes_mode(&line, 0) == targets_inverse
+        {
+            continue;
+        }
         let mut fields = line.splitn(3, '\t');
         let in_chrom = fields.next().unwrap_or("");
         let in_pos: u32 = fields
@@ -152,7 +203,9 @@ pub fn cmd_norm(args: NormArgs) -> Result<()> {
         let records = expand_record(&line, multi, args.atomize, &split_opts, &hdr)?;
         for rec in records {
             let mut cols: Vec<String> = rec.split('\t').map(|s| s.to_string()).collect();
-            if cols.len() < 8 { continue; }
+            if cols.len() < 8 {
+                continue;
+            }
 
             if let Some(fa) = &fasta {
                 match verify_ref(&cols, fa, check_ref) {
@@ -185,18 +238,33 @@ pub fn cmd_norm(args: NormArgs) -> Result<()> {
     sink.finish()?;
 
     if let (Some(kind_s), Some(out)) = (args.write_index.as_deref(), out_path.as_deref())
-        && matches!(kind, OutputKind::VcfGz(_) | OutputKind::Bcf(_)) && out != Path::new("-") {
-            let (ik, ext) = if kind_s == "tbi" { (crate::csi::IndexKind::Tbi, "tbi") } else { (crate::csi::IndexKind::Csi, "csi") };
-            let idx = std::path::PathBuf::from(format!("{}.{}", out.display(), ext));
-            crate::csi::build_index(out, &idx, ik, None).with_context(|| format!("-W: write {}", idx.display()))?;
-        }
+        && matches!(kind, OutputKind::VcfGz(_) | OutputKind::Bcf(_))
+        && out != Path::new("-")
+    {
+        let (ik, ext) = if kind_s == "tbi" {
+            (crate::csi::IndexKind::Tbi, "tbi")
+        } else {
+            (crate::csi::IndexKind::Csi, "csi")
+        };
+        let idx = std::path::PathBuf::from(format!("{}.{}", out.display(), ext));
+        crate::csi::build_index(out, &idx, ik, None)
+            .with_context(|| format!("-W: write {}", idx.display()))?;
+    }
     Ok(())
 }
 
 /// Split a multiallelic record (`-m -`) and/or atomize MNPs.
-fn expand_record(line: &str, multi: MultiMode, atomize: bool, opts: &SplitOpts, hdr: &HeaderInfo) -> Result<Vec<String>> {
+fn expand_record(
+    line: &str,
+    multi: MultiMode,
+    atomize: bool,
+    opts: &SplitOpts,
+    hdr: &HeaderInfo,
+) -> Result<Vec<String>> {
     let cols: Vec<&str> = line.split('\t').collect();
-    if cols.len() < 8 { return Ok(vec![line.to_string()]); }
+    if cols.len() < 8 {
+        return Ok(vec![line.to_string()]);
+    }
     let refa = cols[3];
     let alt = cols[4];
     let alts: Vec<&str> = alt.split(',').collect();
@@ -230,11 +298,20 @@ fn expand_record(line: &str, multi: MultiMode, atomize: bool, opts: &SplitOpts, 
 /// `-m -`: one biallelic record per ALT. Number=A/R/G fields are subset to
 /// `[REF, ALT_i]`; other ALTs in GT become REF (or missing for `*` with
 /// `--multi-overlaps .`); `--keep-sum` folds the other alleles' counts into REF.
-fn split_multiallelic(cols: &[&str], alts: &[&str], opts: &SplitOpts, hdr: &HeaderInfo) -> Vec<String> {
+fn split_multiallelic(
+    cols: &[&str],
+    alts: &[&str],
+    opts: &SplitOpts,
+    hdr: &HeaderInfo,
+) -> Vec<String> {
     let n_old = alts.len() + 1;
     let info = cols[7];
     let format = if cols.len() > 8 { cols[8] } else { "" };
-    let samples: Vec<&str> = if cols.len() > 9 { cols[9..].to_vec() } else { Vec::new() };
+    let samples: Vec<&str> = if cols.len() > 9 {
+        cols[9..].to_vec()
+    } else {
+        Vec::new()
+    };
     let mut out = Vec::with_capacity(alts.len());
     for (i, alt_i) in alts.iter().enumerate() {
         let mut map: Vec<Option<usize>> = vec![None; n_old];
@@ -243,13 +320,28 @@ fn split_multiallelic(cols: &[&str], alts: &[&str], opts: &SplitOpts, hdr: &Head
 
         let mut new_info = remap_info_keep_sum(info, hdr, n_old, i + 1, &map, &opts.keep_sum_keys);
         if let Some(tag) = &opts.old_rec_tag {
-            let extra = format!("{}={}|{}|{}|{}|{}", tag, cols[0], cols[1], cols[3], cols[4], i + 1);
-            if new_info == "." || new_info.is_empty() { new_info = extra; } else { new_info.push(';'); new_info.push_str(&extra); }
+            let extra = format!(
+                "{}={}|{}|{}|{}|{}",
+                tag,
+                cols[0],
+                cols[1],
+                cols[3],
+                cols[4],
+                i + 1
+            );
+            if new_info == "." || new_info.is_empty() {
+                new_info = extra;
+            } else {
+                new_info.push(';');
+                new_info.push_str(&extra);
+            }
         }
 
         let mut s = String::with_capacity(cols.iter().map(|c| c.len() + 1).sum());
         for (idx, col) in cols.iter().take(8).enumerate() {
-            if idx > 0 { s.push('\t'); }
+            if idx > 0 {
+                s.push('\t');
+            }
             match idx {
                 4 => s.push_str(alt_i),
                 7 => s.push_str(&new_info),
@@ -278,7 +370,9 @@ fn split_multiallelic(cols: &[&str], alts: &[&str], opts: &SplitOpts, hdr: &Head
                     } else {
                         let num = hdr.format_number(key);
                         if num.is_per_allele() {
-                            let nv = if opts.keep_sum_keys.iter().any(|t| t == key) && num == FieldNumber::R {
+                            let nv = if opts.keep_sum_keys.iter().any(|t| t == key)
+                                && num == FieldNumber::R
+                            {
                                 keep_sum_r(v, i + 1)
                             } else {
                                 remap_value(v, num, n_old, 2, &map)
@@ -300,31 +394,54 @@ fn split_multiallelic(cols: &[&str], alts: &[&str], opts: &SplitOpts, hdr: &Head
 
 /// Number=R value for allele `alt_idx` with the other alleles' counts folded into REF.
 fn keep_sum_r(value: &str, alt_idx: usize) -> Option<String> {
-    if value == "." { return Some(value.to_string()); }
+    if value == "." {
+        return Some(value.to_string());
+    }
     let vals: Vec<&str> = value.split(',').collect();
-    if alt_idx >= vals.len() { return None; }
+    if alt_idx >= vals.len() {
+        return None;
+    }
     let mut rest = 0f64;
     let mut all_int = true;
     for (j, v) in vals.iter().enumerate() {
-        if j == alt_idx { continue; }
+        if j == alt_idx {
+            continue;
+        }
         if let Ok(n) = v.parse::<f64>() {
             rest += n;
-            if v.contains('.') { all_int = false; }
+            if v.contains('.') {
+                all_int = false;
+            }
         }
     }
-    let rest_s = if all_int { format!("{}", rest as i64) } else { format!("{}", rest) };
+    let rest_s = if all_int {
+        format!("{}", rest as i64)
+    } else {
+        format!("{}", rest)
+    };
     Some(format!("{},{}", rest_s, vals[alt_idx]))
 }
 
-fn remap_info_keep_sum(info: &str, hdr: &HeaderInfo, n_old: usize, alt_idx: usize, map: &[Option<usize>], keep_sum: &[String]) -> String {
+fn remap_info_keep_sum(
+    info: &str,
+    hdr: &HeaderInfo,
+    n_old: usize,
+    alt_idx: usize,
+    map: &[Option<usize>],
+    keep_sum: &[String],
+) -> String {
     if keep_sum.is_empty() {
         return remap_info(info, hdr, n_old, 2, map);
     }
-    if info == "." || info.is_empty() { return info.to_string(); }
+    if info == "." || info.is_empty() {
+        return info.to_string();
+    }
     let mut out = String::with_capacity(info.len());
     let mut first = true;
     for kv in info.split(';') {
-        if !first { out.push(';'); }
+        if !first {
+            out.push(';');
+        }
         first = false;
         match kv.split_once('=') {
             Some((k, v)) => {
@@ -350,28 +467,45 @@ fn remap_info_keep_sum(info: &str, hdr: &HeaderInfo, n_old: usize, alt_idx: usiz
 /// left as they are).
 fn atomize_record(line: &str, opts: &SplitOpts) -> Vec<String> {
     let cols: Vec<&str> = line.split('\t').collect();
-    if cols.len() < 8 { return vec![line.to_string()]; }
+    if cols.len() < 8 {
+        return vec![line.to_string()];
+    }
     let refa = cols[3].as_bytes();
     let alt = cols[4];
-    if alt.contains(',') { return vec![line.to_string()]; }
+    if alt.contains(',') {
+        return vec![line.to_string()];
+    }
     let alta = alt.as_bytes();
-    let Ok(pos) = cols[1].parse::<u32>() else { return vec![line.to_string()] };
-    if refa.len() < 2 || alta.len() < 2 || refa.len() != alta.len() { return vec![line.to_string()]; }
+    let Ok(pos) = cols[1].parse::<u32>() else {
+        return vec![line.to_string()];
+    };
+    if refa.len() < 2 || alta.len() < 2 || refa.len() != alta.len() {
+        return vec![line.to_string()];
+    }
 
     let mut out = Vec::new();
     for (k, (&r, &a)) in refa.iter().zip(alta.iter()).enumerate() {
-        if r.eq_ignore_ascii_case(&a) { continue; }
+        if r.eq_ignore_ascii_case(&a) {
+            continue;
+        }
         let mut c: Vec<String> = cols.iter().map(|s| s.to_string()).collect();
         c[1] = (pos + k as u32).to_string();
         c[3] = (r as char).to_string();
         c[4] = (a as char).to_string();
         if let Some(tag) = &opts.old_rec_tag {
             let extra = format!("{}={}|{}|{}|{}|1", tag, cols[0], cols[1], cols[3], cols[4]);
-            if c[7] == "." || c[7].is_empty() { c[7] = extra; } else { c[7].push(';'); c[7].push_str(&extra); }
+            if c[7] == "." || c[7].is_empty() {
+                c[7] = extra;
+            } else {
+                c[7].push(';');
+                c[7].push_str(&extra);
+            }
         }
         out.push(c.join("\t"));
     }
-    if out.is_empty() { out.push(line.to_string()); }
+    if out.is_empty() {
+        out.push(line.to_string());
+    }
     out
 }
 
@@ -383,7 +517,10 @@ struct Joiner {
 
 impl Joiner {
     fn new(mode: MultiMode) -> Self {
-        Self { mode, group: Vec::new() }
+        Self {
+            mode,
+            group: Vec::new(),
+        }
     }
 
     fn same_site(&self, cols: &[String]) -> bool {
@@ -394,7 +531,9 @@ impl Joiner {
     }
 
     fn eligible(&self, cols: &[String]) -> bool {
-        if cols[4] == "." { return false; }
+        if cols[4] == "." {
+            return false;
+        }
         let vt = record_type(&cols[3], &cols[4]);
         match self.mode {
             MultiMode::JoinAll => true,
@@ -458,11 +597,20 @@ fn join_group(group: Vec<Vec<String>>, hdr: &HeaderInfo) -> Vec<String> {
         return group.into_iter().next().unwrap();
     }
     let longest = group.iter().map(|c| c[3].len()).max().unwrap_or(0);
-    let long_ref: String = group.iter().find(|c| c[3].len() == longest).map(|c| c[3].clone()).unwrap_or_default();
+    let long_ref: String = group
+        .iter()
+        .find(|c| c[3].len() == longest)
+        .map(|c| c[3].clone())
+        .unwrap_or_default();
     // REFs must be prefixes of the longest; otherwise leave the records alone.
-    let compatible = group.iter().all(|c| long_ref.as_bytes()[..c[3].len()].eq_ignore_ascii_case(c[3].as_bytes()));
+    let compatible = group
+        .iter()
+        .all(|c| long_ref.as_bytes()[..c[3].len()].eq_ignore_ascii_case(c[3].as_bytes()));
     if !compatible {
-        eprintln!("[norm] warn: incompatible REF alleles at {}:{}, not joined", group[0][0], group[0][1]);
+        eprintln!(
+            "[norm] warn: incompatible REF alleles at {}:{}, not joined",
+            group[0][0], group[0][1]
+        );
         // Emit them individually by returning the first and pushing back the rest is not possible here;
         // concatenate lines with a newline separator so the caller writes them verbatim.
         let mut merged = group[0].clone();
@@ -479,8 +627,15 @@ fn join_group(group: Vec<Vec<String>>, hdr: &HeaderInfo) -> Vec<String> {
         let tail = &long_ref[c[3].len()..];
         let mut map = vec![Some(0)];
         for a in c[4].split(',') {
-            let padded = if a.starts_with('<') || a == "*" || a.starts_with('.') { a.to_string() } else { format!("{a}{tail}") };
-            let idx = match new_alts.iter().position(|x| x.eq_ignore_ascii_case(&padded)) {
+            let padded = if a.starts_with('<') || a == "*" || a.starts_with('.') {
+                a.to_string()
+            } else {
+                format!("{a}{tail}")
+            };
+            let idx = match new_alts
+                .iter()
+                .position(|x| x.eq_ignore_ascii_case(&padded))
+            {
                 Some(i) => i,
                 None => {
                     new_alts.push(padded);
@@ -497,15 +652,27 @@ fn join_group(group: Vec<Vec<String>>, hdr: &HeaderInfo) -> Vec<String> {
     let mut ids: Vec<&str> = Vec::new();
     for c in &group {
         for id in c[2].split(';') {
-            if id != "." && !ids.contains(&id) { ids.push(id); }
+            if id != "." && !ids.contains(&id) {
+                ids.push(id);
+            }
         }
     }
-    let id = if ids.is_empty() { ".".to_string() } else { ids.join(";") };
+    let id = if ids.is_empty() {
+        ".".to_string()
+    } else {
+        ids.join(";")
+    };
     let qual = group
         .iter()
         .filter_map(|c| c[5].parse::<f64>().ok())
         .fold(None, |m: Option<f64>, q| Some(m.map_or(q, |v| v.max(q))))
-        .map(|q| if q.fract() == 0.0 { format!("{}", q as i64) } else { q.to_string() })
+        .map(|q| {
+            if q.fract() == 0.0 {
+                format!("{}", q as i64)
+            } else {
+                q.to_string()
+            }
+        })
         .unwrap_or_else(|| ".".to_string());
     let filter = merge_filters(group.iter().map(|c| c[6].as_str()));
 
@@ -524,9 +691,10 @@ fn join_group(group: Vec<Vec<String>>, hdr: &HeaderInfo) -> Vec<String> {
             match info_keys.iter().position(|x| x == k) {
                 Some(p) => {
                     if num.is_per_allele()
-                        && let (Some(cur), Some(new)) = (info_vals[p].clone(), expanded) {
-                            info_vals[p] = Some(merge_missing(&cur, &new));
-                        }
+                        && let (Some(cur), Some(new)) = (info_vals[p].clone(), expanded)
+                    {
+                        info_vals[p] = Some(merge_missing(&cur, &new));
+                    }
                 }
                 None => {
                     info_keys.push(k.to_string());
@@ -554,7 +722,9 @@ fn join_group(group: Vec<Vec<String>>, hdr: &HeaderInfo) -> Vec<String> {
         let mut keys: Vec<String> = Vec::new();
         for c in &group {
             for k in c[8].split(':') {
-                if !keys.iter().any(|x| x == k) { keys.push(k.to_string()); }
+                if !keys.iter().any(|x| x == k) {
+                    keys.push(k.to_string());
+                }
             }
         }
         let n_samples = group[0].len().saturating_sub(9);
@@ -571,7 +741,9 @@ fn join_group(group: Vec<Vec<String>>, hdr: &HeaderInfo) -> Vec<String> {
             let mut vals: Vec<Option<String>> = vec![None; keys.len()];
             for (gi, c) in group.iter().enumerate() {
                 let local_keys: Vec<&str> = c[8].split(':').collect();
-                let Some(smp) = remapped[gi].get(si) else { continue };
+                let Some(smp) = remapped[gi].get(si) else {
+                    continue;
+                };
                 let parts: Vec<&str> = smp.split(':').collect();
                 for (li, lk) in local_keys.iter().enumerate() {
                     let Some(v) = parts.get(li) else { continue };
@@ -591,7 +763,12 @@ fn join_group(group: Vec<Vec<String>>, hdr: &HeaderInfo) -> Vec<String> {
                     }
                 }
             }
-            out.push(vals.into_iter().map(|v| v.unwrap_or_else(|| ".".into())).collect::<Vec<_>>().join(":"));
+            out.push(
+                vals.into_iter()
+                    .map(|v| v.unwrap_or_else(|| ".".into()))
+                    .collect::<Vec<_>>()
+                    .join(":"),
+            );
         }
     }
     out
@@ -601,8 +778,14 @@ fn join_group(group: Vec<Vec<String>>, hdr: &HeaderInfo) -> Vec<String> {
 fn merge_missing(cur: &str, new: &str) -> String {
     let a: Vec<&str> = cur.split(',').collect();
     let b: Vec<&str> = new.split(',').collect();
-    if a.len() != b.len() { return cur.to_string(); }
-    a.iter().zip(b.iter()).map(|(x, y)| if *x == "." { *y } else { *x }).collect::<Vec<_>>().join(",")
+    if a.len() != b.len() {
+        return cur.to_string();
+    }
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| if *x == "." { *y } else { *x })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Combine two remapped GTs of one sample. Non-reference alleles of the later
@@ -612,28 +795,34 @@ fn merge_missing(cur: &str, new: &str) -> String {
 fn combine_gt(cur: &str, new: &str) -> String {
     let a = gt_alleles(cur);
     let b = gt_alleles(new);
-    if a.len() != b.len() { return cur.to_string(); }
+    if a.len() != b.len() {
+        return cur.to_string();
+    }
     let phased = cur.contains('|') && new.contains('|');
     let mut out: Vec<Option<usize>> = a.clone();
     for i in 0..b.len() {
         let Some(nb) = b[i] else { continue };
         if nb == 0 {
-            if out[i].is_none() { out[i] = Some(0); }
+            if out[i].is_none() {
+                out[i] = Some(0);
+            }
             continue;
         }
         let free = |x: &Option<usize>| x.is_none_or(|v| v == 0);
         if free(&out[i]) {
             out[i] = Some(nb);
-        } else if !phased
-            && let Some(slot) = out.iter().position(free) {
-                out[slot] = Some(nb);
-            }
+        } else if !phased && let Some(slot) = out.iter().position(free) {
+            out[slot] = Some(nb);
+        }
     }
     if !phased {
         out.sort_by_key(|x| x.map(|v| v as i64).unwrap_or(i64::MAX));
     }
     let sep = if phased { "|" } else { "/" };
-    out.iter().map(|x| x.map(|v| v.to_string()).unwrap_or_else(|| ".".into())).collect::<Vec<_>>().join(sep)
+    out.iter()
+        .map(|x| x.map(|v| v.to_string()).unwrap_or_else(|| ".".into()))
+        .collect::<Vec<_>>()
+        .join(sep)
 }
 
 fn merge_filters<'a, I: Iterator<Item = &'a str>>(filters: I) -> String {
@@ -642,17 +831,27 @@ fn merge_filters<'a, I: Iterator<Item = &'a str>>(filters: I) -> String {
     let mut any = false;
     for f in filters {
         any = true;
-        if f == "PASS" { continue; }
+        if f == "PASS" {
+            continue;
+        }
         all_pass = false;
-        if f == "." || f.is_empty() { continue; }
+        if f == "." || f.is_empty() {
+            continue;
+        }
         for t in f.split(';') {
-            if !set.contains(&t) { set.push(t); }
+            if !set.contains(&t) {
+                set.push(t);
+            }
         }
     }
     if !any || (all_pass && set.is_empty()) {
         return if any { "PASS".into() } else { ".".into() };
     }
-    if set.is_empty() { ".".into() } else { set.join(";") }
+    if set.is_empty() {
+        ".".into()
+    } else {
+        set.join(";")
+    }
 }
 
 /// `-d`: duplicates within the current position, classified with the shared
@@ -674,23 +873,33 @@ impl DedupWindow {
     }
 
     fn is_dup(&self, rec: &[String], mode: RmDup) -> bool {
-        if mode == RmDup::None { return false; }
-        if (rec[0].as_str(), rec[1].as_str()) != (self.pos_key.0.as_str(), self.pos_key.1.as_str()) {
+        if mode == RmDup::None {
+            return false;
+        }
+        if (rec[0].as_str(), rec[1].as_str()) != (self.pos_key.0.as_str(), self.pos_key.1.as_str())
+        {
             return false;
         }
         let vt = record_type(&rec[3], &rec[4]);
         for prev in &self.recs {
             let pvt = record_type(&prev[3], &prev[4]);
             let hit = match mode {
-                RmDup::Exact => rec[3].eq_ignore_ascii_case(&prev[3]) && rec[4].eq_ignore_ascii_case(&prev[4]),
+                RmDup::Exact => {
+                    rec[3].eq_ignore_ascii_case(&prev[3]) && rec[4].eq_ignore_ascii_case(&prev[4])
+                }
                 RmDup::All => true,
                 RmDup::Snps => vt & VT_SNP != 0 && pvt & VT_SNP != 0,
                 RmDup::Indels => vt & VT_INDEL != 0 && pvt & VT_INDEL != 0,
-                RmDup::Both => (vt & VT_SNP != 0 && pvt & VT_SNP != 0) || (vt & VT_INDEL != 0 && pvt & VT_INDEL != 0),
+                RmDup::Both => {
+                    (vt & VT_SNP != 0 && pvt & VT_SNP != 0)
+                        || (vt & VT_INDEL != 0 && pvt & VT_INDEL != 0)
+                }
                 RmDup::AnyId => rec[2] != "." && rec[2] == prev[2],
                 RmDup::None => false,
             };
-            if hit { return true; }
+            if hit {
+                return true;
+            }
         }
         false
     }
@@ -707,15 +916,28 @@ struct OutBuf {
 
 impl OutBuf {
     fn new(win: u32) -> Self {
-        Self { win, chrom: String::new(), pending: std::collections::VecDeque::new() }
+        Self {
+            win,
+            chrom: String::new(),
+            pending: std::collections::VecDeque::new(),
+        }
     }
 
-    fn push(&mut self, rec: Vec<String>, in_pos: u32, sink: &mut VcfSink, dedup: &mut DedupWindow, rm_dup: RmDup) -> Result<()> {
+    fn push(
+        &mut self,
+        rec: Vec<String>,
+        in_pos: u32,
+        sink: &mut VcfSink,
+        dedup: &mut DedupWindow,
+        rm_dup: RmDup,
+    ) -> Result<()> {
         if rec[0] != self.chrom {
             self.flush_all(sink, dedup, rm_dup)?;
             self.chrom = rec[0].clone();
         }
-        let pos: u32 = rec[1].parse().map_err(|_| anyhow::anyhow!("norm: invalid POS {:?}", rec[1]))?;
+        let pos: u32 = rec[1]
+            .parse()
+            .map_err(|_| anyhow::anyhow!("norm: invalid POS {:?}", rec[1]))?;
         let at = self.pending.partition_point(|(p, _)| *p <= pos);
         self.pending.insert(at, (pos, rec));
         let limit = in_pos.saturating_sub(self.win);
@@ -726,14 +948,24 @@ impl OutBuf {
         Ok(())
     }
 
-    fn flush_all(&mut self, sink: &mut VcfSink, dedup: &mut DedupWindow, rm_dup: RmDup) -> Result<()> {
+    fn flush_all(
+        &mut self,
+        sink: &mut VcfSink,
+        dedup: &mut DedupWindow,
+        rm_dup: RmDup,
+    ) -> Result<()> {
         while let Some((_, r)) = self.pending.pop_front() {
             Self::emit(r, sink, dedup, rm_dup)?;
         }
         Ok(())
     }
 
-    fn emit(r: Vec<String>, sink: &mut VcfSink, dedup: &mut DedupWindow, rm_dup: RmDup) -> Result<()> {
+    fn emit(
+        r: Vec<String>,
+        sink: &mut VcfSink,
+        dedup: &mut DedupWindow,
+        rm_dup: RmDup,
+    ) -> Result<()> {
         if dedup.is_dup(&r, rm_dup) {
             return Ok(());
         }
@@ -743,7 +975,13 @@ impl OutBuf {
     }
 }
 
-enum RefAction { Keep, Skip, Fix(String), Fail(String), Warn(String) }
+enum RefAction {
+    Keep,
+    Skip,
+    Fix(String),
+    Fail(String),
+    Warn(String),
+}
 
 /// Reference contigs are loaded on demand through the `.fai` index.
 pub(crate) type Fasta = crate::fasta::IndexedFasta;
@@ -753,18 +991,31 @@ pub(crate) fn load_fasta(p: &Path) -> Result<Fasta> {
 }
 
 fn verify_ref(cols: &[String], fa: &Fasta, mode: CheckRef) -> RefAction {
-    let pos: u32 = match cols[1].parse() { Ok(v) => v, Err(_) => return RefAction::Keep };
+    let pos: u32 = match cols[1].parse() {
+        Ok(v) => v,
+        Err(_) => return RefAction::Keep,
+    };
     let refa = cols[3].as_bytes();
     if cols[3].starts_with('<') || cols[3] == "N" && refa.len() == 1 && cols[4].starts_with('<') {
         return RefAction::Keep;
     }
     let Some(seq) = fa.slice(&cols[0], pos, refa.len()) else {
         let msg = format!("REF mismatch at {}:{} (no fasta sequence)", cols[0], pos);
-        return match mode { CheckRef::Exit => RefAction::Fail(msg), CheckRef::Warn => RefAction::Warn(msg), CheckRef::Exclude => RefAction::Skip, CheckRef::Set => RefAction::Keep };
+        return match mode {
+            CheckRef::Exit => RefAction::Fail(msg),
+            CheckRef::Warn => RefAction::Warn(msg),
+            CheckRef::Exclude => RefAction::Skip,
+            CheckRef::Set => RefAction::Keep,
+        };
     };
-    if seq.eq_ignore_ascii_case(refa) { return RefAction::Keep; }
+    if seq.eq_ignore_ascii_case(refa) {
+        return RefAction::Keep;
+    }
     let new_ref = std::str::from_utf8(seq).unwrap_or("N").to_string();
-    let msg = format!("REF mismatch at {}:{} (vcf={}, fasta={})", cols[0], pos, cols[3], new_ref);
+    let msg = format!(
+        "REF mismatch at {}:{} (vcf={}, fasta={})",
+        cols[0], pos, cols[3], new_ref
+    );
     match mode {
         CheckRef::Exit => RefAction::Fail(msg),
         CheckRef::Warn => RefAction::Warn(msg),
@@ -823,7 +1074,10 @@ fn left_align(cols: &[String], fa: &Fasta) -> Option<Vec<String>> {
     }
 
     let mut r: Vec<u8> = cols[3].as_bytes().to_ascii_uppercase();
-    let mut alts: Vec<Vec<u8>> = alt_raw.iter().map(|a| a.as_bytes().to_ascii_uppercase()).collect();
+    let mut alts: Vec<Vec<u8>> = alt_raw
+        .iter()
+        .map(|a| a.as_bytes().to_ascii_uppercase())
+        .collect();
     if r.is_empty() || alts.iter().any(|a| a.is_empty()) {
         return None;
     }
@@ -832,7 +1086,9 @@ fn left_align(cols: &[String], fa: &Fasta) -> Option<Vec<String>> {
     // Left-trim a shared leading base while every allele keeps length >= 2.
     while r.len() >= 2 && alts.iter().all(|a| a.len() >= 2 && a[0] == r[0]) {
         r.remove(0);
-        for a in alts.iter_mut() { a.remove(0); }
+        for a in alts.iter_mut() {
+            a.remove(0);
+        }
         pos += 1;
     }
 
@@ -850,21 +1106,33 @@ fn left_align(cols: &[String], fa: &Fasta) -> Option<Vec<String>> {
 }
 
 /// Canonical left-alignment loop (Tan/Abecasis/Kang 2015; bcftools/vt `norm`).
-fn left_shift(r: &mut Vec<u8>, alts: &mut [Vec<u8>], pos: &mut u32, chr: &str, fa: &Fasta) -> Option<()> {
+fn left_shift(
+    r: &mut Vec<u8>,
+    alts: &mut [Vec<u8>],
+    pos: &mut u32,
+    chr: &str,
+    fa: &Fasta,
+) -> Option<()> {
     loop {
         let last = *r.last().unwrap();
         if !alts.iter().all(|a| *a.last().unwrap() == last) {
             break;
         }
         if r.len() == 1 || alts.iter().any(|a| a.len() == 1) {
-            if *pos <= 1 { break; }
+            if *pos <= 1 {
+                break;
+            }
             *pos -= 1;
             let prev = fa.base(chr, *pos)?.to_ascii_uppercase();
             r.insert(0, prev);
-            for a in alts.iter_mut() { a.insert(0, prev); }
+            for a in alts.iter_mut() {
+                a.insert(0, prev);
+            }
         } else {
             r.pop();
-            for a in alts.iter_mut() { a.pop(); }
+            for a in alts.iter_mut() {
+                a.pop();
+            }
         }
     }
     Some(())
@@ -878,7 +1146,10 @@ fn left_align_symbolic(
     fa: &Fasta,
 ) -> Option<Vec<String>> {
     // Only symbolic deletions are realigned (bcftools leaves <DUP> etc. alone).
-    if !alt_raw.iter().any(|a| a.eq_ignore_ascii_case("<DEL>") || a.starts_with("<DEL:")) {
+    if !alt_raw
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case("<DEL>") || a.starts_with("<DEL:"))
+    {
         return None;
     }
     // Without INFO/END the span is the anchor base alone (rlen 1), as in htslib.
@@ -957,9 +1228,10 @@ fn left_align_symbolic(
 fn info_get_u32(info: &str, key: &str) -> Option<u32> {
     for f in info.split(';') {
         if let Some((k, v)) = f.split_once('=')
-            && k == key {
-                return v.parse().ok();
-            }
+            && k == key
+        {
+            return v.parse().ok();
+        }
     }
     None
 }

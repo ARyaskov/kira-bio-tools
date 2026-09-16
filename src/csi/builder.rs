@@ -9,9 +9,11 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use super::binning::{BinEntry, BinIndex, IndexKind, RefIndex, RefMeta, TabixHeader};
-use super::utils::{bin_bot, bin_first, bin_parent, depth_for, max_pos, n_bins, reg2bin, tabix_depth_for};
-use crate::bcf::{BCF_MAGIC, BcfReader};
+use super::utils::{
+    bin_bot, bin_first, bin_parent, depth_for, max_pos, n_bins, reg2bin, tabix_depth_for,
+};
 use crate::bcf::record::{record_end0, record_meta};
+use crate::bcf::{BCF_MAGIC, BcfReader};
 use crate::bgzf::is_bgzf;
 use crate::vcf::header::HeaderInfo;
 
@@ -31,7 +33,12 @@ impl Default for RefBuild {
         Self {
             bins: BTreeMap::new(),
             lidx: Vec::new(),
-            meta: RefMeta { beg_off: u64::MAX, end_off: 0, n_mapped: 0, n_unmapped: 0 },
+            meta: RefMeta {
+                beg_off: u64::MAX,
+                end_off: 0,
+                n_mapped: 0,
+                n_unmapped: 0,
+            },
             has_records: false,
         }
     }
@@ -56,12 +63,27 @@ pub struct IndexBuilder {
 
 impl IndexBuilder {
     pub fn new(kind: IndexKind, min_shift: u8, depth: u8) -> Self {
-        Self { kind, min_shift, depth, refs: Vec::new(), pending: None, last_tid: None, last_beg: 0 }
+        Self {
+            kind,
+            min_shift,
+            depth,
+            refs: Vec::new(),
+            pending: None,
+            last_tid: None,
+            last_beg: 0,
+        }
     }
 
     /// Register a record on contig `tid` covering `[beg0, end0)` stored at
     /// virtual positions `[start, end)`. Records must arrive in file order.
-    pub fn add(&mut self, tid: usize, beg0: u64, mut end0: u64, start: u64, end: u64) -> Result<()> {
+    pub fn add(
+        &mut self,
+        tid: usize,
+        beg0: u64,
+        mut end0: u64,
+        start: u64,
+        end: u64,
+    ) -> Result<()> {
         if end0 <= beg0 {
             end0 = beg0 + 1;
         }
@@ -75,7 +97,11 @@ impl IndexBuilder {
         }
         if let Some(lt) = self.last_tid {
             if lt == tid && beg0 < self.last_beg {
-                bail!("input is not sorted by position (contig #{tid}: {} after {})", beg0 + 1, self.last_beg + 1);
+                bail!(
+                    "input is not sorted by position (contig #{tid}: {} after {})",
+                    beg0 + 1,
+                    self.last_beg + 1
+                );
             }
             if lt > tid {
                 bail!("input is not sorted: contig #{tid} appears after contig #{lt}");
@@ -110,7 +136,12 @@ impl IndexBuilder {
             }
             _ => {
                 self.flush_pending();
-                self.pending = Some(Pending { tid, bin, start, end });
+                self.pending = Some(Pending {
+                    tid,
+                    bin,
+                    start,
+                    end,
+                });
             }
         }
         Ok(())
@@ -120,10 +151,11 @@ impl IndexBuilder {
         let Some(p) = self.pending.take() else { return };
         let list = self.refs[p.tid].bins.entry(p.bin).or_default();
         if let Some(last) = list.last_mut()
-            && last.1 >> 16 == p.start >> 16 {
-                last.1 = p.end;
-                return;
-            }
+            && last.1 >> 16 == p.start >> 16
+        {
+            last.1 = p.end;
+            return;
+        }
         list.push((p.start, p.end));
     }
 
@@ -170,7 +202,8 @@ impl IndexBuilder {
                     // htslib folds a small bin only into a parent that
                     // already has records of its own.
                     let parent = bin_parent(id);
-                    if last.saturating_sub(first) < MIN_MARKER_DIST && r.bins.contains_key(&parent) {
+                    if last.saturating_sub(first) < MIN_MARKER_DIST && r.bins.contains_key(&parent)
+                    {
                         let moved = r.bins.remove(&id).unwrap();
                         r.bins.get_mut(&parent).unwrap().extend(moved);
                     }
@@ -189,20 +222,31 @@ impl IndexBuilder {
                 let mut merged: Vec<(u64, u64)> = Vec::with_capacity(list.len());
                 for (s, e) in list {
                     if let Some(m) = merged.last_mut()
-                        && m.1 >> 16 >= s >> 16 {
-                            if e > m.1 {
-                                m.1 = e;
-                            }
-                            continue;
+                        && m.1 >> 16 >= s >> 16
+                    {
+                        if e > m.1 {
+                            m.1 = e;
                         }
+                        continue;
+                    }
                     merged.push((s, e));
                 }
                 let bot = bin_bot(id, depth) as usize;
                 let loffset = if bot < r.lidx.len() { r.lidx[bot] } else { 0 };
-                bins.insert(id, BinEntry { loffset, chunks: merged });
+                bins.insert(
+                    id,
+                    BinEntry {
+                        loffset,
+                        chunks: merged,
+                    },
+                );
             }
             let meta = if r.has_records { Some(r.meta) } else { None };
-            let linear = if kind == IndexKind::Tbi { r.lidx } else { Vec::new() };
+            let linear = if kind == IndexKind::Tbi {
+                r.lidx
+            } else {
+                Vec::new()
+            };
             refs.push(RefIndex { bins, linear, meta });
         }
         BinIndex {
@@ -261,11 +305,46 @@ pub struct TabixConf {
 }
 
 impl TabixConf {
-    pub const GFF: Self = Self { preset: TBX_GENERIC, sc: 1, bc: 4, ec: 5, meta: b'#', skip: 0 };
-    pub const BED: Self = Self { preset: TBX_UCSC, sc: 1, bc: 2, ec: 3, meta: b'#', skip: 0 };
-    pub const PSLTBL: Self = Self { preset: TBX_UCSC, sc: 15, bc: 17, ec: 18, meta: b'#', skip: 0 };
-    pub const SAM: Self = Self { preset: TBX_SAM, sc: 3, bc: 4, ec: 0, meta: b'@', skip: 0 };
-    pub const VCF: Self = Self { preset: TBX_VCF, sc: 1, bc: 2, ec: 0, meta: b'#', skip: 0 };
+    pub const GFF: Self = Self {
+        preset: TBX_GENERIC,
+        sc: 1,
+        bc: 4,
+        ec: 5,
+        meta: b'#',
+        skip: 0,
+    };
+    pub const BED: Self = Self {
+        preset: TBX_UCSC,
+        sc: 1,
+        bc: 2,
+        ec: 3,
+        meta: b'#',
+        skip: 0,
+    };
+    pub const PSLTBL: Self = Self {
+        preset: TBX_UCSC,
+        sc: 15,
+        bc: 17,
+        ec: 18,
+        meta: b'#',
+        skip: 0,
+    };
+    pub const SAM: Self = Self {
+        preset: TBX_SAM,
+        sc: 3,
+        bc: 4,
+        ec: 0,
+        meta: b'@',
+        skip: 0,
+    };
+    pub const VCF: Self = Self {
+        preset: TBX_VCF,
+        sc: 1,
+        bc: 2,
+        ec: 0,
+        meta: b'#',
+        skip: 0,
+    };
 
     /// `-p gff|bed|sam|vcf` (`psltbl` too).
     pub fn preset(name: &str) -> Option<Self> {
@@ -282,7 +361,10 @@ impl TabixConf {
     /// Guess the preset from the file name, `.gz`/`.bgz` stripped.
     pub fn from_extension(path: &Path) -> Option<Self> {
         let name = path.file_name()?.to_str()?.to_ascii_lowercase();
-        let base = name.strip_suffix(".gz").or_else(|| name.strip_suffix(".bgz")).unwrap_or(&name);
+        let base = name
+            .strip_suffix(".gz")
+            .or_else(|| name.strip_suffix(".bgz"))
+            .unwrap_or(&name);
         let ext = base.rsplit('.').next()?;
         match ext {
             "vcf" => Some(Self::VCF),
@@ -295,11 +377,26 @@ impl TabixConf {
     }
 
     pub fn from_header(h: &TabixHeader) -> Self {
-        Self { preset: h.format, sc: h.col_seq, bc: h.col_beg, ec: h.col_end, meta: h.meta as u8, skip: h.skip }
+        Self {
+            preset: h.format,
+            sc: h.col_seq,
+            bc: h.col_beg,
+            ec: h.col_end,
+            meta: h.meta as u8,
+            skip: h.skip,
+        }
     }
 
     pub fn to_header(self, names: Vec<String>) -> TabixHeader {
-        TabixHeader { format: self.preset, col_seq: self.sc, col_beg: self.bc, col_end: self.ec, meta: self.meta as i32, skip: self.skip, names }
+        TabixHeader {
+            format: self.preset,
+            col_seq: self.sc,
+            col_beg: self.bc,
+            col_end: self.ec,
+            meta: self.meta as i32,
+            skip: self.skip,
+            names,
+        }
     }
 
     /// The VCF preset on the standard columns, where [`vcf_line_interval`]
@@ -344,7 +441,9 @@ pub fn tabix_line_interval<'a>(conf: &TabixConf, line: &'a str) -> Option<(&'a s
                 end += 1;
             }
             if beg < 0 {
-                eprintln!("Warning: Coordinate <= 0 detected. Did you forget to use the -0 option?");
+                eprintln!(
+                    "Warning: Coordinate <= 0 detected. Did you forget to use the -0 option?"
+                );
                 beg = 0;
             }
             if end < 1 {
@@ -384,12 +483,15 @@ pub fn tabix_line_interval<'a>(conf: &TabixConf, line: &'a str) -> Option<(&'a s
                             end = beg + field.len() as i64;
                         }
                     } else if id == 8 {
-                        let v = field.strip_prefix("END=").or_else(|| field.find(";END=").map(|k| &field[k + 5..]));
+                        let v = field
+                            .strip_prefix("END=")
+                            .or_else(|| field.find(";END=").map(|k| &field[k + 5..]));
                         if let Some(v) = v.filter(|v| !v.starts_with('.'))
                             && let Some(e) = leading_i64(v)
-                                && e > beg {
-                                    end = e;
-                                }
+                            && e > beg
+                        {
+                            end = e;
+                        }
                     }
                 }
                 _ => {}
@@ -425,7 +527,9 @@ fn header_ref_len(conf: &TabixConf, line: &str) -> Option<i64> {
             if !line.starts_with("@SQ") {
                 return None;
             }
-            line.split('\t').find_map(|f| f.strip_prefix("LN:")).and_then(leading_i64)
+            line.split('\t')
+                .find_map(|f| f.strip_prefix("LN:"))
+                .and_then(leading_i64)
         }
         _ => None,
     }
@@ -436,9 +540,17 @@ fn header_ref_len(conf: &TabixConf, line: &str) -> Option<i64> {
 /// every other line contributes `[beg0, end0)` on its sequence. A CSI gets
 /// as many levels as the longest declared sequence needs (100 Gbp when the
 /// header declares none), as htslib does.
-pub fn build_tabix_index(input: &Path, conf: &TabixConf, kind: IndexKind, min_shift: Option<u8>) -> Result<BinIndex> {
+pub fn build_tabix_index(
+    input: &Path,
+    conf: &TabixConf,
+    kind: IndexKind,
+    min_shift: Option<u8>,
+) -> Result<BinIndex> {
     if !is_bgzf(input).with_context(|| format!("open {}", input.display()))? {
-        bail!("{}: not BGZF-compressed; only bgzip-compressed files can be indexed", input.display());
+        bail!(
+            "{}: not BGZF-compressed; only bgzip-compressed files can be indexed",
+            input.display()
+        );
     }
     let (min_shift, mut depth) = match kind {
         IndexKind::Tbi => (14u8, 5u8),
@@ -465,10 +577,12 @@ pub fn build_tabix_index(input: &Path, conf: &TabixConf, kind: IndexKind, min_sh
         lineno += 1;
         let end = u64::from(reader.virtual_position());
         let is_meta = line.as_bytes().first() == Some(&conf.meta);
-        if is_meta && kind == IndexKind::Csi
-            && let Some(l) = header_ref_len(conf, line.trim_end_matches(['\r', '\n'])) {
-                max_ref_len = max_ref_len.max(l);
-            }
+        if is_meta
+            && kind == IndexKind::Csi
+            && let Some(l) = header_ref_len(conf, line.trim_end_matches(['\r', '\n']))
+        {
+            max_ref_len = max_ref_len.max(l);
+        }
         if lineno <= conf.skip as i64 || is_meta || line.trim_end().is_empty() {
             continue;
         }
@@ -482,10 +596,18 @@ pub fn build_tabix_index(input: &Path, conf: &TabixConf, kind: IndexKind, min_sh
             IndexBuilder::new(kind, min_shift, depth)
         });
         let l = line.trim_end_matches(['\r', '\n']);
-        let interval = if conf.is_vcf() { vcf_line_interval(l) } else { tabix_line_interval(conf, l) };
+        let interval = if conf.is_vcf() {
+            vcf_line_interval(l)
+        } else {
+            tabix_line_interval(conf, l)
+        };
         let Some((chrom, beg0, end0)) = interval else {
             // htslib skips lines it cannot parse.
-            eprintln!("Warning: failed to parse line {lineno} of {}, was the wrong -p [type] used?\n{}", input.display(), l);
+            eprintln!(
+                "Warning: failed to parse line {lineno} of {}, was the wrong -p [type] used?\n{}",
+                input.display(),
+                l
+            );
             continue;
         };
         let tid = match name_ids.get(chrom) {
@@ -513,7 +635,11 @@ fn is_bcf_bgzf(path: &Path) -> Result<bool> {
 }
 
 /// Build a CSI or TBI index for a BGZF VCF or BCF, in memory.
-pub fn build_index_in_memory(input: &Path, kind: IndexKind, min_shift: Option<u8>) -> Result<BinIndex> {
+pub fn build_index_in_memory(
+    input: &Path,
+    kind: IndexKind,
+    min_shift: Option<u8>,
+) -> Result<BinIndex> {
     if !is_bgzf(input).with_context(|| format!("open {}", input.display()))? {
         bail!(
             "{}: not BGZF-compressed; only bgzip-compressed VCF and BCF can be indexed",
@@ -532,19 +658,36 @@ pub fn build_index_in_memory(input: &Path, kind: IndexKind, min_shift: Option<u8
 fn build_bcf_index(input: &Path, min_shift: u8) -> Result<BinIndex> {
     let mut reader = BcfReader::open(input)?;
     let info = HeaderInfo::parse(&reader.header_lines);
-    let max_rid = reader.dict.contig_idx.values().copied().max().map(|m| m as usize + 1).unwrap_or(0);
+    let max_rid = reader
+        .dict
+        .contig_idx
+        .values()
+        .copied()
+        .max()
+        .map(|m| m as usize + 1)
+        .unwrap_or(0);
     let max_len = info.contigs.iter().filter_map(|(_, _, l)| l).max();
     let depth = depth_for(min_shift, max_len.unwrap_or((1u64 << 31) - 1));
     let mut b = IndexBuilder::new(IndexKind::Csi, min_shift, depth);
     loop {
         let start = reader.virtual_position().unwrap_or(0);
-        let Some((shared, _indiv)) = reader.read_record_raw()? else { break };
+        let Some((shared, _indiv)) = reader.read_record_raw()? else {
+            break;
+        };
         let end = reader.virtual_position().unwrap_or(start);
-        let Some(meta) = record_meta(&shared) else { bail!("corrupt BCF record") };
+        let Some(meta) = record_meta(&shared) else {
+            bail!("corrupt BCF record")
+        };
         if meta.rid < 0 {
             continue;
         }
-        b.add(meta.rid as usize, meta.pos.max(0) as u64, record_end0(&meta), start, end)?;
+        b.add(
+            meta.rid as usize,
+            meta.pos.max(0) as u64,
+            record_end0(&meta),
+            start,
+            end,
+        )?;
     }
     Ok(b.finish(None, max_rid))
 }
@@ -554,15 +697,27 @@ fn build_vcf_index(input: &Path, kind: IndexKind, min_shift: Option<u8>) -> Resu
 }
 
 /// Build and write an index next to `input` (or at `output`).
-pub fn build_index(input: &Path, output: &Path, kind: IndexKind, min_shift: Option<u8>) -> Result<BinIndex> {
+pub fn build_index(
+    input: &Path,
+    output: &Path,
+    kind: IndexKind,
+    min_shift: Option<u8>,
+) -> Result<BinIndex> {
     let idx = build_index_in_memory(input, kind, min_shift)?;
-    idx.save(output).with_context(|| format!("write {}", output.display()))?;
+    idx.save(output)
+        .with_context(|| format!("write {}", output.display()))?;
     Ok(idx)
 }
 
 /// Compatibility entry point: CSI with default parameters.
 pub fn build_csi_index<P: AsRef<Path>>(vcf_path: P, output_path: P) -> Result<()> {
-    build_index(vcf_path.as_ref(), output_path.as_ref(), IndexKind::Csi, None).map(|_| ())
+    build_index(
+        vcf_path.as_ref(),
+        output_path.as_ref(),
+        IndexKind::Csi,
+        None,
+    )
+    .map(|_| ())
 }
 
 /// `<path>.csi` or `<path>.tbi`, whichever exists (CSI preferred, like htslib).

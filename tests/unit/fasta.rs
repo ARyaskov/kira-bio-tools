@@ -39,7 +39,10 @@ fn gzip_input_loads_whole() {
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let fa = dir.path().join("ref.fa.gz");
-    let mut enc = flate2::write::GzEncoder::new(std::fs::File::create(&fa).unwrap(), flate2::Compression::default());
+    let mut enc = flate2::write::GzEncoder::new(
+        std::fs::File::create(&fa).unwrap(),
+        flate2::Compression::default(),
+    );
     enc.write_all(b">x\nacgt\n>y\nGG\n").unwrap();
     enc.finish().unwrap();
     let f = IndexedFasta::open(&fa).unwrap();

@@ -206,7 +206,13 @@ fn windowed_mode_runs_the_call_stage_too() {
     let (ref_path, r1, r2) = make_fixture(dir.path());
 
     let whole = dir.path().join("whole.vcf");
-    run_solid(&ref_path, &r1, &r2, &whole, &["--call", "--call-ploidy", "1"]);
+    run_solid(
+        &ref_path,
+        &r1,
+        &r2,
+        &whole,
+        &["--call", "--call-ploidy", "1"],
+    );
     let whole_text = std::fs::read_to_string(&whole).unwrap();
 
     let windowed = dir.path().join("windowed.vcf");
@@ -224,11 +230,7 @@ fn windowed_mode_runs_the_call_stage_too() {
             .iter()
             .map(|l| {
                 let mut f = l.split('\t');
-                format!(
-                    "{}:{}",
-                    f.next().unwrap_or(""),
-                    f.next().unwrap_or("")
-                )
+                format!("{}:{}", f.next().unwrap_or(""), f.next().unwrap_or(""))
             })
             .collect()
     };

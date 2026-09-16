@@ -137,10 +137,7 @@ pub fn parse_vcf_record_simd<'a>(line: &'a str, want_format: bool) -> Option<Par
                 } else {
                     Some(ParsedFormat { raw: fmt_str })
                 };
-                samples = cols[9..]
-                    .iter()
-                    .map(|raw| ParsedSample { raw })
-                    .collect();
+                samples = cols[9..].iter().map(|raw| ParsedSample { raw }).collect();
             }
         }
 
@@ -192,10 +189,7 @@ pub fn patch_samples_from_line<'a>(parsed: &mut ParsedVcfRecord<'a>, line: &'a s
         } else {
             Some(ParsedFormat { raw: fmt_str })
         };
-        parsed.samples = cols[9..]
-            .iter()
-            .map(|raw| ParsedSample { raw })
-            .collect();
+        parsed.samples = cols[9..].iter().map(|raw| ParsedSample { raw }).collect();
     } else {
         parsed.format = None;
         parsed.samples.clear();

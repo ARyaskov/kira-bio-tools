@@ -92,9 +92,10 @@ fn apply_passthrough(args: &mut RohArgs) -> Result<()> {
         }
     }
     if args.input.is_none()
-        && let Some(f) = p.positional.first() {
-            args.input = Some(PathBuf::from(f));
-        }
+        && let Some(f) = p.positional.first()
+    {
+        args.input = Some(PathBuf::from(f));
+    }
     Ok(())
 }
 
@@ -249,9 +250,10 @@ pub fn cmd_roh(mut args: RohArgs) -> Result<()> {
             return Ok(());
         }
         if let Some(tf) = &target_filter
-            && tf.line_passes_mode(line, args.targets_overlap) == targets_inverse {
-                return Ok(());
-            }
+            && tf.line_passes_mode(line, args.targets_overlap) == targets_inverse
+        {
+            return Ok(());
+        }
         let Some(rec) = parse_vcf_record(line, 0, contigs).map_err(|e| anyhow::anyhow!("{e}"))?
         else {
             return Ok(());
@@ -281,9 +283,9 @@ pub fn cmd_roh(mut args: RohArgs) -> Result<()> {
                 && (line.is_empty()
                     || line.as_bytes()[0] == b'#'
                     || !rf.line_passes_mode(&line, args.regions_overlap))
-                {
-                    continue;
-                }
+            {
+                continue;
+            }
             handle(&line, &mut caller, &mut contigs)?;
         }
     }

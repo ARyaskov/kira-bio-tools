@@ -6,10 +6,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+use crate::fx::FxHashMap;
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use flate2::{Decompress, FlushDecompress, Status};
-use crate::fx::FxHashMap;
 use memmap2::{Mmap, MmapOptions};
 
 use super::format::{CompressedChunkEntry, KtileError, KtileHeader};
@@ -144,8 +144,7 @@ struct ChunkCache {
 
 impl ChunkCache {
     fn covers(&self, pool_start: u64, pool_end: u64) -> bool {
-        pool_start >= self.pool_start
-            && pool_end <= self.pool_start + self.data.len() as u64
+        pool_start >= self.pool_start && pool_end <= self.pool_start + self.data.len() as u64
     }
 
     fn slice(&self, pool_start: u64, pool_end: u64) -> &[u8] {
@@ -205,8 +204,10 @@ impl KtileReader {
             }
         };
         check(header.headers_off, header.headers_len, "headers")?;
-        std::str::from_utf8(&mmap[header.headers_off as usize..(header.headers_off + header.headers_len) as usize])
-            .context("ktile header block is not UTF-8")?;
+        std::str::from_utf8(
+            &mmap[header.headers_off as usize..(header.headers_off + header.headers_len) as usize],
+        )
+        .context("ktile header block is not UTF-8")?;
         let n = header.n_records as usize;
         check(
             header.line_offsets_off,
@@ -266,7 +267,11 @@ impl KtileReader {
                     n_chunks,
                     header.lines_per_chunk,
                     header.line_pool_len / (1024 * 1024),
-                    chunks_vec.iter().map(|c| c.uncompressed_size as u64).sum::<u64>() / (1024 * 1024),
+                    chunks_vec
+                        .iter()
+                        .map(|c| c.uncompressed_size as u64)
+                        .sum::<u64>()
+                        / (1024 * 1024),
                     n_workers,
                 );
                 let chunks_arc = Arc::new(chunks_vec.clone());
@@ -379,7 +384,8 @@ impl KtileReader {
     pub fn line_owned(&self, idx: usize) -> String {
         let bytes = self.line_bytes_to_vec(idx);
         // The builder wrote UTF-8, but the file is not trusted blindly.
-        String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+        String::from_utf8(bytes)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
     }
 
     /// Zero-copy fast path: copy line `idx` bytes directly into
@@ -389,11 +395,7 @@ impl KtileReader {
     /// Used by the GPU/CPU annotate readers to feed ReadBatch
     /// without paying the `Vec<u8> → String → batch.bytes` chain. On
     /// a 6.5 M-record chr1 1000G this saves ~3-5 sec wall-clock.
-    pub fn push_line_into_batch(
-        &self,
-        idx: usize,
-        batch: &mut crate::annotate::cpu_v2::ReadBatch,
-    ) {
+    pub fn push_line_into_batch(&self, idx: usize, batch: &mut crate::annotate::cpu_v2::ReadBatch) {
         let offs = self.line_offsets();
         let pool_start = offs[idx];
         let pool_end = offs[idx + 1];
@@ -413,15 +415,9 @@ impl KtileReader {
                 lines_per_chunk,
                 cache,
             } => {
-                self.with_compressed_chunk(
-                    idx,
-                    chunks,
-                    *lines_per_chunk,
-                    cache,
-                    |bytes| {
-                        batch.push_line_bytes(bytes);
-                    },
-                );
+                self.with_compressed_chunk(idx, chunks, *lines_per_chunk, cache, |bytes| {
+                    batch.push_line_bytes(bytes);
+                });
             }
         }
     }
@@ -496,9 +492,10 @@ impl KtileReader {
         while let Ok((idx, data)) = cache_borrow.prefetched.try_recv() {
             if cache_borrow.pending.len() >= PENDING_MAX
                 && !cache_borrow.pending.contains_key(&idx)
-                && let Some(&smallest) = cache_borrow.pending.keys().min() {
-                    cache_borrow.pending.remove(&smallest);
-                }
+                && let Some(&smallest) = cache_borrow.pending.keys().min()
+            {
+                cache_borrow.pending.remove(&smallest);
+            }
             cache_borrow.pending.insert(idx, data);
         }
 
@@ -509,16 +506,14 @@ impl KtileReader {
 
         // Path 2: target chunk waiting in the reorder buffer.
         if entry_pos.is_none()
-            && let Some(data) = cache_borrow.pending.remove(&chunk_idx) {
-                if cache_borrow.entries.len() >= CACHE_DEPTH {
-                    cache_borrow.entries.remove(0);
-                }
-                cache_borrow.entries.push(CachedChunk {
-                    chunk_idx,
-                    data,
-                });
-                entry_pos = Some(cache_borrow.entries.len() - 1);
+            && let Some(data) = cache_borrow.pending.remove(&chunk_idx)
+        {
+            if cache_borrow.entries.len() >= CACHE_DEPTH {
+                cache_borrow.entries.remove(0);
             }
+            cache_borrow.entries.push(CachedChunk { chunk_idx, data });
+            entry_pos = Some(cache_borrow.entries.len() - 1);
+        }
 
         // Path 4: synchronous fallback decompress.
         if entry_pos.is_none() {

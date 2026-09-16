@@ -73,7 +73,10 @@ pub fn finalize_ani_index(
     // processes 4 keys per AVX2 hash + 16-deep prefetch chain (2-3× faster than
     // calling lookup_u64 N times, ~5-15s saved on a 10^8-key build).
     let reorder_start = std::time::Instant::now();
-    let keys_u64: Vec<u64> = keys_bytes.iter().map(|kb| u64::from_le_bytes(*kb)).collect();
+    let keys_u64: Vec<u64> = keys_bytes
+        .iter()
+        .map(|kb| u64::from_le_bytes(*kb))
+        .collect();
     let idxs: Vec<Option<usize>> = index.lookup_batch_u64_simd(&keys_u64);
     if timing {
         eprintln!(
@@ -111,9 +114,8 @@ pub fn finalize_ani_index(
     let mut reordered_keys: Vec<u64> = vec![0u64; slot_count];
     let mut slot_filled: Vec<bool> = vec![false; slot_count];
     for (i, (key, entry)) in rows.into_iter().enumerate() {
-        let idx = idxs[i].ok_or_else(|| {
-            anyhow::anyhow!("Index lookup failed during reorder for row {}", i)
-        })?;
+        let idx = idxs[i]
+            .ok_or_else(|| anyhow::anyhow!("Index lookup failed during reorder for row {}", i))?;
         if idx >= slot_count {
             // Shouldn't happen — max_slot was the maximum we just computed.
             anyhow::bail!(
@@ -231,9 +233,10 @@ fn scan_for_intervals(entries: &[AniEntry], pool: &mut StringPool) -> bool {
                     .map(|p| alt_ofs + p)
                     .unwrap_or(raw.len());
                 if let Ok(s) = std::str::from_utf8(&raw[alt_ofs..end])
-                    && s.parse::<u32>().is_ok() {
-                        return true;
-                    }
+                    && s.parse::<u32>().is_ok()
+                {
+                    return true;
+                }
             }
         }
     }
@@ -243,11 +246,7 @@ fn scan_for_intervals(entries: &[AniEntry], pool: &mut StringPool) -> bool {
 fn print_mph_config(config: &IndexConfig, n: usize, rows: &[(u64, AniEntry)]) {
     eprintln!(
         "[ani-build] MPHF config: backend={:?}, gamma={:.2}, max_rehash={}, lean={}, entries={}",
-        config.backend,
-        config.mph_config.gamma,
-        config.mph_config.max_rehash,
-        config.lean_mph,
-        n
+        config.backend, config.mph_config.gamma, config.mph_config.max_rehash, config.lean_mph, n
     );
     eprintln!("[ani-build] First 5 keys for verification:");
     for (i, (k, e)) in rows.iter().enumerate().take(5) {
@@ -493,7 +492,10 @@ fn build_pos_index(entries: &[AniEntry]) -> Vec<u8> {
         if entry.chr_id == ANI_SENTINEL_CHR_ID {
             continue;
         }
-        per_chr.entry(entry.chr_id).or_default().push((entry.pos, idx as u32));
+        per_chr
+            .entry(entry.chr_id)
+            .or_default()
+            .push((entry.pos, idx as u32));
     }
 
     let mut contigs: Vec<AniPosContig> = Vec::new();

@@ -29,7 +29,11 @@ pub fn discover_indel(read: &[u8], refw: &[u8]) -> Option<(Indel, u32)> {
     }
     let r: Vec<u8> = refw.iter().map(|&b| encode_nt(b)).collect();
     let q: Vec<u8> = read.iter().map(|&b| encode_nt(b)).collect();
-    let par = GlocalParams { d: 0.001, e: 0.1, bw: n.abs_diff(m) + 10 };
+    let par = GlocalParams {
+        d: 0.001,
+        e: 0.1,
+        bw: n.abs_diff(m) + 10,
+    };
     let res = glocal(&r, &q, None, &par, true)?;
     let mut best: Option<Indel> = None;
     let mut mmc = 0u32;
@@ -51,7 +55,15 @@ pub fn discover_indel(read: &[u8], refw: &[u8]) -> Option<(Indel, u32)> {
                 i += 1;
             }
             if let Some(pc) = prev_col {
-                consider(Indel { is_ins: true, ref_off: pc + 1, len: i - start, bases: read[start..i].to_vec() }, &mut best);
+                consider(
+                    Indel {
+                        is_ins: true,
+                        ref_off: pc + 1,
+                        len: i - start,
+                        bases: read[start..i].to_vec(),
+                    },
+                    &mut best,
+                );
             }
             continue;
         }
@@ -65,7 +77,15 @@ pub fn discover_indel(read: &[u8], refw: &[u8]) -> Option<(Indel, u32)> {
                 return None;
             }
             if col > pc + 1 {
-                consider(Indel { is_ins: false, ref_off: pc + 1, len: col - pc - 1, bases: Vec::new() }, &mut best);
+                consider(
+                    Indel {
+                        is_ins: false,
+                        ref_off: pc + 1,
+                        len: col - pc - 1,
+                        bases: Vec::new(),
+                    },
+                    &mut best,
+                );
             }
         }
         if !read[i].eq_ignore_ascii_case(&refw[col]) {
@@ -112,20 +132,29 @@ pub struct AssembledCall {
 /// realignment implies, but only if it fits cleanly (`<= max_mm` residual
 /// mismatches over the window). The indel with the most clean votes wins if it
 /// clears `min_support`. `win_lo` is the 0-based genomic start of `refw`.
-pub fn assemble_indel(reads: &[LiveRead], win_lo: u32, refw: &[u8], min_support: u32, max_mm: u32) -> Option<AssembledCall> {
+pub fn assemble_indel(
+    reads: &[LiveRead],
+    win_lo: u32,
+    refw: &[u8],
+    min_support: u32,
+    max_mm: u32,
+) -> Option<AssembledCall> {
     let hi = win_lo + refw.len() as u32;
     let mut votes: std::collections::HashMap<Indel, u32> = std::collections::HashMap::new();
     let mut total = 0u32;
     for lr in reads {
-        let Some(sub) = lr.query_window(win_lo, hi) else { continue };
+        let Some(sub) = lr.query_window(win_lo, hi) else {
+            continue;
+        };
         if sub.len() < 12 {
             continue;
         }
         total += 1;
         if let Some((ind, mm)) = discover_indel(&sub, refw)
-            && mm <= max_mm {
-                *votes.entry(ind).or_insert(0) += 1;
-            }
+            && mm <= max_mm
+        {
+            *votes.entry(ind).or_insert(0) += 1;
+        }
     }
     if total == 0 || votes.is_empty() {
         return None;
@@ -154,7 +183,17 @@ pub fn assemble_indel(reads: &[LiveRead], win_lo: u32, refw: &[u8], min_support:
         (r, anchor_base.to_string())
     };
     let hap_alt = apply_indel(refw, &ind);
-    Some(AssembledCall { pos1, ref_str, alt_str, support, total, win_lo, win_hi: hi, hap_ref: refw.to_vec(), hap_alt })
+    Some(AssembledCall {
+        pos1,
+        ref_str,
+        alt_str,
+        support,
+        total,
+        win_lo,
+        win_hi: hi,
+        hap_ref: refw.to_vec(),
+        hap_alt,
+    })
 }
 
 /// Per-sample evidence for a two-haplotype site.
@@ -173,7 +212,9 @@ pub fn haplotype_pls(reads: &[LiveRead], n_samples: usize, call: &AssembledCall)
     let mut out = vec![HapSample::default(); n_samples];
     let ln2 = std::f64::consts::LN_2;
     for lr in reads {
-        let Some((bases, quals)) = lr.query_window_qual(call.win_lo, call.win_hi) else { continue };
+        let Some((bases, quals)) = lr.query_window_qual(call.win_lo, call.win_hi) else {
+            continue;
+        };
         if bases.len() < 12 || lr.sample_idx >= n_samples {
             continue;
         }

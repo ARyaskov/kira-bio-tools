@@ -15,8 +15,8 @@ mod splice;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use anyhow::{Result, bail};
 use crate::fx::FxHashMap;
+use anyhow::{Result, bail};
 
 pub use caller::{Caller, CsqOpts, CsqOutput, Phase};
 use gff::{Gff, STRAND_FWD, gf_type2gff_string};
@@ -454,11 +454,12 @@ pub fn kput_vcsq(gff: &Gff, csq: &mut Vcsq, out: &mut String) {
         csq.ty &= !CSQ_MISSENSE_VARIANT;
     }
     if csq.ty & CSQ_PRINTED_UPSTREAM != 0
-        && let Some((_, pos)) = csq.ref_ {
-            out.push('@');
-            out.push_str(&(pos + 1).to_string());
-            return;
-        }
+        && let Some((_, pos)) = csq.ref_
+    {
+        out.push('@');
+        out.push_str(&(pos + 1).to_string());
+        return;
+    }
     if csq.ty & CSQ_UPSTREAM_STOP != 0 {
         out.push('*');
     }

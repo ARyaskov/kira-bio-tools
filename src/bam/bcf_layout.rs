@@ -138,15 +138,28 @@ fn read_position(lr: &LiveRead, qi: usize) -> (i64, i64, i64, i64) {
     }
     let qpos = qi as i64;
     let sc_left_dist = if sc_left > 0 { qpos + 1 - sc_left } else { -1 };
-    let sc_right_dist = if sc_right > 0 { l_qseq - sc_right - qpos } else { -1 };
+    let sc_right_dist = if sc_right > 0 {
+        l_qseq - sc_right - qpos
+    } else {
+        -1
+    };
     let (sc_len, sc_dist) = if sc_left_dist >= 0 {
-        if sc_right_dist < 0 || sc_left_dist < sc_right_dist { (sc_left, sc_left_dist) } else { (0, 0) }
+        if sc_right_dist < 0 || sc_left_dist < sc_right_dist {
+            (sc_left, sc_left_dist)
+        } else {
+            (0, 0)
+        }
     } else if sc_right_dist >= 0 {
         (sc_right, sc_right_dist)
     } else {
         (0, 0)
     };
-    (qpos + 1 - sc_left, l_qseq - sc_left - sc_right, sc_len, sc_dist)
+    (
+        qpos + 1 - sc_left,
+        l_qseq - sc_left - sc_right,
+        sc_len,
+        sc_dist,
+    )
 }
 
 /// One observation folded into a sample's call (`bcf_call_glfgen` body).
@@ -163,7 +176,11 @@ fn add_observation(
 ) {
     let rev = lr.is_reverse();
     let base_q = q_in;
-    let inm = if bias.want_nm { aux_nm(lr, !is_diff) } else { None };
+    let inm = if bias.want_nm {
+        aux_nm(lr, !is_diff)
+    } else {
+        None
+    };
     if let Some(v) = inm {
         bias.nnm[usize::from(is_diff)] += 1;
         bias.nm[usize::from(is_diff)] += v as f32;
@@ -177,7 +194,11 @@ fn add_observation(
     bases.push(((q as u16) << 5) | ((rev as u16) << 4) | (b as u16));
     if b < 4 {
         call.qs[b] += q;
-        if rev { call.adr[b] += 1 } else { call.adf[b] += 1 }
+        if rev {
+            call.adr[b] += 1
+        } else {
+            call.adf[b] += 1
+        }
     }
     let d = usize::from(is_diff);
     call.anno[(d << 1) | usize::from(rev)] += 1.0;
@@ -195,8 +216,16 @@ fn add_observation(
     let (pos, len, sc_len, sc_dist) = read_position(lr, qi);
     let epos = ((pos as f64 / (len + 1) as f64) * (NPOS - 1) as f64) as i64;
     let epos = epos.clamp(0, NPOS as i64 - 1) as usize;
-    let scl = if sc_len > 0 { ((15.0 * sc_len as f64 / (sc_dist + 1) as f64) as i64).clamp(0, 99) as usize } else { 0 };
-    if rev { bias.rev_mqs[mapq] += 1 } else { bias.fwd_mqs[mapq] += 1 }
+    let scl = if sc_len > 0 {
+        ((15.0 * sc_len as f64 / (sc_dist + 1) as f64) as i64).clamp(0, 99) as usize
+    } else {
+        0
+    };
+    if rev {
+        bias.rev_mqs[mapq] += 1
+    } else {
+        bias.fwd_mqs[mapq] += 1
+    }
     if is_diff {
         bias.alt_pos[epos] += 1;
         bias.alt_bq[base_q] += 1;
@@ -244,10 +273,9 @@ fn aux_nm(lr: &LiveRead, is_ref: bool) -> Option<usize> {
     for &(k, l) in lr.cigar_pairs.iter() {
         match k {
             Kind::SoftClip => nm += l as i64,
-            Kind::Insertion | Kind::Deletion
-                if l > 1 => {
-                    nm -= l as i64 - 1;
-                }
+            Kind::Insertion | Kind::Deletion if l > 1 => {
+                nm -= l as i64 - 1;
+            }
             _ => {}
         }
     }
@@ -256,7 +284,10 @@ fn aux_nm(lr: &LiveRead, is_ref: bool) -> Option<usize> {
 }
 
 fn softclip_reads(reads: &[LiveRead], sample: usize) -> i32 {
-    reads.iter().filter(|r| r.sample_idx == sample && r.has_softclip).count() as i32
+    reads
+        .iter()
+        .filter(|r| r.sample_idx == sample && r.has_softclip)
+        .count() as i32
 }
 
 /// `bcf_call_combine` output.
@@ -315,12 +346,11 @@ fn combine(calls: &[SampleCall], ref4: Option<usize>) -> Combined {
         }
         i -= 1;
     }
-    if ref4.is_some()
-        && ((r4 < 4 && j < 4) || (r4 == 4 && j < 5)) && i >= 0 {
-            unseen = j as i64;
-            a[j] = ptr[i as usize] as i64;
-            j += 1;
-        }
+    if ref4.is_some() && ((r4 < 4 && j < 4) || (r4 == 4 && j < 5)) && i >= 0 {
+        unseen = j as i64;
+        a[j] = ptr[i as usize] as i64;
+        j += 1;
+    }
     let n_alleles = j;
     let has_alt = !(n_alleles == 2 && unseen != -1);
 
@@ -356,7 +386,17 @@ fn combine(calls: &[SampleCall], ref4: Option<usize>) -> Combined {
             anno[k] += c.anno[k];
         }
     }
-    Combined { a, n_alleles, unseen, qsum: out_qsum, pl, anno, ori_depth, mq0, has_alt }
+    Combined {
+        a,
+        n_alleles,
+        unseen,
+        qsum: out_qsum,
+        pl,
+        anno,
+        ori_depth,
+        mq0,
+        has_alt,
+    }
 }
 
 /// `kf_erfc` (AS66).
@@ -452,7 +492,10 @@ pub fn calc_vdb(pos: &[i32; NPOS]) -> Option<f64> {
     let (pscale, pshift): (f32, f32) = if i == n {
         (PARAM[n - 1][1], PARAM[n - 1][2])
     } else if i > 0 && PARAM[i][0] != dp as f32 {
-        (((PARAM[i - 1][1] + PARAM[i][1]) as f64 * 0.5) as f32, ((PARAM[i - 1][2] + PARAM[i][2]) as f64 * 0.5) as f32)
+        (
+            ((PARAM[i - 1][1] + PARAM[i][1]) as f64 * 0.5) as f32,
+            ((PARAM[i - 1][2] + PARAM[i][2]) as f64 * 0.5) as f32,
+        )
     } else {
         (PARAM[i][1], PARAM[i][2])
     };
@@ -488,7 +531,8 @@ pub fn mwu_z(a: &[i32], b: &[i32]) -> Option<f64> {
     }
     let u = l as f64 + e as f64 * 0.5;
     let m = (na * nb) as f64 / 2.0;
-    let var2 = (na * nb) as f64 / 12.0 * ((na + nb + 1) as f64 - t as f64 / ((na + nb) * (na + nb - 1)) as f64);
+    let var2 = (na * nb) as f64 / 12.0
+        * ((na + nb + 1) as f64 - t as f64 / ((na + nb) * (na + nb - 1)) as f64);
     if var2 <= 0.0 {
         return Some(0.0);
     }
@@ -496,7 +540,11 @@ pub fn mwu_z(a: &[i32], b: &[i32]) -> Option<f64> {
 }
 
 fn logsumexp2(a: f64, b: f64) -> f64 {
-    if a > b { (1.0 + (b - a).exp()).ln() + a } else { (1.0 + (a - b).exp()).ln() + b }
+    if a > b {
+        (1.0 + (b - a).exp()).ln() + a
+    } else {
+        (1.0 + (a - b).exp()).ln() + b
+    }
 }
 
 /// `calc_SegBias`.
@@ -525,7 +573,9 @@ fn calc_seg_bias(calls: &[SampleCall], anno: &[f64; 16]) -> Option<f64> {
             t += f.ln() + oi as f64 * (q / p).ln() - q + p;
             t
         } else {
-            (2.0 * f * (1.0 - f) * (-q).exp() + f * f * (-2.0 * q).exp() + (1.0 - f) * (1.0 - f)).ln() + p
+            (2.0 * f * (1.0 - f) * (-q).exp() + f * f * (-2.0 * q).exp() + (1.0 - f) * (1.0 - f))
+                .ln()
+                + p
         };
         sum += tmp;
     }
@@ -566,7 +616,8 @@ fn hypergeo_acc(n11: i64, n1_: i64, n_1: i64, n: i64, aux: &mut HgAcc) -> f64 {
                 return aux.p;
             }
             if n11 == aux.n11 - 1 {
-                aux.p *= aux.n11 as f64 / (aux.n1_ - n11) as f64 * (aux.n11 + aux.n - aux.n1_ - aux.n_1) as f64
+                aux.p *= aux.n11 as f64 / (aux.n1_ - n11) as f64
+                    * (aux.n11 + aux.n - aux.n1_ - aux.n_1) as f64
                     / (aux.n_1 - n11) as f64;
                 aux.n11 = n11;
                 return aux.p;
@@ -588,10 +639,20 @@ pub fn kt_fisher_exact(n11: i64, n12: i64, n21: i64, n22: i64) -> (f64, f64, f64
     if min == max {
         return (1.0, 1.0, 1.0);
     }
-    let mut aux = HgAcc { n11: 0, n1_: 0, n_1: 0, n: 0, p: 0.0 };
+    let mut aux = HgAcc {
+        n11: 0,
+        n1_: 0,
+        n_1: 0,
+        n: 0,
+        p: 0.0,
+    };
     let q = hypergeo_acc(n11, n1_, n_1, n, &mut aux);
     if q == 0.0 {
-        return if n11 * (n + 2) < (n_1 + 1) * (n1_ + 1) { (0.0, 1.0, 0.0) } else { (1.0, 0.0, 0.0) };
+        return if n11 * (n + 2) < (n_1 + 1) * (n1_ + 1) {
+            (0.0, 1.0, 0.0)
+        } else {
+            (1.0, 0.0, 0.0)
+        };
     }
     let mut p = hypergeo_acc(min, 0, 0, 0, &mut aux);
     let mut left = 0.0;
@@ -699,8 +760,14 @@ fn write_record(
     sep(&mut info);
     info.push_str(&format!("DP={}", comb.ori_depth));
     // Per-sample allele counts in output allele order.
-    let adf: Vec<Vec<i32>> = calls.iter().map(|c| (0..n).map(|j| c.adf[comb.a[j] as usize]).collect()).collect();
-    let adr: Vec<Vec<i32>> = calls.iter().map(|c| (0..n).map(|j| c.adr[comb.a[j] as usize]).collect()).collect();
+    let adf: Vec<Vec<i32>> = calls
+        .iter()
+        .map(|c| (0..n).map(|j| c.adf[comb.a[j] as usize]).collect())
+        .collect();
+    let adr: Vec<Vec<i32>> = calls
+        .iter()
+        .map(|c| (0..n).map(|j| c.adr[comb.a[j] as usize]).collect())
+        .collect();
     let adf_tot: Vec<i32> = (0..n).map(|j| adf.iter().map(|v| v[j]).sum()).collect();
     let adr_tot: Vec<i32> = (0..n).map(|j| adr.iter().map(|v| v[j]).sum()).collect();
     let ad_tot: Vec<i32> = (0..n).map(|j| adf_tot[j] + adr_tot[j]).collect();
@@ -737,17 +804,27 @@ fn write_record(
     push_list(&mut info, (0..n).map(|j| fmt_f32(comb.qsum[j] as f64)));
     if comb.has_alt {
         if tags.info_vdb
-            && let Some(v) = calc_vdb(&bias.alt_pos) {
-                sep(&mut info);
-                info.push_str(&format!("VDB={}", fmt_f32(v)));
-            }
+            && let Some(v) = calc_vdb(&bias.alt_pos)
+        {
+            sep(&mut info);
+            info.push_str(&format!("VDB={}", fmt_f32(v)));
+        }
         if tags.info_sgb
-            && let Some(v) = calc_seg_bias(calls, &comb.anno) {
-                sep(&mut info);
-                info.push_str(&format!("SGB={}", fmt_f32(v)));
-            }
+            && let Some(v) = calc_seg_bias(calls, &comb.anno)
+        {
+            sep(&mut info);
+            info.push_str(&format!("SGB={}", fmt_f32(v)));
+        }
         if tags.info_nm && (bias.nnm[0] > 0 || bias.nnm[1] > 0) {
-            let nm: Vec<String> = (0..2).map(|i| fmt_g(if bias.nnm[i] > 0 { (bias.nm[i] / bias.nnm[i] as f32) as f64 } else { 0.0 })).collect();
+            let nm: Vec<String> = (0..2)
+                .map(|i| {
+                    fmt_g(if bias.nnm[i] > 0 {
+                        (bias.nm[i] / bias.nnm[i] as f32) as f64
+                    } else {
+                        0.0
+                    })
+                })
+                .collect();
             sep(&mut info);
             info.push_str(&format!("NM={}", nm.join(",")));
         }
@@ -769,36 +846,77 @@ fn write_record(
             }
         }
         if tags.info_fs {
-            let (_, _, two) = kt_fisher_exact(comb.anno[0] as i64, comb.anno[1] as i64, comb.anno[2] as i64, comb.anno[3] as i64);
+            let (_, _, two) = kt_fisher_exact(
+                comb.anno[0] as i64,
+                comb.anno[1] as i64,
+                comb.anno[2] as i64,
+                comb.anno[3] as i64,
+            );
             sep(&mut info);
             info.push_str(&format!("FS={}", fmt_f32(two)));
         }
     }
     if tags.info_mq0f {
-        let v = if comb.ori_depth > 0 { comb.mq0 as f32 / comb.ori_depth as f32 } else { 0.0 };
+        let v = if comb.ori_depth > 0 {
+            comb.mq0 as f32 / comb.ori_depth as f32
+        } else {
+            0.0
+        };
         sep(&mut info);
         info.push_str(&format!("MQ0F={}", fmt_g(v as f64)));
     }
 
     let mut fmt_keys = vec!["PL"];
-    if tags.fmt_dp { fmt_keys.push("DP"); }
-    if tags.fmt_dv { fmt_keys.push("DV"); }
-    if tags.fmt_sp { fmt_keys.push("SP"); }
-    if tags.fmt_dp4 { fmt_keys.push("DP4"); }
-    if tags.fmt_adf { fmt_keys.push("ADF"); }
-    if tags.fmt_adr { fmt_keys.push("ADR"); }
-    if tags.fmt_ad { fmt_keys.push("AD"); }
-    if tags.fmt_dpr { fmt_keys.push("DPR"); }
-    if tags.fmt_scr { fmt_keys.push("SCR"); }
-    if tags.fmt_qs { fmt_keys.push("QS"); }
-    if tags.fmt_nmbz && comb.has_alt { fmt_keys.push("NMBZ"); }
+    if tags.fmt_dp {
+        fmt_keys.push("DP");
+    }
+    if tags.fmt_dv {
+        fmt_keys.push("DV");
+    }
+    if tags.fmt_sp {
+        fmt_keys.push("SP");
+    }
+    if tags.fmt_dp4 {
+        fmt_keys.push("DP4");
+    }
+    if tags.fmt_adf {
+        fmt_keys.push("ADF");
+    }
+    if tags.fmt_adr {
+        fmt_keys.push("ADR");
+    }
+    if tags.fmt_ad {
+        fmt_keys.push("AD");
+    }
+    if tags.fmt_dpr {
+        fmt_keys.push("DPR");
+    }
+    if tags.fmt_scr {
+        fmt_keys.push("SCR");
+    }
+    if tags.fmt_qs {
+        fmt_keys.push("QS");
+    }
+    if tags.fmt_nmbz && comb.has_alt {
+        fmt_keys.push("NMBZ");
+    }
 
-    let _ = write!(out, "{chr}\t{pos1}\t.\t{ref_str}\t{}\t0\t.\t{info}\t{}", alts.join(","), fmt_keys.join(":"));
+    let _ = write!(
+        out,
+        "{chr}\t{pos1}\t.\t{ref_str}\t{}\t0\t.\t{info}\t{}",
+        alts.join(","),
+        fmt_keys.join(":")
+    );
     let x = n * (n + 1) / 2;
     for (si, c) in calls.iter().enumerate() {
         let mut col = String::new();
         push_list(&mut col, comb.pl[si * x..(si + 1) * x].iter());
-        let dp4 = [c.anno[0] as i32, c.anno[1] as i32, c.anno[2] as i32, c.anno[3] as i32];
+        let dp4 = [
+            c.anno[0] as i32,
+            c.anno[1] as i32,
+            c.anno[2] as i32,
+            c.anno[3] as i32,
+        ];
         if tags.fmt_dp {
             col.push_str(&format!(":{}", dp4.iter().sum::<i32>()));
         }
@@ -836,10 +954,16 @@ fn write_record(
         }
         if tags.fmt_qs {
             col.push(':');
-            push_list(&mut col, (0..n).map(|j| c.qs[comb.a[j] as usize].min(i32::MAX as i64)));
+            push_list(
+                &mut col,
+                (0..n).map(|j| c.qs[comb.a[j] as usize].min(i32::MAX as i64)),
+            );
         }
         if tags.fmt_nmbz && comb.has_alt {
-            col.push_str(&format!(":{}", fmt_f32(mwu_z(&c.ref_nm, &c.alt_nm).unwrap_or(0.0))));
+            col.push_str(&format!(
+                ":{}",
+                fmt_f32(mwu_z(&c.ref_nm, &c.alt_nm).unwrap_or(0.0))
+            ));
         }
         let _ = write!(out, "\t{col}");
     }
@@ -879,15 +1003,25 @@ pub fn render_snp(
             let is_diff = !(ref4 < 4 && b == ref4);
             add_observation(&mut call, &mut bias, &mut bases, lr, qi, b, q, is_diff);
         }
-        call.p = ctx.em.cal(&mut bases, MAX_ALLELES, &mut ctx.rng.lock().unwrap());
+        call.p = ctx
+            .em
+            .cal(&mut bases, MAX_ALLELES, &mut ctx.rng.lock().unwrap());
         calls.push(call);
     }
     let comb = combine(&calls, Some(ref4));
     let ref_str = (b"ACGTN"[ref4] as char).to_string();
     let alts: Vec<String> = (1..comb.n_alleles)
-        .map(|i| if comb.unseen == i as i64 { "<*>".to_string() } else { (b"ACGT"[comb.a[i] as usize] as char).to_string() })
+        .map(|i| {
+            if comb.unseen == i as i64 {
+                "<*>".to_string()
+            } else {
+                (b"ACGT"[comb.a[i] as usize] as char).to_string()
+            }
+        })
         .collect();
-    write_record(out, chr, pos1, &ref_str, &alts, &calls, &comb, &bias, ctx, None);
+    write_record(
+        out, chr, pos1, &ref_str, &alts, &calls, &comb, &bias, ctx, None,
+    );
 }
 
 /// One biallelic indel record for a kira indel candidate: reads carrying
@@ -927,13 +1061,19 @@ pub fn render_indel(
                 Some(IndelEvent::Del(l)) => !spec.is_ins && l == spec.del_len,
                 None => false,
             };
-            let (b, q) = if carries { (1usize, spec.indel_qual as i64) } else { (0usize, 30i64) };
+            let (b, q) = if carries {
+                (1usize, spec.indel_qual as i64)
+            } else {
+                (0usize, 30i64)
+            };
             if carries {
                 support += 1;
             }
             add_observation(&mut call, &mut bias, &mut bases, lr, qi, b, q, carries);
         }
-        call.p = ctx.em.cal(&mut bases, MAX_ALLELES, &mut ctx.rng.lock().unwrap());
+        call.p = ctx
+            .em
+            .cal(&mut bases, MAX_ALLELES, &mut ctx.rng.lock().unwrap());
         if support > idv {
             idv = support;
         }
@@ -950,7 +1090,18 @@ pub fn render_indel(
         return;
     }
     let alts = vec![spec.alt_str.to_string()];
-    write_record(out, chr, pos1, spec.ref_str, &alts, &calls, &comb, &bias, ctx, Some((idv, imf)));
+    write_record(
+        out,
+        chr,
+        pos1,
+        spec.ref_str,
+        &alts,
+        &calls,
+        &comb,
+        &bias,
+        ctx,
+        Some((idv, imf)),
+    );
 }
 
 /// Header lines bcftools `mpileup` writes for the requested annotations, in
@@ -960,39 +1111,99 @@ pub fn header_lines(tags: &AnnotateSpec) -> Vec<&'static str> {
         "##ALT=<ID=*,Description=\"Represents allele(s) other than observed.\">",
         "##INFO=<ID=INDEL,Number=0,Type=Flag,Description=\"Indicates that the variant is an INDEL.\">",
     ];
-    if tags.info_idv { v.push("##INFO=<ID=IDV,Number=1,Type=Integer,Description=\"Maximum number of raw reads supporting an indel\">"); }
-    if tags.info_imf { v.push("##INFO=<ID=IMF,Number=1,Type=Float,Description=\"Maximum fraction of raw reads supporting an indel\">"); }
+    if tags.info_idv {
+        v.push("##INFO=<ID=IDV,Number=1,Type=Integer,Description=\"Maximum number of raw reads supporting an indel\">");
+    }
+    if tags.info_imf {
+        v.push("##INFO=<ID=IMF,Number=1,Type=Float,Description=\"Maximum fraction of raw reads supporting an indel\">");
+    }
     v.push("##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Raw read depth\">");
-    if tags.info_vdb { v.push("##INFO=<ID=VDB,Number=1,Type=Float,Description=\"Variant Distance Bias for filtering splice-site artefacts in RNA-seq data (bigger is better)\",Version=\"3\">"); }
-    if tags.info_rpbz { v.push("##INFO=<ID=RPBZ,Number=1,Type=Float,Description=\"Mann-Whitney U-z test of Read Position Bias (closer to 0 is better)\">"); }
-    if tags.info_mqbz { v.push("##INFO=<ID=MQBZ,Number=1,Type=Float,Description=\"Mann-Whitney U-z test of Mapping Quality Bias (closer to 0 is better)\">"); }
-    if tags.info_bqbz { v.push("##INFO=<ID=BQBZ,Number=1,Type=Float,Description=\"Mann-Whitney U-z test of Base Quality Bias (closer to 0 is better)\">"); }
-    if tags.info_mqsbz { v.push("##INFO=<ID=MQSBZ,Number=1,Type=Float,Description=\"Mann-Whitney U-z test of Mapping Quality vs Strand Bias (closer to 0 is better)\">"); }
-    if tags.info_nm { v.push("##INFO=<ID=NM,Number=2,Type=Float,Description=\"Average number of mismatches in ref and alt reads (approximate, experimental, make me localized?)\">"); }
-    if tags.info_nmbz { v.push("##INFO=<ID=NMBZ,Number=1,Type=Float,Description=\"Mann-Whitney U-z test of Number of Mismatches within supporting reads (closer to 0 is better; approximate, experimental, make me localized?)\">"); }
-    if tags.fmt_nmbz { v.push("##FORMAT=<ID=NMBZ,Number=1,Type=Float,Description=\"Mann-Whitney U-z test of Number of Mismatches within supporting reads (closer to 0 is better)\">"); }
-    if tags.info_scbz { v.push("##INFO=<ID=SCBZ,Number=1,Type=Float,Description=\"Mann-Whitney U-z test of Soft-Clip Length Bias (closer to 0 is better)\">"); }
-    if tags.info_fs { v.push("##INFO=<ID=FS,Number=1,Type=Float,Description=\"Fisher's exact test P-value to detect strand bias\">"); }
-    if tags.info_sgb { v.push("##INFO=<ID=SGB,Number=1,Type=Float,Description=\"Segregation based metric, http://samtools.github.io/bcftools/rd-SegBias.pdf\">"); }
-    if tags.info_mq0f { v.push("##INFO=<ID=MQ0F,Number=1,Type=Float,Description=\"Fraction of MQ0 reads (smaller is better)\">"); }
+    if tags.info_vdb {
+        v.push("##INFO=<ID=VDB,Number=1,Type=Float,Description=\"Variant Distance Bias for filtering splice-site artefacts in RNA-seq data (bigger is better)\",Version=\"3\">");
+    }
+    if tags.info_rpbz {
+        v.push("##INFO=<ID=RPBZ,Number=1,Type=Float,Description=\"Mann-Whitney U-z test of Read Position Bias (closer to 0 is better)\">");
+    }
+    if tags.info_mqbz {
+        v.push("##INFO=<ID=MQBZ,Number=1,Type=Float,Description=\"Mann-Whitney U-z test of Mapping Quality Bias (closer to 0 is better)\">");
+    }
+    if tags.info_bqbz {
+        v.push("##INFO=<ID=BQBZ,Number=1,Type=Float,Description=\"Mann-Whitney U-z test of Base Quality Bias (closer to 0 is better)\">");
+    }
+    if tags.info_mqsbz {
+        v.push("##INFO=<ID=MQSBZ,Number=1,Type=Float,Description=\"Mann-Whitney U-z test of Mapping Quality vs Strand Bias (closer to 0 is better)\">");
+    }
+    if tags.info_nm {
+        v.push("##INFO=<ID=NM,Number=2,Type=Float,Description=\"Average number of mismatches in ref and alt reads (approximate, experimental, make me localized?)\">");
+    }
+    if tags.info_nmbz {
+        v.push("##INFO=<ID=NMBZ,Number=1,Type=Float,Description=\"Mann-Whitney U-z test of Number of Mismatches within supporting reads (closer to 0 is better; approximate, experimental, make me localized?)\">");
+    }
+    if tags.fmt_nmbz {
+        v.push("##FORMAT=<ID=NMBZ,Number=1,Type=Float,Description=\"Mann-Whitney U-z test of Number of Mismatches within supporting reads (closer to 0 is better)\">");
+    }
+    if tags.info_scbz {
+        v.push("##INFO=<ID=SCBZ,Number=1,Type=Float,Description=\"Mann-Whitney U-z test of Soft-Clip Length Bias (closer to 0 is better)\">");
+    }
+    if tags.info_fs {
+        v.push("##INFO=<ID=FS,Number=1,Type=Float,Description=\"Fisher's exact test P-value to detect strand bias\">");
+    }
+    if tags.info_sgb {
+        v.push("##INFO=<ID=SGB,Number=1,Type=Float,Description=\"Segregation based metric, http://samtools.github.io/bcftools/rd-SegBias.pdf\">");
+    }
+    if tags.info_mq0f {
+        v.push("##INFO=<ID=MQ0F,Number=1,Type=Float,Description=\"Fraction of MQ0 reads (smaller is better)\">");
+    }
     v.push("##INFO=<ID=I16,Number=16,Type=Float,Description=\"Auxiliary tag used for calling, see description of bcf_callret1_t in bam2bcf.h\">");
     v.push("##INFO=<ID=QS,Number=R,Type=Float,Description=\"Auxiliary tag used for calling\">");
     v.push("##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"List of Phred-scaled genotype likelihoods\">");
-    if tags.fmt_dp { v.push("##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Number of high-quality bases\">"); }
-    if tags.fmt_dv { v.push("##FORMAT=<ID=DV,Number=1,Type=Integer,Description=\"Number of high-quality non-reference bases\">"); }
-    if tags.fmt_dpr { v.push("##FORMAT=<ID=DPR,Number=R,Type=Integer,Description=\"Number of high-quality bases observed for each allele\">"); }
-    if tags.info_dpr { v.push("##INFO=<ID=DPR,Number=R,Type=Integer,Description=\"Number of high-quality bases observed for each allele\">"); }
-    if tags.fmt_dp4 { v.push("##FORMAT=<ID=DP4,Number=4,Type=Integer,Description=\"Number of high-quality ref-fwd, ref-reverse, alt-fwd and alt-reverse bases\">"); }
-    if tags.fmt_sp { v.push("##FORMAT=<ID=SP,Number=1,Type=Integer,Description=\"Phred-scaled strand bias P-value\">"); }
-    if tags.fmt_ad { v.push("##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"Allelic depths (high-quality bases)\">"); }
-    if tags.fmt_adf { v.push("##FORMAT=<ID=ADF,Number=R,Type=Integer,Description=\"Allelic depths on the forward strand (high-quality bases)\">"); }
-    if tags.fmt_adr { v.push("##FORMAT=<ID=ADR,Number=R,Type=Integer,Description=\"Allelic depths on the reverse strand (high-quality bases)\">"); }
-    if tags.fmt_qs { v.push("##FORMAT=<ID=QS,Number=R,Type=Integer,Description=\"Phred-score allele quality sum used by `call -mG` and `+trio-dnm`\">"); }
-    if tags.info_ad { v.push("##INFO=<ID=AD,Number=R,Type=Integer,Description=\"Total allelic depths (high-quality bases)\">"); }
-    if tags.info_adf { v.push("##INFO=<ID=ADF,Number=R,Type=Integer,Description=\"Total allelic depths on the forward strand (high-quality bases)\">"); }
-    if tags.info_scr { v.push("##INFO=<ID=SCR,Number=1,Type=Integer,Description=\"Number of soft-clipped reads (at high-quality bases)\">"); }
-    if tags.fmt_scr { v.push("##FORMAT=<ID=SCR,Number=1,Type=Integer,Description=\"Per-sample number of soft-clipped reads (at high-quality bases)\">"); }
-    if tags.info_adr { v.push("##INFO=<ID=ADR,Number=R,Type=Integer,Description=\"Total allelic depths on the reverse strand (high-quality bases)\">"); }
+    if tags.fmt_dp {
+        v.push(
+            "##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Number of high-quality bases\">",
+        );
+    }
+    if tags.fmt_dv {
+        v.push("##FORMAT=<ID=DV,Number=1,Type=Integer,Description=\"Number of high-quality non-reference bases\">");
+    }
+    if tags.fmt_dpr {
+        v.push("##FORMAT=<ID=DPR,Number=R,Type=Integer,Description=\"Number of high-quality bases observed for each allele\">");
+    }
+    if tags.info_dpr {
+        v.push("##INFO=<ID=DPR,Number=R,Type=Integer,Description=\"Number of high-quality bases observed for each allele\">");
+    }
+    if tags.fmt_dp4 {
+        v.push("##FORMAT=<ID=DP4,Number=4,Type=Integer,Description=\"Number of high-quality ref-fwd, ref-reverse, alt-fwd and alt-reverse bases\">");
+    }
+    if tags.fmt_sp {
+        v.push("##FORMAT=<ID=SP,Number=1,Type=Integer,Description=\"Phred-scaled strand bias P-value\">");
+    }
+    if tags.fmt_ad {
+        v.push("##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"Allelic depths (high-quality bases)\">");
+    }
+    if tags.fmt_adf {
+        v.push("##FORMAT=<ID=ADF,Number=R,Type=Integer,Description=\"Allelic depths on the forward strand (high-quality bases)\">");
+    }
+    if tags.fmt_adr {
+        v.push("##FORMAT=<ID=ADR,Number=R,Type=Integer,Description=\"Allelic depths on the reverse strand (high-quality bases)\">");
+    }
+    if tags.fmt_qs {
+        v.push("##FORMAT=<ID=QS,Number=R,Type=Integer,Description=\"Phred-score allele quality sum used by `call -mG` and `+trio-dnm`\">");
+    }
+    if tags.info_ad {
+        v.push("##INFO=<ID=AD,Number=R,Type=Integer,Description=\"Total allelic depths (high-quality bases)\">");
+    }
+    if tags.info_adf {
+        v.push("##INFO=<ID=ADF,Number=R,Type=Integer,Description=\"Total allelic depths on the forward strand (high-quality bases)\">");
+    }
+    if tags.info_scr {
+        v.push("##INFO=<ID=SCR,Number=1,Type=Integer,Description=\"Number of soft-clipped reads (at high-quality bases)\">");
+    }
+    if tags.fmt_scr {
+        v.push("##FORMAT=<ID=SCR,Number=1,Type=Integer,Description=\"Per-sample number of soft-clipped reads (at high-quality bases)\">");
+    }
+    if tags.info_adr {
+        v.push("##INFO=<ID=ADR,Number=R,Type=Integer,Description=\"Total allelic depths on the reverse strand (high-quality bases)\">");
+    }
     v
 }
 

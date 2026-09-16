@@ -90,7 +90,10 @@ impl Mask {
         for line in reader.lines() {
             let line = line?;
             let line = line.trim_end_matches('\r');
-            if line.is_empty() || line.starts_with('#') || (is_bed && (line.starts_with("track") || line.starts_with("browser"))) {
+            if line.is_empty()
+                || line.starts_with('#')
+                || (is_bed && (line.starts_with("track") || line.starts_with("browser")))
+            {
                 continue;
             }
             let mut it = line.split(['\t', ' ']).filter(|s| !s.is_empty());
@@ -100,7 +103,9 @@ impl Mask {
             };
             let e = it.next().and_then(|s| s.parse::<i64>().ok());
             let (beg, end) = if is_bed {
-                let Some(e) = e else { bail!("Could not parse the region: {line}") };
+                let Some(e) = e else {
+                    bail!("Could not parse the region: {line}")
+                };
                 (b, e - 1)
             } else {
                 (b - 1, e.unwrap_or(b) - 1)
@@ -134,8 +139,13 @@ impl Mask {
 /// One GT value as htslib stores it (`bcf_gt_*`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GtVal {
-    Allele { idx: i32, phased: bool },
-    Missing { phased: bool },
+    Allele {
+        idx: i32,
+        phased: bool,
+    },
+    Missing {
+        phased: bool,
+    },
     /// `bcf_int8_vector_end` padding of a shorter genotype.
     End,
 }
@@ -223,19 +233,29 @@ impl Rec {
             Some(e) if e > pos => (e - pos, true),
             _ => (rec.ref_allele.len() as i64, false),
         };
-        let gts = rec.format.as_deref().and_then(|f| f.split(':').position(|k| k == "GT")).map(|gi| {
-            let mut gts: Vec<Vec<GtVal>> = rec
-                .samples
-                .iter()
-                .map(|s| parse_gt(s.split(':').nth(gi).unwrap_or(".")))
-                .collect();
-            let n = gts.iter().map(Vec::len).max().unwrap_or(0);
-            for g in &mut gts {
-                g.resize(n, GtVal::End);
-            }
-            gts
-        });
-        Self { pos, rlen, has_end, alleles, gts }
+        let gts = rec
+            .format
+            .as_deref()
+            .and_then(|f| f.split(':').position(|k| k == "GT"))
+            .map(|gi| {
+                let mut gts: Vec<Vec<GtVal>> = rec
+                    .samples
+                    .iter()
+                    .map(|s| parse_gt(s.split(':').nth(gi).unwrap_or(".")))
+                    .collect();
+                let n = gts.iter().map(Vec::len).max().unwrap_or(0);
+                for g in &mut gts {
+                    g.resize(n, GtVal::End);
+                }
+                gts
+            });
+        Self {
+            pos,
+            rlen,
+            has_end,
+            alleles,
+            gts,
+        }
     }
 }
 
@@ -270,9 +290,15 @@ pub fn variant_type(refa: &[u8], alt: &[u8]) -> (u32, i64) {
         if alt[a] == b']' || alt[a] == b'[' {
             return (VCF_BND, 0);
         }
-        return (VCF_INDEL, alt.len() as i64 - a as i64 - (refa.len() as i64 - r as i64));
+        return (
+            VCF_INDEL,
+            alt.len() as i64 - a as i64 - (refa.len() as i64 - r as i64),
+        );
     } else if r < refa.len() && a == alt.len() {
-        return (VCF_INDEL, (alt.len() as i64 - a as i64) - (refa.len() as i64 - r as i64));
+        return (
+            VCF_INDEL,
+            (alt.len() as i64 - a as i64) - (refa.len() as i64 - r as i64),
+        );
     } else if r == refa.len() && a == alt.len() {
         return (VCF_REF, 0);
     }
@@ -286,13 +312,31 @@ pub fn variant_type(refa: &[u8], alt: &[u8]) -> (u32, i64) {
             return (VCF_SNP, 0);
         }
         let n = -((re - r) as i64);
-        return (if up(refa[re]) == up(alt[ae]) { VCF_INDEL } else { VCF_OTHER }, n);
+        return (
+            if up(refa[re]) == up(alt[ae]) {
+                VCF_INDEL
+            } else {
+                VCF_OTHER
+            },
+            n,
+        );
     } else if re == r {
         let n = (ae - a) as i64;
-        return (if up(refa[re]) == up(alt[ae]) { VCF_INDEL } else { VCF_OTHER }, n);
+        return (
+            if up(refa[re]) == up(alt[ae]) {
+                VCF_INDEL
+            } else {
+                VCF_OTHER
+            },
+            n,
+        );
     }
     let ty = if re - r == ae - a { VCF_MNP } else { VCF_OTHER };
-    let n = if re - r > ae - a { -((re - r + 1) as i64) } else { (ae - a + 1) as i64 };
+    let n = if re - r > ae - a {
+        -((re - r + 1) as i64)
+    } else {
+        (ae - a + 1) as i64
+    };
     (ty, n)
 }
 
@@ -319,7 +363,11 @@ fn iupac2bitmask(c: u8) -> i32 {
 
 fn bitmask2iupac(m: u8) -> u8 {
     const IUPAC: &[u8; 16] = b".ACMGRSVTWYHKDBN";
-    if m == 0 || m > 15 { 0 } else { IUPAC[m as usize] }
+    if m == 0 || m > 15 {
+        0
+    } else {
+        IUPAC[m as usize]
+    }
 }
 
 /// Ungapped blocks between the reference and the consensus (`-c`).
@@ -425,7 +473,9 @@ impl<'a> Consensus<'a> {
         chain_out: Option<Box<dyn Write>>,
     ) -> Self {
         if opts.isample.is_none() && opts.iupac_gts.is_none() {
-            eprintln!("Note: the --samples option not given, applying all records regardless of the genotype");
+            eprintln!(
+                "Note: the --samples option not given, applying all records regardless of the genotype"
+            );
         }
         Self {
             opts,
@@ -511,7 +561,8 @@ impl<'a> Consensus<'a> {
                     break;
                 }
                 // Cached FASTA too short for the record: read more, no flushing.
-                if self.fa_ori_pos + self.fa_buf.len() as i64 - self.fa_mod_off < rec.pos + rec.rlen {
+                if self.fa_ori_pos + self.fa_buf.len() as i64 - self.fa_mod_off < rec.pos + rec.rlen
+                {
                     self.unread_vcf_line();
                     pending = true;
                     break;
@@ -569,7 +620,9 @@ impl<'a> Consensus<'a> {
     }
 
     fn init_region(&mut self, header: &str) -> Result<()> {
-        let name_end = header.find(|c: char| c.is_whitespace() || c == ':').unwrap_or(header.len());
+        let name_end = header
+            .find(|c: char| c.is_whitespace() || c == ':')
+            .unwrap_or(header.len());
         let name = &header[..name_end];
         let (mut from, mut to) = (0i64, 0i64);
         if name_end < header.len() && header.as_bytes()[name_end] == b':' {
@@ -582,7 +635,12 @@ impl<'a> Consensus<'a> {
                 from = rest[..nf].parse::<i64>().unwrap_or(0) - 1;
                 let tail = &rest[nf + 1..];
                 let nt = digits(tail);
-                if nt == 0 || tail[nt..].chars().next().is_some_and(|c| !c.is_whitespace()) {
+                if nt == 0
+                    || tail[nt..]
+                        .chars()
+                        .next()
+                        .is_some_and(|c| !c.is_whitespace())
+                {
                     from = 0;
                     to = 0;
                 } else {
@@ -595,7 +653,11 @@ impl<'a> Consensus<'a> {
         if !known {
             eprintln!("Warning: Sequence \"{name}\" not in the VCF");
         }
-        self.recs = if known { Some(self.vcf.get(name).map(Vec::as_slice).unwrap_or(&[])) } else { None };
+        self.recs = if known {
+            Some(self.vcf.get(name).map(Vec::as_slice).unwrap_or(&[]))
+        } else {
+            None
+        };
         self.cursor = 0;
         self.prev_base_pos = -1;
         self.fa_buf.clear();
@@ -606,7 +668,12 @@ impl<'a> Consensus<'a> {
         self.fa_mod_off = 0;
         self.fa_frz_pos = -1;
         self.fa_frz_mod = -1;
-        writeln!(self.out, ">{}{}", self.opts.chr_prefix.as_deref().unwrap_or(""), header)?;
+        writeln!(
+            self.out,
+            ">{}{}",
+            self.opts.chr_prefix.as_deref().unwrap_or(""),
+            header
+        )?;
         if self.chain_out.is_some() {
             self.chain = Some(Chain::new(self.fa_ori_pos));
         }
@@ -625,10 +692,23 @@ impl<'a> Consensus<'a> {
         writeln!(
             out,
             "chain {} {} {} + {} {} {} {} + {} {} {}",
-            score, self.chr, ref_end_pos, chain.ori_pos, ref_end_pos, self.chr, alt_end_pos, chain.ori_pos, alt_end_pos, self.chain_id
+            score,
+            self.chr,
+            ref_end_pos,
+            chain.ori_pos,
+            ref_end_pos,
+            self.chr,
+            alt_end_pos,
+            chain.ori_pos,
+            alt_end_pos,
+            self.chain_id
         )?;
         for n in 0..chain.block_lengths.len() {
-            writeln!(out, "{} {} {}", chain.block_lengths[n], chain.ref_gaps[n], chain.alt_gaps[n])?;
+            writeln!(
+                out,
+                "{} {} {}",
+                chain.block_lengths[n], chain.ref_gaps[n], chain.alt_gaps[n]
+            )?;
         }
         writeln!(out, "{}\n", last_block_size)?;
         Ok(())
@@ -666,13 +746,23 @@ impl<'a> Consensus<'a> {
     }
 
     fn apply_absent(&mut self, pos: i64) {
-        let Some(absent) = self.opts.absent_allele else { return };
+        let Some(absent) = self.opts.absent_allele else {
+            return;
+        };
         if self.fa_buf.is_empty() || pos <= self.fa_frz_pos + 1 || pos <= self.fa_ori_pos {
             return;
         }
         let l = self.fa_buf.len() as i64;
-        let ie = if pos != 0 && pos - self.fa_ori_pos + self.fa_mod_off < l { pos - self.fa_ori_pos + self.fa_mod_off } else { l };
-        let ib = if self.fa_frz_mod < 0 { 0 } else { self.fa_frz_mod };
+        let ie = if pos != 0 && pos - self.fa_ori_pos + self.fa_mod_off < l {
+            pos - self.fa_ori_pos + self.fa_mod_off
+        } else {
+            l
+        };
+        let ib = if self.fa_frz_mod < 0 {
+            0
+        } else {
+            self.fa_frz_mod
+        };
         let mut i = ib;
         while i < ie {
             self.fa_buf[i as usize] = absent;
@@ -723,7 +813,11 @@ impl<'a> Consensus<'a> {
                 GtVal::End => break,
                 GtVal::Allele { idx, .. } => {
                     if idx < 0 || idx as usize >= n_allele {
-                        bail!("Invalid VCF, too few ALT alleles at {}:{}", self.chr, self.cur_pos1());
+                        bail!(
+                            "Invalid VCF, too few ALT alleles at {}:{}",
+                            self.chr,
+                            self.cur_pos1()
+                        );
                     }
                     self.iupac_als[idx as usize] = true;
                     is_set = true;
@@ -774,7 +868,9 @@ impl<'a> Consensus<'a> {
 
     /// 1-based position of the record being applied, for messages.
     fn cur_pos1(&self) -> i64 {
-        self.recs.and_then(|r| r.get(self.cursor.wrapping_sub(1))).map_or(0, |r| r.pos + 1)
+        self.recs
+            .and_then(|r| r.get(self.cursor.wrapping_sub(1)))
+            .map_or(0, |r| r.pos + 1)
     }
 
     fn apply_variant(&mut self, rec: &Rec) -> Result<()> {
@@ -782,12 +878,20 @@ impl<'a> Consensus<'a> {
         if self.opts.absent_allele.is_some() {
             self.apply_absent(rec.pos);
         }
-        if rec.alleles.len() == 1 && self.opts.missing_allele.is_none() && self.opts.absent_allele.is_none() {
+        if rec.alleles.len() == 1
+            && self.opts.missing_allele.is_none()
+            && self.opts.absent_allele.is_none()
+        {
             return Ok(());
         }
         if !self.opts.masks.is_empty() {
             let (start, end) = (rec.pos, rec.pos + rec.rlen - 1);
-            if self.opts.masks.iter().any(|m| m.skips() && m.overlaps(&self.chr, start, end)) {
+            if self
+                .opts
+                .masks
+                .iter()
+                .any(|m| m.skips() && m.overlaps(&self.chr, start, end))
+            {
                 return Ok(());
             }
         }
@@ -906,7 +1010,11 @@ impl<'a> Consensus<'a> {
                             }
                             let a = self.opts.allele;
                             if a & (PICK_LONG | PICK_SHORT) != 0 {
-                                let len = if jalt == 0 { rlen } else { alleles[jalt as usize].len() as i64 };
+                                let len = if jalt == 0 {
+                                    rlen
+                                } else {
+                                    alleles[jalt as usize].len() as i64
+                                };
                                 if i == 0 {
                                     ialt = jalt;
                                     prev_len = len;
@@ -993,17 +1101,28 @@ impl<'a> Consensus<'a> {
         let mut trim_beg = 0i64;
         let (var_type, mut var_len) = variant_type(&alleles[0], &alleles[ialt]);
         if var_type & VCF_INDEL != 0 {
-            trim_beg = if alleles[0][0] == alleles[ialt][0] { 1 } else { 0 };
+            trim_beg = if alleles[0][0] == alleles[ialt][0] {
+                1
+            } else {
+                0
+            };
         } else if var_type & VCF_OTHER != 0 && alleles[ialt].eq_ignore_ascii_case(b"<DEL>") {
             trim_beg = 1;
             var_len = 1 - rlen;
-        } else if var_type & VCF_OTHER != 0 && alleles[ialt].len() >= 4 && alleles[ialt][..4].eq_ignore_ascii_case(b"<INS") {
+        } else if var_type & VCF_OTHER != 0
+            && alleles[ialt].len() >= 4
+            && alleles[ialt][..4].eq_ignore_ascii_case(b"<INS")
+        {
             trim_beg = 1;
         }
         if rec.pos <= self.fa_frz_pos {
-            let overlap = rec.pos < self.fa_frz_pos || trim_beg == 0 || var_len == 0 || self.prev_is_insert;
+            let overlap =
+                rec.pos < self.fa_frz_pos || trim_beg == 0 || var_len == 0 || self.prev_is_insert;
             if overlap {
-                eprintln!("The site {}:{} overlaps with another variant, skipping...", self.chr, pos1);
+                eprintln!(
+                    "The site {}:{} overlaps with another variant, skipping...",
+                    self.chr, pos1
+                );
                 return Ok(());
             }
         }
@@ -1012,7 +1131,10 @@ impl<'a> Consensus<'a> {
         let mut alen: i64;
         let idx = rec.pos - self.fa_ori_pos + self.fa_mod_off;
         if idx < 0 {
-            eprintln!("Warning: ignoring overlapping variant starting at {}:{}", self.chr, pos1);
+            eprintln!(
+                "Warning: ignoring overlapping variant starting at {}:{}",
+                self.chr, pos1
+            );
             return Ok(());
         }
         let buf_len = self.fa_buf.len() as i64;
@@ -1120,7 +1242,11 @@ impl<'a> Consensus<'a> {
         let rlen_u = rlen as usize;
         let upper = self.fa_buf[idx].to_ascii_uppercase() == self.fa_buf[idx];
         for c in alt_allele.iter_mut().take(alen_u) {
-            *c = if upper { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() };
+            *c = if upper {
+                c.to_ascii_uppercase()
+            } else {
+                c.to_ascii_lowercase()
+            };
         }
         if self.opts.mark_ins != Mark::None && len_diff > 0 {
             mark_ins(&refa, &mut alt_allele, self.opts.mark_ins);
@@ -1148,7 +1274,10 @@ impl<'a> Consensus<'a> {
             // Bases unchanged by the insertion must not overwrite preceding
             // variants (C>T then C>CAA at one position gives TAA).
             let mut ibeg = 0usize;
-            while ibeg < alen_u && refa.get(ibeg) == alt_allele.get(ibeg) && rec.pos + ibeg as i64 <= self.prev_base_pos {
+            while ibeg < alen_u
+                && refa.get(ibeg) == alt_allele.get(ibeg)
+                && rec.pos + ibeg as i64 <= self.prev_base_pos
+            {
                 ibeg += 1;
             }
             self.fa_buf[idx + ibeg..idx + alen_u].copy_from_slice(&alt_allele[ibeg..alen_u]);
@@ -1157,7 +1286,12 @@ impl<'a> Consensus<'a> {
         if let (Some(chain), true) = (self.chain.as_mut(), len_diff != 0) {
             if refa[0].eq_ignore_ascii_case(&alt_allele[0]) {
                 // Indels carry the base before the event: block is 1 bp longer, alleles 1 bp shorter.
-                chain.push_gap(rec.pos + 1, rlen - 1, rec.pos + 1 + self.fa_mod_off, alen - 1);
+                chain.push_gap(
+                    rec.pos + 1,
+                    rlen - 1,
+                    rec.pos + 1 + self.fa_mod_off,
+                    alen - 1,
+                );
             } else {
                 chain.push_gap(rec.pos, rlen, rec.pos + self.fa_mod_off, alen);
             }

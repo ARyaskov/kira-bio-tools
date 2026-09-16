@@ -122,7 +122,17 @@ pub struct CallSite {
 
 impl CallSite {
     pub fn new(n_samples: usize, n_alleles: usize, pls: Vec<i32>) -> Self {
-        Self { n_samples, n_alleles, pls, is_indel: false, depths: None, qs: None, unseen: None, sample_af: None, prior_an_ac: None }
+        Self {
+            n_samples,
+            n_alleles,
+            pls,
+            is_indel: false,
+            depths: None,
+            qs: None,
+            unseen: None,
+            sample_af: None,
+            prior_an_ac: None,
+        }
     }
 }
 
@@ -162,13 +172,28 @@ struct BestAlleles {
 
 impl Caller {
     pub fn new(opts: CallerOpts, n_samples: usize) -> Self {
-        let n_total = opts.prior_alleles.unwrap_or_else(|| total_alleles(n_samples, &opts));
+        let n_total = opts
+            .prior_alleles
+            .unwrap_or_else(|| total_alleles(n_samples, &opts));
         let a_m = watterson_factor(n_total);
         let scaled_snv = (opts.theta * a_m).min(0.99);
         let scaled_indel = (opts.indel_theta * a_m).min(0.99);
-        let log_theta_snv = if scaled_snv > 0.0 { scaled_snv.ln() } else { f64::NEG_INFINITY };
-        let log_theta_indel = if scaled_indel > 0.0 { scaled_indel.ln() } else { f64::NEG_INFINITY };
-        Self { opts, pl2p: init_pl2p(), log_theta_snv, log_theta_indel }
+        let log_theta_snv = if scaled_snv > 0.0 {
+            scaled_snv.ln()
+        } else {
+            f64::NEG_INFINITY
+        };
+        let log_theta_indel = if scaled_indel > 0.0 {
+            scaled_indel.ln()
+        } else {
+            f64::NEG_INFINITY
+        };
+        Self {
+            opts,
+            pl2p: init_pl2p(),
+            log_theta_snv,
+            log_theta_indel,
+        }
     }
 
     fn ploidy_for(&self, sample_idx: usize) -> u8 {
@@ -179,7 +204,11 @@ impl Caller {
     }
 
     fn log_theta_for(&self, is_indel: bool) -> f64 {
-        if is_indel { self.log_theta_indel } else { self.log_theta_snv }
+        if is_indel {
+            self.log_theta_indel
+        } else {
+            self.log_theta_snv
+        }
     }
 
     /// Allele frequency estimate of one sample group, as `mcall()` builds
@@ -201,18 +230,23 @@ impl Caller {
             q.resize(n_als, 0.0);
             q
         } else {
-            compute_qsum(pdg, group, n_als).into_iter().map(|v| v as f32).collect()
+            compute_qsum(pdg, group, n_als)
+                .into_iter()
+                .map(|v| v as f32)
+                .collect()
         };
         if let Some((an, ac)) = &site.prior_an_ac
-            && *an > 0.0 && ac.len() == n_als - 1 {
-                let n = group.len() as f64;
-                let mut ac0 = *an;
-                for (i, &c) in ac.iter().enumerate() {
-                    ac0 -= c;
-                    qsum[i + 1] = ((qsum[i + 1] as f64 + 0.5 * c) / (n + 0.5 * an)) as f32;
-                }
-                qsum[0] = ((qsum[0] as f64 + 0.5 * ac0.max(0.0)) / (n + 0.5 * an)) as f32;
+            && *an > 0.0
+            && ac.len() == n_als - 1
+        {
+            let n = group.len() as f64;
+            let mut ac0 = *an;
+            for (i, &c) in ac.iter().enumerate() {
+                ac0 -= c;
+                qsum[i + 1] = ((qsum[i + 1] as f64 + 0.5 * c) / (n + 0.5 * an)) as f32;
             }
+            qsum[0] = ((qsum[0] as f64 + 0.5 * ac0.max(0.0)) / (n + 0.5 * an)) as f32;
+        }
         let total: f32 = qsum.iter().sum();
         if total > 0.0 {
             for q in qsum.iter_mut() {
@@ -228,14 +262,29 @@ impl Caller {
         let n_als = site.n_alleles;
         let n_gt = n_genotypes(n_als);
         let groups: Vec<Vec<usize>> = match &self.opts.groups {
-            Some(g) => g.iter().map(|x| x.sample_idxs.iter().copied().filter(|&i| i < n_smpl).collect()).collect(),
+            Some(g) => g
+                .iter()
+                .map(|x| {
+                    x.sample_idxs
+                        .iter()
+                        .copied()
+                        .filter(|&i| i < n_smpl)
+                        .collect()
+                })
+                .collect(),
             None => vec![(0..n_smpl).collect()],
         };
         let ploidies: Vec<u8> = (0..n_smpl).map(|si| self.ploidy_for(si)).collect();
 
         let mut pdg: Vec<f64> = vec![0.0; n_smpl * n_gt];
         for si in 0..n_smpl {
-            set_pdg_row(&mut site.pls[si * n_gt..(si + 1) * n_gt], &mut pdg[si * n_gt..(si + 1) * n_gt], &self.pl2p, n_als, site.unseen);
+            set_pdg_row(
+                &mut site.pls[si * n_gt..(si + 1) * n_gt],
+                &mut pdg[si * n_gt..(si + 1) * n_gt],
+                &self.pl2p,
+                n_als,
+                site.unseen,
+            );
         }
         let log_theta = self.log_theta_for(site.is_indel);
 
@@ -259,9 +308,10 @@ impl Caller {
         }
         als_new |= 1;
         if let Some(u) = site.unseen
-            && u > 0 {
-                als_new &= !(1u32 << u);
-            }
+            && u > 0
+        {
+            als_new &= !(1u32 << u);
+        }
         let is_variant = als_new != 1;
         if self.opts.variants_only && !is_variant {
             return CallResult::Skip;
@@ -273,7 +323,9 @@ impl Caller {
                 }
             }
         }
-        let alleles_kept: Vec<u32> = (0..n_als as u32).filter(|&i| als_new & (1 << i) != 0).collect();
+        let alleles_kept: Vec<u32> = (0..n_als as u32)
+            .filter(|&i| als_new & (1 << i) != 0)
+            .collect();
         let nk = alleles_kept.len();
 
         let mut gts: Vec<Option<(u32, u32)>> = vec![None; n_smpl];
@@ -300,7 +352,8 @@ impl Caller {
                 let mask = group_als[gi] & als_new;
                 for &si in g {
                     let row = &pdg[si * n_gt..(si + 1) * n_gt];
-                    let (gt, gq, gp) = call_genotype(row, &alleles_kept, mask, &group_qsums[gi], ploidies[si]);
+                    let (gt, gq, gp) =
+                        call_genotype(row, &alleles_kept, mask, &group_qsums[gi], ploidies[si]);
                     gts[si] = gt;
                     gqs[si] = gq;
                     gps[si] = gp;
@@ -314,7 +367,18 @@ impl Caller {
             }
             if self.opts.constrain == ConstrainMode::Trio {
                 for fam in &self.opts.families {
-                    self.call_trio(fam, &pdg, n_gt, &alleles_kept, &group_qsums[0], &ploidies, site.is_indel, &mut gts, &mut gqs, &mut gps);
+                    self.call_trio(
+                        fam,
+                        &pdg,
+                        n_gt,
+                        &alleles_kept,
+                        &group_qsums[0],
+                        &ploidies,
+                        site.is_indel,
+                        &mut gts,
+                        &mut gqs,
+                        &mut gps,
+                    );
                 }
                 ac.iter_mut().for_each(|c| *c = 0);
                 for (si, gt) in gts.iter().enumerate() {
@@ -337,14 +401,34 @@ impl Caller {
             best.map(|b| b.0)
         } else {
             match best {
-                Some((_, lk_sum, ref_lk)) if lk_sum.is_finite() => Some(PHRED * (lk_sum - ln_sum_exp(lk_sum, ref_lk))),
-                _ if ac[0] > 0 => Some(if log_theta.is_finite() { PHRED * log_theta } else { 0.0 }),
+                Some((_, lk_sum, ref_lk)) if lk_sum.is_finite() => {
+                    Some(PHRED * (lk_sum - ln_sum_exp(lk_sum, ref_lk)))
+                }
+                _ if ac[0] > 0 => Some(if log_theta.is_finite() {
+                    PHRED * log_theta
+                } else {
+                    0.0
+                }),
                 _ => None,
             }
         };
 
-        let pls = if drop_pl { vec![Vec::new(); n_smpl] } else { subset_pls(site, &alleles_kept, &ploidies) };
-        CallResult::Called { alleles_kept, is_variant, qual, gts, gqs, gps, pls, ac, an }
+        let pls = if drop_pl {
+            vec![Vec::new(); n_smpl]
+        } else {
+            subset_pls(site, &alleles_kept, &ploidies)
+        };
+        CallResult::Called {
+            alleles_kept,
+            is_variant,
+            qual,
+            gts,
+            gqs,
+            gps,
+            pls,
+            ac,
+            an,
+        }
     }
 
     /// Joint trio call: the (father, mother, child) genotype triple maximising
@@ -365,7 +449,9 @@ impl Caller {
         gqs: &mut [u32],
         gps: &mut [Vec<f64>],
     ) {
-        let (Some(fi), Some(mi), Some(ci)) = (fam.father, fam.mother, fam.child) else { return };
+        let (Some(fi), Some(mi), Some(ci)) = (fam.father, fam.mother, fam.child) else {
+            return;
+        };
         if fi >= ploidies.len() || mi >= ploidies.len() || ci >= ploidies.len() {
             return;
         }
@@ -375,18 +461,34 @@ impl Caller {
         let nk = kept.len();
         let n_new = n_genotypes(nk);
         let pairs: Vec<(usize, usize)> = (0..n_new).map(idx_to_pair).collect();
-        let novel = if is_indel { self.opts.novel_rate[1] } else { self.opts.novel_rate[0] }.clamp(1e-300, 1.0);
+        let novel = if is_indel {
+            self.opts.novel_rate[1]
+        } else {
+            self.opts.novel_rate[0]
+        }
+        .clamp(1e-300, 1.0);
         let logs = |si: usize| -> Option<Vec<f64>> {
             let row = &pdg[si * n_gt..(si + 1) * n_gt];
             if row.iter().all(|&p| p == 0.0) {
                 return None;
             }
-            Some(genotype_weights(row, kept, u32::MAX, qsum, 2).iter().map(|w| if *w > 0.0 { w.ln() } else { f64::NEG_INFINITY }).collect())
+            Some(
+                genotype_weights(row, kept, u32::MAX, qsum, 2)
+                    .iter()
+                    .map(|w| if *w > 0.0 { w.ln() } else { f64::NEG_INFINITY })
+                    .collect(),
+            )
         };
-        let (Some(lf), Some(lm), Some(lc)) = (logs(fi), logs(mi), logs(ci)) else { return };
+        let (Some(lf), Some(lm), Some(lc)) = (logs(fi), logs(mi), logs(ci)) else {
+            return;
+        };
         let mut best = f64::NEG_INFINITY;
         let mut best_triple = (0usize, 0usize, 0usize);
-        let mut marg = [vec![f64::NEG_INFINITY; n_new], vec![f64::NEG_INFINITY; n_new], vec![f64::NEG_INFINITY; n_new]];
+        let mut marg = [
+            vec![f64::NEG_INFINITY; n_new],
+            vec![f64::NEG_INFINITY; n_new],
+            vec![f64::NEG_INFINITY; n_new],
+        ];
         for (a, &pf) in lf.iter().enumerate() {
             if pf == f64::NEG_INFINITY {
                 continue;
@@ -414,12 +516,18 @@ impl Caller {
         if best == f64::NEG_INFINITY {
             return;
         }
-        for (si, m, gi) in [(fi, &marg[0], best_triple.0), (mi, &marg[1], best_triple.1), (ci, &marg[2], best_triple.2)] {
+        for (si, m, gi) in [
+            (fi, &marg[0], best_triple.0),
+            (mi, &marg[1], best_triple.1),
+            (ci, &marg[2], best_triple.2),
+        ] {
             let (i, j) = pairs[gi];
             gts[si] = Some((kept[i], kept[j]));
             let weights: Vec<f64> = {
                 let max = m.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                m.iter().map(|v| if v.is_finite() { (v - max).exp() } else { 0.0 }).collect()
+                m.iter()
+                    .map(|v| if v.is_finite() { (v - max).exp() } else { 0.0 })
+                    .collect()
             };
             let (gq, gp) = gq_gp(&weights);
             gqs[si] = gq;
@@ -429,7 +537,14 @@ impl Caller {
 }
 
 /// `mcall_find_best_alleles`: the most likely allele subset of one group.
-fn find_best_alleles(pdg: &[f64], group: &[usize], n_als: usize, qsum: &[f32], ploidies: &[u8], log_theta: f64) -> BestAlleles {
+fn find_best_alleles(
+    pdg: &[f64],
+    group: &[usize],
+    n_als: usize,
+    qsum: &[f32],
+    ploidies: &[u8],
+    log_theta: f64,
+) -> BestAlleles {
     let n_gt = n_genotypes(n_als);
     let mut max_lk = f64::NEG_INFINITY;
     let mut max_als = 0u32;
@@ -520,7 +635,11 @@ fn find_best_alleles(pdg: &[f64], group: &[usize], n_als: usize, qsum: &[f32], p
                         continue;
                     }
                     let total = qsum[ia] + qsum[ib] + qsum[ic];
-                    let (fa, fb, fc) = ((qsum[ia] / total) as f64, (qsum[ib] / total) as f64, (qsum[ic] / total) as f64);
+                    let (fa, fb, fc) = (
+                        (qsum[ia] / total) as f64,
+                        (qsum[ib] / total) as f64,
+                        (qsum[ic] / total) as f64,
+                    );
                     let (fa2, fb2, fc2) = (fa * fa, fb * fb, fc * fc);
                     let (fab, fac, fbc) = (2.0 * fa * fb, 2.0 * fa * fc, 2.0 * fb * fc);
                     let (iaa, ibb, icc) = (gt_index(ia, ia), gt_index(ib, ib), gt_index(ic, ic));
@@ -530,7 +649,14 @@ fn find_best_alleles(pdg: &[f64], group: &[usize], n_als: usize, qsum: &[f32], p
                     for &si in group {
                         let row = &pdg[si * n_gt..];
                         let val = match ploidies[si] {
-                            2 => fa2 * row[iaa] + fb2 * row[ibb] + fc2 * row[icc] + fab * row[iab] + fac * row[iac] + fbc * row[ibc],
+                            2 => {
+                                fa2 * row[iaa]
+                                    + fb2 * row[ibb]
+                                    + fc2 * row[icc]
+                                    + fab * row[iab]
+                                    + fac * row[iac]
+                                    + fbc * row[ibc]
+                            }
                             1 => fa * row[iaa] + fb * row[ibb] + fc * row[icc],
                             _ => 0.0,
                         };
@@ -555,7 +681,12 @@ fn find_best_alleles(pdg: &[f64], group: &[usize], n_als: usize, qsum: &[f32], p
             }
         }
     }
-    BestAlleles { als: max_als, max_lk, ref_lk, lk_sum }
+    BestAlleles {
+        als: max_als,
+        max_lk,
+        ref_lk,
+        lk_sum,
+    }
 }
 
 /// P(D|G)·HWE(qsum) over the kept genotypes (VCF order), as
@@ -566,7 +697,16 @@ fn genotype_weights(row: &[f64], kept: &[u32], mask: u32, qsum: &[f32], ploidy: 
     let nk = kept.len();
     let allowed = |a: u32| mask & (1 << a) != 0;
     if ploidy == 1 {
-        return kept.iter().map(|&a| if allowed(a) { row[gt_index(a as usize, a as usize)] * qsum[a as usize] as f64 } else { 0.0 }).collect();
+        return kept
+            .iter()
+            .map(|&a| {
+                if allowed(a) {
+                    row[gt_index(a as usize, a as usize)] * qsum[a as usize] as f64
+                } else {
+                    0.0
+                }
+            })
+            .collect();
     }
     let mut w = vec![0.0; n_genotypes(nk)];
     for j in 0..nk {
@@ -576,7 +716,11 @@ fn genotype_weights(row: &[f64], kept: &[u32], mask: u32, qsum: &[f32], ploidy: 
             }
             let (a, b) = (kept[i] as usize, kept[j] as usize);
             let (qa, qb) = (qsum[a] as f64, qsum[b] as f64);
-            w[gt_index(i, j)] = if i == j { row[gt_index(a, a)] * qa * qa } else { 2.0 * row[gt_index(a, b)] * qa * qb };
+            w[gt_index(i, j)] = if i == j {
+                row[gt_index(a, a)] * qa * qa
+            } else {
+                2.0 * row[gt_index(a, b)] * qa * qb
+            };
         }
     }
     w
@@ -585,7 +729,13 @@ fn genotype_weights(row: &[f64], kept: &[u32], mask: u32, qsum: &[f32], ploidy: 
 /// One sample's GT (original allele ids), GQ and GP. Ties keep the earlier
 /// genotype in bcftools' iteration order: homozygotes by allele, then
 /// heterozygotes; 0/0 when every weight is zero.
-fn call_genotype(row: &[f64], kept: &[u32], mask: u32, qsum: &[f32], ploidy: u8) -> (Option<(u32, u32)>, u32, Vec<f64>) {
+fn call_genotype(
+    row: &[f64],
+    kept: &[u32],
+    mask: u32,
+    qsum: &[f32],
+    ploidy: u8,
+) -> (Option<(u32, u32)>, u32, Vec<f64>) {
     if ploidy == 0 || row.iter().all(|&p| p == 0.0) {
         return (None, 0, Vec::new());
     }
@@ -630,7 +780,11 @@ fn gq_gp(w: &[f64]) -> (u32, Vec<f64>) {
     }
     let max = w.iter().copied().fold(0.0, f64::max);
     let p = max / sum;
-    let gq = if p >= 1.0 { GQ_MAX } else { (-4.34294 * (1.0 - p).ln()).min(GQ_MAX) };
+    let gq = if p >= 1.0 {
+        GQ_MAX
+    } else {
+        (-4.34294 * (1.0 - p).ln()).min(GQ_MAX)
+    };
     (gq.max(0.0) as u32, w.iter().map(|v| v / sum).collect())
 }
 
@@ -669,7 +823,13 @@ fn gt_idx(a: usize, b: usize) -> usize {
 /// value or a short vector makes the sample missing; inner missing values
 /// are filled from the unseen allele's PLs (255 without one); a flat
 /// vector (every PL 0) is missing too. The fills stay in `pls`.
-fn set_pdg_row(pls: &mut [i32], pdg: &mut [f64], pl2p: &[f64; PL2P_SIZE], n_als: usize, unseen: Option<usize>) {
+fn set_pdg_row(
+    pls: &mut [i32],
+    pdg: &mut [f64],
+    pl2p: &[f64; PL2P_SIZE],
+    n_als: usize,
+    unseen: Option<usize>,
+) {
     let n_gt = pdg.len();
     let mut sum = 0.0;
     let mut j = 0;
@@ -714,7 +874,11 @@ fn set_pdg_row(pls: &mut [i32], pdg: &mut [f64], pl2p: &[f64; PL2P_SIZE], n_als:
                             if pls[src] == PL_MISSING {
                                 src = gt_idx(u, u);
                             }
-                            pls[k] = if pls[src] == PL_MISSING { 255 } else { pls[src] };
+                            pls[k] = if pls[src] == PL_MISSING {
+                                255
+                            } else {
+                                pls[src]
+                            };
                         }
                         pdg[k] = pl_to_prob(pls[k], pl2p);
                         sum += pdg[k];
@@ -769,9 +933,18 @@ fn subset_pls(site: &CallSite, kept: &[u32], ploidies: &[u8]) -> Vec<Vec<i32>> {
     (0..site.n_samples)
         .map(|si| {
             let row = &site.pls[si * n_gt..(si + 1) * n_gt];
-            let missing = |v: i32| if v == PL_MISSING || v == PL_VECTOR_END { PL_MISSING } else { v };
+            let missing = |v: i32| {
+                if v == PL_MISSING || v == PL_VECTOR_END {
+                    PL_MISSING
+                } else {
+                    v
+                }
+            };
             match ploidies.get(si).copied().unwrap_or(2) {
-                1 => kept.iter().map(|&a| missing(row[gt_index(a as usize, a as usize)])).collect(),
+                1 => kept
+                    .iter()
+                    .map(|&a| missing(row[gt_index(a as usize, a as usize)]))
+                    .collect(),
                 0 => vec![PL_MISSING],
                 _ => {
                     let mut out = Vec::with_capacity(n_genotypes(nk));

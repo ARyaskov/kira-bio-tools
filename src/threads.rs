@@ -9,7 +9,9 @@ static BUDGET: AtomicUsize = AtomicUsize::new(0);
 static RAYON: OnceLock<()> = OnceLock::new();
 
 fn hardware_threads() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
 }
 
 /// Set the budget (0 restores the hardware default). Call before any pool is built.
@@ -45,7 +47,9 @@ pub fn bam_workers() -> usize {
 /// and pools already built elsewhere are left alone).
 pub fn init_rayon() {
     RAYON.get_or_init(|| {
-        let _ = rayon::ThreadPoolBuilder::new().num_threads(budget()).build_global();
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(budget())
+            .build_global();
     });
 }
 

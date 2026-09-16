@@ -59,9 +59,7 @@ pub fn write_ktile_from_vcf_with<I: AsRef<Path>, O: AsRef<Path>>(
 
     let mut reader = UnifiedVcfReader::open(input_ref)
         .with_context(|| format!("opening input {:?}", input_ref))?;
-    let headers = reader
-        .header()
-        .context("reading VCF header block")?;
+    let headers = reader.header().context("reading VCF header block")?;
 
     // Open output + write placeholder header (finalised after data is on disk).
     let out_file = OpenOptions::new()
@@ -136,7 +134,8 @@ pub fn write_ktile_from_vcf_with<I: AsRef<Path>, O: AsRef<Path>>(
         let Ok(chrom) = std::str::from_utf8(&bytes[..tabs[0] as usize]) else {
             continue;
         };
-        let Ok(pos_str) = std::str::from_utf8(&bytes[(tabs[0] as usize + 1)..tabs[1] as usize]) else {
+        let Ok(pos_str) = std::str::from_utf8(&bytes[(tabs[0] as usize + 1)..tabs[1] as usize])
+        else {
             continue;
         };
         let Ok(pos) = pos_str.parse::<u32>() else {
@@ -267,7 +266,11 @@ pub fn write_ktile_from_vcf_with<I: AsRef<Path>, O: AsRef<Path>>(
         off_ref_lens,
         off_alt_offsets,
         off_alt_lens,
-        lines_per_chunk: if opts.compressed { opts.lines_per_chunk } else { 0 },
+        lines_per_chunk: if opts.compressed {
+            opts.lines_per_chunk
+        } else {
+            0
+        },
         n_chunks,
         off_chunk_index,
     };
@@ -305,9 +308,7 @@ fn flush_compressed_chunk<W: Write>(
         .compress(data, scratch, FlushCompress::Finish)
         .map_err(|e| anyhow::anyhow!("flate2 compress failed: {e}"))?;
     if status != Status::StreamEnd || (compressor.total_in() - before_in) as usize != data.len() {
-        anyhow::bail!(
-            "ktile chunk compress: scratch undersized or input not consumed"
-        );
+        anyhow::bail!("ktile chunk compress: scratch undersized or input not consumed");
     }
     let n = (compressor.total_out() - before_out) as usize;
     out.write_all(&scratch[..n])?;
@@ -315,11 +316,7 @@ fn flush_compressed_chunk<W: Write>(
 }
 
 /// Pads `out` with zero bytes up to the next multiple of `align`.
-fn pad_with_zeros<W: Write>(
-    out: &mut W,
-    cursor: u64,
-    align: u64,
-) -> Result<u64> {
+fn pad_with_zeros<W: Write>(out: &mut W, cursor: u64, align: u64) -> Result<u64> {
     debug_assert!(align.is_power_of_two());
     let aligned = (cursor + align - 1) & !(align - 1);
     let pad = (aligned - cursor) as usize;

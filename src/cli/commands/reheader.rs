@@ -9,10 +9,22 @@ use crate::cli::args::ReheaderArgs;
 
 pub fn cmd_reheader(args: ReheaderArgs) -> Result<()> {
     let mut argv: Vec<String> = Vec::new();
-    if let Some(p) = &args.header { argv.push("-h".into()); argv.push(p.to_string_lossy().into_owned()); }
-    if let Some(p) = &args.samples_file { argv.push("-s".into()); argv.push(p.to_string_lossy().into_owned()); }
-    if let Some(p) = &args.fai { argv.push("-f".into()); argv.push(p.to_string_lossy().into_owned()); }
-    if let Some(p) = &args.output { argv.push("-o".into()); argv.push(p.to_string_lossy().into_owned()); }
+    if let Some(p) = &args.header {
+        argv.push("-h".into());
+        argv.push(p.to_string_lossy().into_owned());
+    }
+    if let Some(p) = &args.samples_file {
+        argv.push("-s".into());
+        argv.push(p.to_string_lossy().into_owned());
+    }
+    if let Some(p) = &args.fai {
+        argv.push("-f".into());
+        argv.push(p.to_string_lossy().into_owned());
+    }
+    if let Some(p) = &args.output {
+        argv.push("-o".into());
+        argv.push(p.to_string_lossy().into_owned());
+    }
     argv.extend(args.passthrough.iter().cloned());
     let cfg = parse_reheader_args(&argv)?;
     let (input_text, input_is_bcf) = read_input_text(&args.input)?;
@@ -115,7 +127,8 @@ fn read_input_text(input: &Path) -> Result<(String, bool)> {
         return Ok((decode_input_bytes(&bytes, "")?, false));
     }
 
-    let is_bcf_ext = input.extension()
+    let is_bcf_ext = input
+        .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.eq_ignore_ascii_case("bcf"))
         .unwrap_or(false);
@@ -138,8 +151,12 @@ fn is_bcf_magic(input: &Path) -> Result<bool> {
     let mut f = fs::File::open(input)?;
     let mut probe = [0u8; 5];
     let n = f.read(&mut probe)?;
-    if n < 5 { return Ok(false); }
-    if probe == *crate::bcf::BCF_MAGIC { return Ok(true); }
+    if n < 5 {
+        return Ok(false);
+    }
+    if probe == *crate::bcf::BCF_MAGIC {
+        return Ok(true);
+    }
     if probe[0] == 0x1F && probe[1] == 0x8B {
         let f2 = fs::File::open(input)?;
         let mut rd = noodles_bgzf::io::Reader::new(f2);
@@ -160,7 +177,9 @@ fn decode_bcf_to_vcf(input: &Path) -> Result<String> {
     }
     while let Some(line) = r.read_record_line()? {
         out.push_str(&line);
-        if !line.ends_with('\n') { out.push('\n'); }
+        if !line.ends_with('\n') {
+            out.push('\n');
+        }
     }
     Ok(out)
 }
@@ -174,7 +193,8 @@ fn decode_input_bytes(bytes: &[u8], path_hint: &str) -> Result<String> {
             let mut probe = MultiGzDecoder::new(Cursor::new(bytes));
             let mut head = [0u8; 5];
             if probe.read_exact(&mut head).is_ok() && head == *crate::bcf::BCF_MAGIC {
-                let tmp = std::env::temp_dir().join(format!("kira-bt-reh-{}.bcf", std::process::id()));
+                let tmp =
+                    std::env::temp_dir().join(format!("kira-bt-reh-{}.bcf", std::process::id()));
                 fs::write(&tmp, bytes)?;
                 let s = decode_bcf_to_vcf(&tmp);
                 let _ = fs::remove_file(&tmp);
@@ -319,9 +339,10 @@ fn read_fai(path: &Path) -> Result<Vec<(String, u64)>> {
         }
         let mut it = line.split('\t');
         if let (Some(name), Some(len)) = (it.next(), it.next())
-            && let Ok(v) = len.parse::<u64>() {
-                out.push((name.to_string(), v));
-            }
+            && let Ok(v) = len.parse::<u64>()
+        {
+            out.push((name.to_string(), v));
+        }
     }
     Ok(out)
 }
@@ -512,10 +533,9 @@ fn merge_headers_for_bcf(
         }
     }
 
-    if !fileformat_done
-        && let Some(ff) = new_fileformat {
-            out.insert(0, ff);
-        }
+    if !fileformat_done && let Some(ff) = new_fileformat {
+        out.insert(0, ff);
+    }
 
     for line in new_meta {
         if let Some(k) = extract_meta_key(line) {

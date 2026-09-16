@@ -17,7 +17,9 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
     let mut extra_header_lines = read_header_lines(args.header_lines.as_deref())?;
     for h in &args.header_line {
         let trimmed = h.trim();
-        if trimmed.is_empty() { continue; }
+        if trimmed.is_empty() {
+            continue;
+        }
         if !trimmed.starts_with("##") {
             anyhow::bail!("--header-line must start with ##: {}", trimmed);
         }
@@ -26,8 +28,7 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
 
     let region_filter = build_region_filter(args.regions.as_deref(), args.regions_file.as_deref())?;
     if let Some(rf) = &region_filter {
-        let filtered = pre_filter_regions(&input_path, rf)
-            .context("pre-filtering by --regions")?;
+        let filtered = pre_filter_regions(&input_path, rf).context("pre-filtering by --regions")?;
         input_path = filtered;
     }
 
@@ -46,7 +47,8 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
     if matches!(output_kind, Some(annotate::postproc::OutputKind::Bcf(_))) {
         anyhow::bail!("-O u|b (BCF) not yet supported — use v or z");
     }
-    let needs_bgzf = matches!(output_kind, Some(annotate::postproc::OutputKind::VcfGz(_))) || args.bgzf_after;
+    let needs_bgzf =
+        matches!(output_kind, Some(annotate::postproc::OutputKind::VcfGz(_))) || args.bgzf_after;
     let effective_bgzf_level = match output_kind {
         Some(annotate::postproc::OutputKind::VcfGz(lvl)) => Some(lvl),
         _ => args.bgzf_level,
@@ -64,7 +66,11 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
         out.clone()
     };
     let out_for_annotate = intermediate_path.clone();
-    let bgzf_after: Option<PathBuf> = if needs_bgzf { Some(intermediate_path.clone()) } else { None };
+    let bgzf_after: Option<PathBuf> = if needs_bgzf {
+        Some(intermediate_path.clone())
+    } else {
+        None
+    };
 
     // ---- B2 phase 2 auto-detect / auto-build of .ktile sidecar ----
     //
@@ -148,12 +154,25 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
         let (file_cols, _types) = annotate::postproc::read_columns_file(cf)?;
         columns.extend(file_cols);
     }
-    postproc.match_tags = columns.iter()
+    postproc.match_tags = columns
+        .iter()
         .filter_map(|c| {
             let s = c.trim().trim_start_matches(['+', '-', '=']);
             let key = s.strip_prefix("INFO/").unwrap_or(s);
-            if key.is_empty() || key == "CHROM" || key == "POS" || key == "ID" || key == "REF" || key == "ALT" || key == "QUAL" || key == "FILTER" || key == "~ID" { None }
-            else { Some(key.to_string()) }
+            if key.is_empty()
+                || key == "CHROM"
+                || key == "POS"
+                || key == "ID"
+                || key == "REF"
+                || key == "ALT"
+                || key == "QUAL"
+                || key == "FILTER"
+                || key == "~ID"
+            {
+                None
+            } else {
+                Some(key.to_string())
+            }
         })
         .collect();
     let bgzf_level = effective_bgzf_level;
@@ -204,8 +223,15 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
                 let mut p = out.clone();
                 p.set_extension("kira-bt-pp.vcf");
                 p
-            } else { out.clone() };
-            apply_postproc_stream_with_args(&out_for_annotate, &final_or_bgzf_tmp, &args, postproc)?;
+            } else {
+                out.clone()
+            };
+            apply_postproc_stream_with_args(
+                &out_for_annotate,
+                &final_or_bgzf_tmp,
+                &args,
+                postproc,
+            )?;
             let _ = std::fs::remove_file(&out_for_annotate);
 
             if needs_bgzf {
@@ -225,10 +251,16 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
 }
 
 fn postproc_is_noop(pp: &annotate::postproc::PostProcessor) -> bool {
-    pp.remove.is_none() && pp.set_id.is_none() && pp.mark_sites.is_none()
-        && pp.include.is_none() && pp.exclude.is_none() && !pp.keep_sites
-        && pp.rename_chrs.is_none() && pp.rename_annots.is_none()
-        && pp.samples_keep.is_none() && pp.extra_header_lines.is_empty()
+    pp.remove.is_none()
+        && pp.set_id.is_none()
+        && pp.mark_sites.is_none()
+        && pp.include.is_none()
+        && pp.exclude.is_none()
+        && !pp.keep_sites
+        && pp.rename_chrs.is_none()
+        && pp.rename_annots.is_none()
+        && pp.samples_keep.is_none()
+        && pp.extra_header_lines.is_empty()
         && !pp.no_version
 }
 
@@ -302,7 +334,10 @@ fn pre_filter_regions(input: &Path, rf: &annotate::postproc::RegionFilter) -> Re
     tmp.push(format!(
         "kira-bt-regions-{}-{}.vcf",
         std::process::id(),
-        input.file_name().and_then(|n| n.to_str()).unwrap_or("input")
+        input
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("input")
     ));
     let mut reader = UnifiedVcfReader::open(input).context("open input for region pre-filter")?;
     let headers = reader.header()?;
@@ -350,10 +385,18 @@ fn apply_postproc_stream_with_args(
     if !input_samples.is_empty() {
         if let Some(spec) = &args.samples {
             let (names, inverse) = annotate::postproc::parse_samples_cli(spec);
-            pp.samples_keep = Some(annotate::postproc::resolve_samples_keep(&input_samples, &names, inverse));
+            pp.samples_keep = Some(annotate::postproc::resolve_samples_keep(
+                &input_samples,
+                &names,
+                inverse,
+            ));
         } else if let Some(path) = &args.samples_file {
             let (names, inverse) = annotate::postproc::read_samples_file(path)?;
-            pp.samples_keep = Some(annotate::postproc::resolve_samples_keep(&input_samples, &names, inverse));
+            pp.samples_keep = Some(annotate::postproc::resolve_samples_keep(
+                &input_samples,
+                &names,
+                inverse,
+            ));
         }
     }
 
@@ -395,7 +438,9 @@ fn write_processed_line<W: Write>(
 ) -> Result<()> {
     use annotate::postproc::{LineAction, process_record_line};
     let out = match process_record_line(line, pp, false) {
-        LineAction::Keep => canon.canon_line(line).map_or(std::borrow::Cow::Borrowed(line), std::borrow::Cow::Owned),
+        LineAction::Keep => canon
+            .canon_line(line)
+            .map_or(std::borrow::Cow::Borrowed(line), std::borrow::Cow::Owned),
         LineAction::Replace(s) => std::borrow::Cow::Owned(canon.canon_line(&s).unwrap_or(s)),
         LineAction::Drop => return Ok(()),
     };
@@ -409,7 +454,11 @@ fn extract_samples_from_chrom_line(headers: &[String]) -> Vec<String> {
 }
 
 fn write_output_index(out: &Path, fmt: &str) -> Result<()> {
-    let ext = if fmt.eq_ignore_ascii_case("tbi") { "tbi" } else { "csi" };
+    let ext = if fmt.eq_ignore_ascii_case("tbi") {
+        "tbi"
+    } else {
+        "csi"
+    };
     let idx = std::path::PathBuf::from(format!("{}.{}", out.display(), ext));
     match crate::csi::build_csi_index(out, &idx) {
         Ok(_) => Ok(()),
@@ -545,19 +594,14 @@ fn resolve_ktile_or_fallback(
             return do_build("missing, auto-building");
         }
         if !build_if_missing {
-            eprintln!(
-                "[annotate] No .ktile sidecar (auto-build disabled); using VCF."
-            );
+            eprintln!("[annotate] No .ktile sidecar (auto-build disabled); using VCF.");
         }
         return input_path.to_path_buf();
     }
 
     match check_ktile_freshness(&ktile_path, input_path) {
         Ok(KtileFreshness::Fresh) => {
-            eprintln!(
-                "[annotate] Using .ktile sidecar (fresh): {:?}",
-                ktile_path
-            );
+            eprintln!("[annotate] Using .ktile sidecar (fresh): {:?}", ktile_path);
             ktile_path
         }
         Ok(KtileFreshness::StaleSize { ktile, source }) => {
@@ -1031,9 +1075,10 @@ fn should_rebuild_ani(source: &Path, ani: &Path, columns: Option<&str>) -> Resul
     let ani_meta =
         std::fs::metadata(ani).with_context(|| format!("Failed to stat ANI index {:?}", ani))?;
     if let (Ok(src_time), Ok(ani_time)) = (source_meta.modified(), ani_meta.modified())
-        && src_time > ani_time {
-            return Ok(true);
-        }
+        && src_time > ani_time
+    {
+        return Ok(true);
+    }
     if source.extension().and_then(|e| e.to_str()) == Some("tab") {
         return Ok(!ani_meta_matches(source, ani, columns, &source_meta)?);
     }
@@ -1052,7 +1097,9 @@ fn ani_meta_matches(
     }
     let text = std::fs::read_to_string(&meta_path)
         .with_context(|| format!("Failed to read {:?}", meta_path))?;
-    let expected_path = source.canonicalize().unwrap_or_else(|_| source.to_path_buf());
+    let expected_path = source
+        .canonicalize()
+        .unwrap_or_else(|_| source.to_path_buf());
     let expected_len = source_meta.len().to_string();
     let expected_columns = columns.unwrap_or("");
     let mut path_ok = false;
@@ -1073,7 +1120,9 @@ fn ani_meta_matches(
 fn write_ani_meta(source: &Path, ani: &Path, columns: Option<&str>) -> Result<()> {
     let source_meta = std::fs::metadata(source)
         .with_context(|| format!("Failed to stat annotation source {:?}", source))?;
-    let source_path = source.canonicalize().unwrap_or_else(|_| source.to_path_buf());
+    let source_path = source
+        .canonicalize()
+        .unwrap_or_else(|_| source.to_path_buf());
     let meta_path = ani.with_extension("ani.meta");
     let text = format!(
         "source={}\nsource_len={}\ncolumns={}\n",

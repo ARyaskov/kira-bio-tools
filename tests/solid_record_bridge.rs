@@ -102,10 +102,26 @@ fn make_fixture(dir: &std::path::Path) -> (std::path::PathBuf, Vec<std::path::Pa
             .rev()
             .map(|&x| complement(x))
             .collect();
-        let q1: String = (0..r1.len()).map(|j| (b'#' + ((j + i) % 40) as u8) as char).collect();
-        let q2: String = (0..r2.len()).map(|j| (b'#' + ((j * 3 + i) % 40) as u8) as char).collect();
-        writeln!(f1, "@chim{i}/1\n{}\n+\n{}", String::from_utf8_lossy(&r1), q1).unwrap();
-        writeln!(f2, "@chim{i}/2\n{}\n+\n{}", String::from_utf8_lossy(&r2), q2).unwrap();
+        let q1: String = (0..r1.len())
+            .map(|j| (b'#' + ((j + i) % 40) as u8) as char)
+            .collect();
+        let q2: String = (0..r2.len())
+            .map(|j| (b'#' + ((j * 3 + i) % 40) as u8) as char)
+            .collect();
+        writeln!(
+            f1,
+            "@chim{i}/1\n{}\n+\n{}",
+            String::from_utf8_lossy(&r1),
+            q1
+        )
+        .unwrap();
+        writeln!(
+            f2,
+            "@chim{i}/2\n{}\n+\n{}",
+            String::from_utf8_lossy(&r2),
+            q2
+        )
+        .unwrap();
     }
     drop(f1);
     drop(f2);
@@ -162,10 +178,7 @@ fn streaming_records_match_the_sam_text_path() {
     let sam_bytes = aligner.align_to_sam_bytes(index, &reads).unwrap();
     let mut reader = sam::io::Reader::new(std::io::Cursor::new(&sam_bytes[..]));
     let header = reader.read_header().unwrap();
-    let via_text: Vec<RecordBuf> = reader
-        .record_bufs(&header)
-        .map(|r| r.unwrap())
-        .collect();
+    let via_text: Vec<RecordBuf> = reader.record_bufs(&header).map(|r| r.unwrap()).collect();
 
     // Path 2: structured batches straight to records.
     let aligner = build_aligner(&ref_path);
@@ -199,13 +212,23 @@ fn streaming_records_match_the_sam_text_path() {
 
     for (i, (t, r)) in via_text.iter().zip(via_records.iter()).enumerate() {
         assert_eq!(t.name(), r.name(), "record {i}: name");
-        assert_eq!(t.flags(), r.flags(), "record {i}: flags\n{}\n{}", describe(t), describe(r));
+        assert_eq!(
+            t.flags(),
+            r.flags(),
+            "record {i}: flags\n{}\n{}",
+            describe(t),
+            describe(r)
+        );
         assert_eq!(
             t.reference_sequence_id(),
             r.reference_sequence_id(),
             "record {i}: reference id"
         );
-        assert_eq!(t.alignment_start(), r.alignment_start(), "record {i}: position");
+        assert_eq!(
+            t.alignment_start(),
+            r.alignment_start(),
+            "record {i}: position"
+        );
         assert_eq!(
             t.mapping_quality(),
             r.mapping_quality(),
@@ -266,7 +289,9 @@ fn nm_tag_is_preserved() {
         .collect();
     assert!(!mapped.is_empty(), "no mapped records");
     assert!(
-        mapped.iter().all(|r| r.data().get(&Tag::EDIT_DISTANCE).is_some()),
+        mapped
+            .iter()
+            .all(|r| r.data().get(&Tag::EDIT_DISTANCE).is_some()),
         "every mapped record must carry NM"
     );
     // The fixture plants mismatches, so at least one NM must be non-zero —

@@ -72,7 +72,10 @@ fn rewrite_header_id(line: &str, dst_id: &str) -> String {
 
 fn synthetic_info_header_for_fixed_source(src_ref: &str, dst_id: &str) -> Option<String> {
     // `./FILTER` names the target's own column (a local transfer).
-    let src_upper = src_ref.strip_prefix("./").unwrap_or(src_ref).to_ascii_uppercase();
+    let src_upper = src_ref
+        .strip_prefix("./")
+        .unwrap_or(src_ref)
+        .to_ascii_uppercase();
     if src_upper == "ID" {
         return Some(format!(
             "##INFO=<ID={dst_id},Number=1,Type=String,Description=\"Transferred ID column\">"
@@ -410,9 +413,10 @@ pub(crate) fn merge_annotation_headers(
                 input_format_by_id.insert(id, h.clone());
             }
         } else if h.starts_with("##FILTER=")
-            && let Some(id) = extract_header_id(h) {
-                input_filter_ids.insert(id);
-            }
+            && let Some(id) = extract_header_id(h)
+        {
+            input_filter_ids.insert(id);
+        }
     }
 
     let mut info_headers = Vec::new();
@@ -514,10 +518,11 @@ pub(crate) fn merge_annotation_headers(
                 .find(|(_, dst)| dst == dst_id)
                 .map(|(src, _)| src.clone());
             if let Some(src_id) = mapped_src
-                && let Some(src_line) = format_header_by_id.get(&src_id) {
-                    extra.push(rewrite_header_id(src_line, dst_id));
-                    continue;
-                }
+                && let Some(src_line) = format_header_by_id.get(&src_id)
+            {
+                extra.push(rewrite_header_id(src_line, dst_id));
+                continue;
+            }
             if let Some(line) = format_header_by_id.get(dst_id) {
                 extra.push(line.clone());
             }
@@ -543,9 +548,10 @@ pub(crate) fn merge_annotation_headers(
     if need_filter {
         for h in filter_headers {
             if let Some(id) = extract_header_id(&h)
-                && !input_filter_ids.contains(&id) {
-                    extra.push(h);
-                }
+                && !input_filter_ids.contains(&id)
+            {
+                extra.push(h);
+            }
         }
 
         if !input_filter_ids.contains("PASS") {
@@ -604,9 +610,10 @@ pub(crate) fn expand_column_specs(
         let mut info_ids = Vec::new();
         for h in ani_headers {
             if h.starts_with("##INFO=")
-                && let Some(id) = extract_header_id(h) {
-                    info_ids.push(id);
-                }
+                && let Some(id) = extract_header_id(h)
+            {
+                info_ids.push(id);
+            }
         }
 
         if info_ids.is_empty() {

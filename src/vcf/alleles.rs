@@ -22,9 +22,11 @@ fn inverse_map(n_new: usize, map: &AlleleMap) -> Vec<Option<usize>> {
     let mut inv = vec![None; n_new];
     for (old, new) in map.iter().enumerate() {
         if let Some(j) = *new
-            && j < n_new && inv[j].is_none() {
-                inv[j] = Some(old);
-            }
+            && j < n_new
+            && inv[j].is_none()
+        {
+            inv[j] = Some(old);
+        }
     }
     inv
 }
@@ -49,7 +51,12 @@ pub fn remap_value(
                 return None;
             }
             let out: Vec<&str> = (1..n_new)
-                .map(|j| inv[j].filter(|&i| i >= 1).map(|i| vals[i - 1]).unwrap_or("."))
+                .map(|j| {
+                    inv[j]
+                        .filter(|&i| i >= 1)
+                        .map(|i| vals[i - 1])
+                        .unwrap_or(".")
+                })
                 .collect();
             Some(out.join(","))
         }
@@ -57,12 +64,16 @@ pub fn remap_value(
             if vals.len() != n_old {
                 return None;
             }
-            let out: Vec<&str> = (0..n_new).map(|j| inv[j].map(|i| vals[i]).unwrap_or(".")).collect();
+            let out: Vec<&str> = (0..n_new)
+                .map(|j| inv[j].map(|i| vals[i]).unwrap_or("."))
+                .collect();
             Some(out.join(","))
         }
         FieldNumber::G => {
             if vals.len() == n_old {
-                let out: Vec<&str> = (0..n_new).map(|j| inv[j].map(|i| vals[i]).unwrap_or(".")).collect();
+                let out: Vec<&str> = (0..n_new)
+                    .map(|j| inv[j].map(|i| vals[i]).unwrap_or("."))
+                    .collect();
                 return Some(out.join(","));
             }
             if vals.len() != n_diploid_genotypes(n_old) {
@@ -118,7 +129,13 @@ pub fn remap_gt(gt: &str, map: &AlleleMap) -> String {
 /// Allele indices of a GT, `None` for missing.
 pub fn gt_alleles(gt: &str) -> Vec<Option<usize>> {
     gt.split(['/', '|'])
-        .map(|a| if a == "." || a.is_empty() { None } else { a.parse::<usize>().ok() })
+        .map(|a| {
+            if a == "." || a.is_empty() {
+                None
+            } else {
+                a.parse::<usize>().ok()
+            }
+        })
         .collect()
 }
 
@@ -127,7 +144,13 @@ pub fn gt_is_phased(gt: &str) -> bool {
 }
 
 /// Rewrite the INFO column for a new allele set.
-pub fn remap_info(info: &str, hdr: &HeaderInfo, n_old: usize, n_new: usize, map: &AlleleMap) -> String {
+pub fn remap_info(
+    info: &str,
+    hdr: &HeaderInfo,
+    n_old: usize,
+    n_new: usize,
+    map: &AlleleMap,
+) -> String {
     if info == "." || info.is_empty() {
         return info.to_string();
     }
@@ -142,20 +165,21 @@ pub fn remap_info(info: &str, hdr: &HeaderInfo, n_old: usize, n_new: usize, map:
             Some((k, v)) => {
                 let num = hdr.info_number(k);
                 if num.is_per_allele()
-                    && let Some(nv) = remap_value(v, num, n_old, n_new, map) {
-                        if nv.is_empty() {
-                            // No alleles left for a per-ALT tag: drop it.
-                            if out.ends_with(';') {
-                                out.pop();
-                            }
-                            first = out.is_empty();
-                            continue;
+                    && let Some(nv) = remap_value(v, num, n_old, n_new, map)
+                {
+                    if nv.is_empty() {
+                        // No alleles left for a per-ALT tag: drop it.
+                        if out.ends_with(';') {
+                            out.pop();
                         }
-                        out.push_str(k);
-                        out.push('=');
-                        out.push_str(&nv);
+                        first = out.is_empty();
                         continue;
                     }
+                    out.push_str(k);
+                    out.push('=');
+                    out.push_str(&nv);
+                    continue;
+                }
                 out.push_str(kv);
             }
             None => out.push_str(kv),
@@ -187,7 +211,8 @@ pub fn remap_samples(
             if *k == "GT" {
                 parts.push(remap_gt(v, map));
             } else if numbers[i].is_per_allele() {
-                let nv = remap_value(v, numbers[i], n_old, n_new, map).unwrap_or_else(|| v.to_string());
+                let nv =
+                    remap_value(v, numbers[i], n_old, n_new, map).unwrap_or_else(|| v.to_string());
                 parts.push(if nv.is_empty() { ".".to_string() } else { nv });
             } else {
                 parts.push(v.to_string());

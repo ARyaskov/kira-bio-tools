@@ -5,8 +5,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
 use crate::fx::FxHashMap;
+use anyhow::{Context, Result, bail};
 use memchr::memchr;
 
 use crate::util::Region;
@@ -66,7 +66,11 @@ impl RegionSet {
         for (ln, line) in reader.lines().enumerate() {
             let line = line?;
             let t = line.trim();
-            if t.is_empty() || t.starts_with('#') || t.starts_with("track") || t.starts_with("browser") {
+            if t.is_empty()
+                || t.starts_with('#')
+                || t.starts_with("track")
+                || t.starts_with("browser")
+            {
                 continue;
             }
             let mut parts = t.split('\t');
@@ -87,10 +91,18 @@ impl RegionSet {
             let (beg, end) = match (b, e) {
                 (None, _) => (1, u32::MAX),
                 (Some(b), None) => {
-                    if is_bed { (b + 1, u32::MAX) } else { (b, b) }
+                    if is_bed {
+                        (b + 1, u32::MAX)
+                    } else {
+                        (b, b)
+                    }
                 }
                 (Some(b), Some(e)) => {
-                    if is_bed { (b + 1, e) } else { (b, e) }
+                    if is_bed {
+                        (b + 1, e)
+                    } else {
+                        (b, e)
+                    }
                 }
             };
             if end < beg {
@@ -115,7 +127,11 @@ impl RegionSet {
             }
             set.finalize();
         }
-        Ok(if spec.is_none() && file.is_none() { None } else { Some(set) })
+        Ok(if spec.is_none() && file.is_none() {
+            None
+        } else {
+            Some(set)
+        })
     }
 
     pub fn add(&mut self, chr: &str, beg: u32, end: u32) {
@@ -135,10 +151,11 @@ impl RegionSet {
             let mut merged: Vec<(u32, u32)> = Vec::with_capacity(v.len());
             for r in v.drain(..) {
                 if let Some(last) = merged.last_mut()
-                    && r.0 <= last.1.saturating_add(1) {
-                        last.1 = last.1.max(r.1);
-                        continue;
-                    }
+                    && r.0 <= last.1.saturating_add(1)
+                {
+                    last.1 = last.1.max(r.1);
+                    continue;
+                }
                 merged.push(r);
             }
             *v = merged;
@@ -161,7 +178,10 @@ impl RegionSet {
     /// All intervals, contigs in first-appearance order, positions ascending.
     pub fn iter(&self) -> impl Iterator<Item = (&str, u32, u32)> + '_ {
         self.order.iter().flat_map(move |c| {
-            self.by_chr.get(c).into_iter().flat_map(move |v| v.iter().map(move |&(b, e)| (c.as_str(), b, e)))
+            self.by_chr
+                .get(c)
+                .into_iter()
+                .flat_map(move |v| v.iter().map(move |&(b, e)| (c.as_str(), b, e)))
         })
     }
 
@@ -170,7 +190,9 @@ impl RegionSet {
     }
 
     pub fn overlaps_range(&self, chr: &str, beg: u32, end: u32) -> bool {
-        let Some(ranges) = self.by_chr.get(chr) else { return false };
+        let Some(ranges) = self.by_chr.get(chr) else {
+            return false;
+        };
         let idx = ranges.partition_point(|r| r.1 < beg);
         idx < ranges.len() && ranges[idx].0 <= end
     }
@@ -183,7 +205,14 @@ impl RegionSet {
     }
 
     /// Whether a record overlaps the set under `mode` (see [`OverlapMode`]).
-    pub fn record_passes(&self, chrom: &str, pos: u32, refa: &str, alt: &str, mode: OverlapMode) -> bool {
+    pub fn record_passes(
+        &self,
+        chrom: &str,
+        pos: u32,
+        refa: &str,
+        alt: &str,
+        mode: OverlapMode,
+    ) -> bool {
         if mode == 0 {
             return self.contains(chrom, pos);
         }
@@ -209,11 +238,17 @@ impl RegionSet {
     /// [`record_passes`] on a raw VCF line.
     pub fn line_passes_mode(&self, line: &str, mode: OverlapMode) -> bool {
         let bytes = line.as_bytes();
-        let Some(t1) = memchr(b'\t', bytes) else { return false };
+        let Some(t1) = memchr(b'\t', bytes) else {
+            return false;
+        };
         let chr = &line[..t1];
         let rest = &line[t1 + 1..];
-        let Some(t2) = memchr(b'\t', rest.as_bytes()) else { return false };
-        let Ok(pos) = rest[..t2].parse::<u32>() else { return false };
+        let Some(t2) = memchr(b'\t', rest.as_bytes()) else {
+            return false;
+        };
+        let Ok(pos) = rest[..t2].parse::<u32>() else {
+            return false;
+        };
         if mode == 0 {
             return self.contains(chr, pos);
         }
@@ -238,7 +273,9 @@ impl RegionSet {
         // Index order keeps the output in file order.
         chroms.sort_by_key(|c| reader.ref_id(c).unwrap_or(usize::MAX));
         for chrom in chroms {
-            let Some(ranges) = self.by_chr.get(chrom) else { continue };
+            let Some(ranges) = self.by_chr.get(chrom) else {
+                continue;
+            };
             // One merged pass per contig: every record is read and emitted once.
             reader.query_multi(chrom, ranges, |line| {
                 if self.line_passes_mode(line, mode) {
@@ -274,9 +311,13 @@ impl RegionSet {
         let mut chroms: Vec<&String> = self.by_chr.keys().collect();
         chroms.sort_by_key(|c| reader.ref_id(c).unwrap_or(usize::MAX));
         for chrom in chroms {
-            let Some(ranges) = self.by_chr.get(chrom) else { continue };
+            let Some(ranges) = self.by_chr.get(chrom) else {
+                continue;
+            };
             reader.query_raw_multi(chrom, ranges, |shared, indiv| {
-                let Some(m) = crate::bcf::record::record_meta(shared) else { return Ok(true) };
+                let Some(m) = crate::bcf::record::record_meta(shared) else {
+                    return Ok(true);
+                };
                 let pos1 = m.pos.max(0) as u32 + 1;
                 if self.span_passes(chrom, pos1, m.rlen.max(0) as u32, mode) {
                     cb(shared, indiv)?;

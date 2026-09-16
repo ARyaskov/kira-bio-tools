@@ -57,7 +57,9 @@ impl VcfReader {
         self.inner.next_record_with_vpos()
     }
 
-    pub fn next_line_with_vpos(&mut self) -> Result<Option<(String, VirtualPosition, VirtualPosition)>> {
+    pub fn next_line_with_vpos(
+        &mut self,
+    ) -> Result<Option<(String, VirtualPosition, VirtualPosition)>> {
         self.inner.next_line_with_vpos()
     }
 

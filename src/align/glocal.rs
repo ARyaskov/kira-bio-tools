@@ -24,7 +24,11 @@ pub struct GlocalParams {
 impl Default for GlocalParams {
     /// `sam_prob_realn` parameters.
     fn default() -> Self {
-        Self { d: 0.001, e: 0.1, bw: 10 }
+        Self {
+            d: 0.001,
+            e: 0.1,
+            bw: 10,
+        }
     }
 }
 
@@ -79,15 +83,35 @@ pub struct GlocalScratch {
 }
 
 /// Forward-only likelihood: log P(query | reference).
-pub fn glocal_loglik(reference: &[u8], query: &[u8], iqual: Option<&[u8]>, c: &GlocalParams) -> f64 {
-    glocal(reference, query, iqual, c, false).map(|r| r.loglik).unwrap_or(f64::NEG_INFINITY)
+pub fn glocal_loglik(
+    reference: &[u8],
+    query: &[u8],
+    iqual: Option<&[u8]>,
+    c: &GlocalParams,
+) -> f64 {
+    glocal(reference, query, iqual, c, false)
+        .map(|r| r.loglik)
+        .unwrap_or(f64::NEG_INFINITY)
 }
 
 /// `reference` and `query` are nucleotide codes ([`encode_nt`]); `iqual` are
 /// phred base qualities (30 when absent). With `posterior`, the backward pass
 /// fills `state` and `q`.
-pub fn glocal(reference: &[u8], query: &[u8], iqual: Option<&[u8]>, c: &GlocalParams, posterior: bool) -> Option<GlocalResult> {
-    glocal_with(&mut GlocalScratch::default(), reference, query, iqual, c, posterior)
+pub fn glocal(
+    reference: &[u8],
+    query: &[u8],
+    iqual: Option<&[u8]>,
+    c: &GlocalParams,
+    posterior: bool,
+) -> Option<GlocalResult> {
+    glocal_with(
+        &mut GlocalScratch::default(),
+        reference,
+        query,
+        iqual,
+        c,
+        posterior,
+    )
 }
 
 /// [`glocal`] with caller-owned matrices.
@@ -129,7 +153,12 @@ pub fn glocal_with(
     s.resize(l_query + 2, 0.0);
     let q2p = &*QUAL2PROB;
     // 1-based query index -> error probability (30 when no quality is given).
-    let qual = |i: usize| -> f64 { q2p[iqual.and_then(|v| v.get(i - 1)).map(|&q| q as usize).unwrap_or(30)] };
+    let qual = |i: usize| -> f64 {
+        q2p[iqual
+            .and_then(|v| v.get(i - 1))
+            .map(|&q| q as usize)
+            .unwrap_or(30)]
+    };
     let query1 = |i: usize| -> u8 { query[i - 1] };
     let ref1 = |k: usize| -> u8 { reference[k - 1] };
     let emit = |rk: u8, qy: u8, e: f64| -> f64 {
@@ -191,7 +220,10 @@ pub fn glocal_with(
             let v11 = set_u(bw, i - 1, k - 1);
             let v10 = set_u(bw, i - 1, k);
             let v01 = set_u(bw, i, k - 1);
-            let fm = e * (m[0] * f[idx(i - 1, v11)] + m[3] * f[idx(i - 1, v11 + 1)] + m[6] * f[idx(i - 1, v11 + 2)]);
+            let fm = e
+                * (m[0] * f[idx(i - 1, v11)]
+                    + m[3] * f[idx(i - 1, v11 + 1)]
+                    + m[6] * f[idx(i - 1, v11 + 2)]);
             let fi = EI * (m[1] * f[idx(i - 1, v10)] + m[4] * f[idx(i - 1, v10 + 1)]);
             let fd = m[2] * f[idx(i, v01)] + m[8] * f[idx(i, v01 + 2)];
             f[idx(i, u)] = fm;
@@ -221,11 +253,18 @@ pub fn glocal_with(
         }
         s[l_query + 1] = sum;
     }
-    let loglik: f64 = s[1..=l_query + 1].iter().map(|v| if *v > 0.0 { v.ln() } else { f64::NEG_INFINITY }).sum::<f64>()
+    let loglik: f64 = s[1..=l_query + 1]
+        .iter()
+        .map(|v| if *v > 0.0 { v.ln() } else { f64::NEG_INFINITY })
+        .sum::<f64>()
         + ((l_ref * l_query) as f64).ln();
 
     if !posterior {
-        return Some(GlocalResult { loglik, state: Vec::new(), q: Vec::new() });
+        return Some(GlocalResult {
+            loglik,
+            state: Vec::new(),
+            q: Vec::new(),
+        });
     }
 
     // Backward: row l_query.
@@ -248,7 +287,11 @@ pub fn glocal_with(
             let v11 = set_u(bw, i + 1, k + 1);
             let v10 = set_u(bw, i + 1, k);
             let v01 = set_u(bw, i, k + 1);
-            let e = if k >= l_ref { 0.0 } else { emit(ref1(k + 1), qyi1, qli1) } * b[idx(i + 1, v11)];
+            let e = if k >= l_ref {
+                0.0
+            } else {
+                emit(ref1(k + 1), qyi1, qli1)
+            } * b[idx(i + 1, v11)];
             let bm = e * m[0] + EI * m[1] * b[idx(i + 1, v10 + 1)] + m[2] * b[idx(i, v01 + 2)];
             let bi = e * m[3] + EI * m[4] * b[idx(i + 1, v10 + 1)];
             let bd = (e * m[6] + m[8] * b[idx(i, v01 + 2)]) * y;
@@ -291,7 +334,11 @@ pub fn glocal_with(
             max /= sum;
         }
         state[i - 1] = max_k;
-        let kq = if max >= 1.0 { 101 } else { (-4.343 * (1.0 - max).ln() + 0.499) as i32 };
+        let kq = if max >= 1.0 {
+            101
+        } else {
+            (-4.343 * (1.0 - max).ln() + 0.499) as i32
+        };
         q[i - 1] = if kq > 100 { 99 } else { kq.max(0) as u8 };
     }
     Some(GlocalResult { loglik, state, q })

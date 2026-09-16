@@ -53,10 +53,8 @@ pub fn worker_thread(
     // condition `annotate_line` derives internally — surfaced here so the
     // batched key-extractor knows whether to parse the (expensive) sample
     // block. For pure INFO annotations (the dominant case) we skip it.
-    let want_format = format_overwrite_all
-        || column_modes
-            .iter()
-            .any(|(k, _)| column_targets_format(k));
+    let want_format =
+        format_overwrite_all || column_modes.iter().any(|(k, _)| column_targets_format(k));
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)

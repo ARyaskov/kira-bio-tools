@@ -54,15 +54,31 @@ fn split_fields(row: &str) -> Vec<String> {
 fn read_list(spec: &str, is_file: bool) -> Result<Vec<String>> {
     if is_file {
         let text = std::fs::read_to_string(spec).with_context(|| format!("read {spec}"))?;
-        Ok(text.lines().map(|l| l.trim_end_matches('\r').to_string()).filter(|l| !l.is_empty()).collect())
+        Ok(text
+            .lines()
+            .map(|l| l.trim_end_matches('\r').to_string())
+            .filter(|l| !l.is_empty())
+            .collect())
     } else {
-        Ok(spec.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
+        Ok(spec
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect())
     }
 }
 
 impl SampleOpts {
-    pub fn parse(samples: Option<&str>, samples_file: Option<&Path>, read_groups: Option<&Path>, ignore_rg: bool) -> Result<Self> {
-        let mut o = Self { ignore_rg, ..Default::default() };
+    pub fn parse(
+        samples: Option<&str>,
+        samples_file: Option<&Path>,
+        read_groups: Option<&Path>,
+        ignore_rg: bool,
+    ) -> Result<Self> {
+        let mut o = Self {
+            ignore_rg,
+            ..Default::default()
+        };
         let mut add_samples = |spec: &str, is_file: bool| -> Result<()> {
             let (logic, spec) = match spec.strip_prefix('^') {
                 Some(rest) => (false, rest),
@@ -159,7 +175,12 @@ impl SampleMap {
 
     /// `bsmpl_keep_readgroup`: whether `-G` keeps this read group, renaming
     /// the sample when the row says so.
-    fn keep_readgroup<'a>(rgs: &'a (bool, HashMap<String, String>), fname: &str, rg_id: &str, smpl_name: &mut Option<&'a str>) -> bool {
+    fn keep_readgroup<'a>(
+        rgs: &'a (bool, HashMap<String, String>),
+        fname: &str,
+        rg_id: &str,
+        smpl_name: &mut Option<&'a str>,
+    ) -> bool {
         let (logic, map) = rgs;
         let rg_smpl = map
             .get(rg_id)
@@ -172,15 +193,21 @@ impl SampleMap {
             return false;
         }
         if let Some(s) = rg_smpl
-            && !s.starts_with('\t') {
-                *smpl_name = Some(s.as_str());
-            }
+            && !s.starts_with('\t')
+        {
+            *smpl_name = Some(s.as_str());
+        }
         true
     }
 
     /// `bam_smpl_add_bam`: register one input; `None` when none of its read
     /// groups is selected (bcftools then drops the file).
-    pub fn add_bam(&mut self, header: &sam::Header, fname: &str, opts: &SampleOpts) -> Option<usize> {
+    pub fn add_bam(
+        &mut self,
+        header: &sam::Header,
+        fname: &str,
+        opts: &SampleOpts,
+    ) -> Option<usize> {
         let file = self.files.len();
         self.files.push(FileMap::default());
         if opts.ignore_rg {
@@ -209,14 +236,13 @@ impl SampleMap {
                     (Some(new), true) => r = new,
                 }
             }
-            if accept
-                && let Some(rgs) = &opts.read_groups {
-                    let mut renamed: Option<&str> = None;
-                    accept = Self::keep_readgroup(rgs, fname, &id, &mut renamed);
-                    if let Some(n) = renamed {
-                        r = n;
-                    }
+            if accept && let Some(rgs) = &opts.read_groups {
+                let mut renamed: Option<&str> = None;
+                accept = Self::keep_readgroup(rgs, fname, &id, &mut renamed);
+                if let Some(n) = renamed {
+                    r = n;
                 }
+            }
             let r = r.to_string();
             if accept {
                 self.add_readgroup(file, &id, Some(&r));
@@ -233,9 +259,10 @@ impl SampleMap {
         let mut smpl_name: Option<&str> = None;
         let mut accept_null_rg = true;
         if let Some(rgs) = &opts.read_groups
-            && !Self::keep_readgroup(rgs, fname, "?", &mut smpl_name) {
-                accept_null_rg = false;
-            }
+            && !Self::keep_readgroup(rgs, fname, "?", &mut smpl_name)
+        {
+            accept_null_rg = false;
+        }
         if opts.samples.is_some() && first_smpl.is_none() {
             accept_null_rg = false;
         }
@@ -284,8 +311,14 @@ impl SampleMap {
 
     /// Samples a file contributes to.
     pub fn file_samples(&self, bam_id: usize) -> Vec<usize> {
-        let Some(f) = self.files.get(bam_id) else { return Vec::new() };
-        let mut v: Vec<usize> = f.default_idx.into_iter().chain(f.rg2idx.values().copied().flatten()).collect();
+        let Some(f) = self.files.get(bam_id) else {
+            return Vec::new();
+        };
+        let mut v: Vec<usize> = f
+            .default_idx
+            .into_iter()
+            .chain(f.rg2idx.values().copied().flatten())
+            .collect();
         v.sort_unstable();
         v.dedup();
         v

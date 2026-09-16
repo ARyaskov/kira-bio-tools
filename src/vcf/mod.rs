@@ -1,6 +1,6 @@
 pub mod alleles;
-mod fetch;
 pub mod canon;
+mod fetch;
 pub mod header;
 mod mmap;
 mod parser;
@@ -11,8 +11,8 @@ pub mod structs;
 mod unified_reader;
 pub mod variant_type;
 
-pub use fetch::{LineFetcher, fetch_line};
 pub use canon::{RecordCanon, canonical_float, canonical_floats};
+pub use fetch::{LineFetcher, fetch_line};
 pub use header::{ContigDict, FieldNumber, FieldType, HeaderInfo};
 pub use mmap::MmapVcfParser;
 pub use parser::{InfoParser, VcfParser, extract_contig_id, parse_vcf_full_line};

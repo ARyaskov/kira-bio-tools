@@ -84,7 +84,10 @@ impl KbiBuilder {
         }
 
         if dup_count > 0 {
-            eprintln!("KBI: {} records share a position with an earlier record and are not point-addressable", dup_count);
+            eprintln!(
+                "KBI: {} records share a position with an earlier record and are not point-addressable",
+                dup_count
+            );
         }
 
         let keys: Vec<u64> = deduped.iter().map(|(k, _)| *k).collect();
@@ -109,17 +112,31 @@ impl KbiBuilder {
             .par_iter()
             .map(|&key| index.lookup_u64(key).unwrap_or(usize::MAX))
             .collect();
-        let n_slots = slots.iter().copied().filter(|&s| s != usize::MAX).max().map(|m| m + 1).unwrap_or(0);
+        let n_slots = slots
+            .iter()
+            .copied()
+            .filter(|&s| s != usize::MAX)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
         let mut slot_to_idx = vec![u32::MAX; n_slots];
         for (i, &slot) in slots.iter().enumerate() {
             if slot == usize::MAX || slot >= n_slots {
-                return Err(KbiError::InvalidFormat("MPH lookup failed during build".into()));
+                return Err(KbiError::InvalidFormat(
+                    "MPH lookup failed during build".into(),
+                ));
             }
             slot_to_idx[slot] = i as u32;
         }
         let _ = n;
 
-        Ok(KbiIndex::from_parts(index, keys, offsets, slot_to_idx, self.contigs))
+        Ok(KbiIndex::from_parts(
+            index,
+            keys,
+            offsets,
+            slot_to_idx,
+            self.contigs,
+        ))
     }
 }
 

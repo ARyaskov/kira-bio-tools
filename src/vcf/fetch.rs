@@ -12,7 +12,11 @@ use crate::vcf::structs::{Result, VcfError};
 
 enum Inner {
     Plain(BufReader<File>),
-    Bgzf { reader: BgzfReader<File>, block_cpos: Option<u64>, block: Vec<u8> },
+    Bgzf {
+        reader: BgzfReader<File>,
+        block_cpos: Option<u64>,
+        block: Vec<u8>,
+    },
 }
 
 pub struct LineFetcher {
@@ -26,9 +30,16 @@ impl LineFetcher {
         let inner = match detect_format(path)? {
             VcfFormat::Plain => Inner::Plain(BufReader::new(File::open(path)?)),
             VcfFormat::Gzip => return Err(VcfError::InvalidFormat),
-            VcfFormat::Bgzf => Inner::Bgzf { reader: BgzfReader::open(path)?, block_cpos: None, block: Vec::new() },
+            VcfFormat::Bgzf => Inner::Bgzf {
+                reader: BgzfReader::open(path)?,
+                block_cpos: None,
+                block: Vec::new(),
+            },
         };
-        Ok(Self { inner, buf: String::new() })
+        Ok(Self {
+            inner,
+            buf: String::new(),
+        })
     }
 
     /// The line starting at `offset`, without its line terminator.
@@ -39,7 +50,11 @@ impl LineFetcher {
                 r.seek(SeekFrom::Start(offset))?;
                 r.read_line(&mut self.buf)?;
             }
-            Inner::Bgzf { reader, block_cpos, block } => {
+            Inner::Bgzf {
+                reader,
+                block_cpos,
+                block,
+            } => {
                 let cpos = offset >> 16;
                 let upos = (offset & 0xffff) as usize;
                 if *block_cpos != Some(cpos) {

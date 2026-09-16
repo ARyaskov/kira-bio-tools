@@ -133,9 +133,10 @@ impl TabSchema {
             }
 
             if let Some(key) = extract_info_key(&line)
-                && let Some(number) = extract_info_number(&line) {
-                    metadata.insert(key, number);
-                }
+                && let Some(number) = extract_info_number(&line)
+            {
+                metadata.insert(key, number);
+            }
         }
 
         Ok(metadata)

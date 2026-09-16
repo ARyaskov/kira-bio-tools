@@ -15,7 +15,14 @@ thread_local! {
 /// the reference for `[win_start, win_start + len)` (0-based) and should
 /// reach a read length past both ends of the alignment. Returns false when
 /// nothing was applied (reference skip, no aligned bases, no reference).
-pub fn apply_baq_hmm(seq: &[u8], qual: &mut [u8], cigar: &[(Kind, u32)], ref_window: &[u8], win_start: u32, read_pos: u32) -> bool {
+pub fn apply_baq_hmm(
+    seq: &[u8],
+    qual: &mut [u8],
+    cigar: &[(Kind, u32)],
+    ref_window: &[u8],
+    win_start: u32,
+    read_pos: u32,
+) -> bool {
     let l_qseq = seq.len();
     if l_qseq == 0 || qual.len() != l_qseq || ref_window.is_empty() {
         return false;
@@ -80,7 +87,11 @@ pub fn apply_baq_hmm(seq: &[u8], qual: &mut [u8], cigar: &[(Kind, u32)], ref_win
     let s: Vec<u8> = seq.iter().map(|&b| encode_nt(b)).collect();
     // `sam_prob_realn`: Illumina parameters, PacBio-CCS-like ones past 1 kb.
     let d = if l_qseq > 1000 { 1e-7 } else { 0.001 };
-    let conf = GlocalParams { d, e: 0.1, bw: bw as usize };
+    let conf = GlocalParams {
+        d,
+        e: 0.1,
+        bw: bw as usize,
+    };
     let res = SCRATCH.with(|sc| glocal_with(&mut sc.borrow_mut(), &r, &s, Some(qual), &conf, true));
     let Some(res) = res else { return false };
 
@@ -92,7 +103,12 @@ pub fn apply_baq_hmm(seq: &[u8], qual: &mut [u8], cigar: &[(Kind, u32)], ref_win
     let mut rght = vec![0u8; l_qseq];
     let (mut x, mut y) = (read_pos as i64, 0usize);
     let mut pending = 0usize;
-    let is_m = |k: Kind| matches!(k, Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch);
+    let is_m = |k: Kind| {
+        matches!(
+            k,
+            Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch
+        )
+    };
     for (k, &(op, l)) in cigar.iter().enumerate() {
         let mut l = l as usize;
         if is_m(op) {
@@ -114,7 +130,11 @@ pub fn apply_baq_hmm(seq: &[u8], qual: &mut [u8], cigar: &[(Kind, u32)], ref_win
             for i in y..y + l {
                 let st = res.state[i];
                 let col = x - xb + (i - y) as i64;
-                bq[i] = if (st & 3) != 0 || (st >> 2) as i64 != col { 0 } else { res.q[i] };
+                bq[i] = if (st & 3) != 0 || (st >> 2) as i64 != col {
+                    0
+                } else {
+                    res.q[i]
+                };
             }
             left[y] = bq[y];
             for i in y + 1..y + l {
@@ -183,15 +203,26 @@ pub fn init_nm_profile(spec: &str, median_len: usize) {
         s if s != "auto" && s.contains(',') => {
             let mut it = s.split(',');
             let full: f32 = it.next().and_then(|x| x.trim().parse().ok()).unwrap_or(3.0);
-            let slope: f32 = it.next().and_then(|x| x.trim().parse().ok()).unwrap_or(0.12);
+            let slope: f32 = it
+                .next()
+                .and_then(|x| x.trim().parse().ok())
+                .unwrap_or(0.12);
             let rl = median_len.max(1) as f32;
-            Some(NmProfile { full_rate: full / rl, slope: slope * rl, floor: 0.12 })
+            Some(NmProfile {
+                full_rate: full / rl,
+                slope: slope * rl,
+                floor: 0.12,
+            })
         }
         _ => {
             if median_len == 0 || median_len > 320 {
                 None
             } else {
-                Some(NmProfile { full_rate: 0.02, slope: 18.0, floor: 0.12 })
+                Some(NmProfile {
+                    full_rate: 0.02,
+                    slope: 18.0,
+                    floor: 0.12,
+                })
             }
         }
     });
@@ -202,7 +233,9 @@ pub fn init_nm_profile(spec: &str, median_len: usize) {
 /// suppresses their spurious variant evidence. No-op until `init_nm_profile` selects a profile.
 /// `ref_seq` must start at the read's first reference base.
 pub fn nm_weight_qual(seq: &[u8], qual: &mut [u8], cigar: &[(Kind, u32)], ref_seq: &[u8]) {
-    let Some(prof) = NM_PROFILE.get().copied().flatten() else { return };
+    let Some(prof) = NM_PROFILE.get().copied().flatten() else {
+        return;
+    };
     if qual.is_empty() || ref_seq.is_empty() {
         return;
     }

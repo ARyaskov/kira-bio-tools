@@ -368,9 +368,10 @@ fn smooth_data(dat: &mut [f32], win: i64) {
     for i in 0..ndat {
         dat[i] = sum / buf.len() as f32;
         if i >= k1
-            && let Some(v) = buf.pop_front() {
-                sum -= v;
-            }
+            && let Some(v) = buf.pop_front()
+        {
+            sum -= v;
+        }
         if i + k2 < ndat {
             sum += dat[i + k2];
             buf.push_back(dat[i + k2]);
@@ -1314,17 +1315,19 @@ pub fn run(cfg: CnvConfig) -> Result<()> {
             return Ok(());
         }
         if let Some(tf) = &target_filter
-            && tf.line_passes_mode(line, targets_overlap) == targets_inverse {
-                return Ok(());
-            }
+            && tf.line_passes_mode(line, targets_overlap) == targets_inverse
+        {
+            return Ok(());
+        }
         let Some(rec) = parse_vcf_record(line, 0, contigs).map_err(|e| anyhow::anyhow!("{e}"))?
         else {
             return Ok(());
         };
         if let Some(af) = &cnv.af_file
-            && !af.has_site(&rec.chrom, rec.pos) {
-                return Ok(());
-            }
+            && !af.has_site(&rec.chrom, rec.pos)
+        {
+            return Ok(());
+        }
         cnv.next_line(&rec)
     };
     let indexed = region_filter
@@ -1340,9 +1343,9 @@ pub fn run(cfg: CnvConfig) -> Result<()> {
                 && (line.is_empty()
                     || line.as_bytes()[0] == b'#'
                     || !rf.line_passes_mode(&line, regions_overlap))
-                {
-                    continue;
-                }
+            {
+                continue;
+            }
             handle(&line, &mut cnv, &mut contigs)?;
         }
     }
