@@ -3,7 +3,7 @@
 //! - `needs_baq[read_idx]`: per-read flag — `false` means the read is fully ref-match
 //!   with no indels in CIGAR, so BAQ HMM is a no-op for it and can be skipped.
 
-use fxhash::FxHashMap;
+use crate::fx::FxHashMap;
 use noodles_sam::alignment::record::cigar::op::Kind;
 use rayon::prelude::*;
 

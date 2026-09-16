@@ -194,7 +194,7 @@ pub fn patch_samples_from_line<'a>(parsed: &mut ParsedVcfRecord<'a>, line: &'a s
         };
         parsed.samples = cols[9..]
             .iter()
-            .map(|raw| ParsedSample { raw: *raw })
+            .map(|raw| ParsedSample { raw })
             .collect();
     } else {
         parsed.format = None;

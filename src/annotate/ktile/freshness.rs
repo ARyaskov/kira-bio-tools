@@ -50,7 +50,7 @@ pub fn check_ktile_freshness(
     let cur_mtime = meta
         .modified()?
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        .map_err(std::io::Error::other)?
         .as_secs();
     if cur_mtime != header.source_mtime_unix {
         return Ok(KtileFreshness::StaleMtime {

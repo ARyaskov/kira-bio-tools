@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
-use fxhash::FxHashMap;
+use crate::fx::FxHashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
@@ -46,6 +46,12 @@ pub struct StringPool {
     intern_bytes_saved: u64,
 }
 
+impl Default for StringPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StringPool {
     pub fn new() -> Self {
         let intern_enabled = std::env::var("KIRA_BT_DISABLE_INTERN")
@@ -74,6 +80,10 @@ impl StringPool {
 
     pub fn len(&self) -> usize {
         self.total_len as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total_len == 0
     }
 
     pub fn block_size(&self) -> usize {

@@ -203,8 +203,8 @@ impl Caller {
         } else {
             compute_qsum(pdg, group, n_als).into_iter().map(|v| v as f32).collect()
         };
-        if let Some((an, ac)) = &site.prior_an_ac {
-            if *an > 0.0 && ac.len() == n_als - 1 {
+        if let Some((an, ac)) = &site.prior_an_ac
+            && *an > 0.0 && ac.len() == n_als - 1 {
                 let n = group.len() as f64;
                 let mut ac0 = *an;
                 for (i, &c) in ac.iter().enumerate() {
@@ -213,7 +213,6 @@ impl Caller {
                 }
                 qsum[0] = ((qsum[0] as f64 + 0.5 * ac0.max(0.0)) / (n + 0.5 * an)) as f32;
             }
-        }
         let total: f32 = qsum.iter().sum();
         if total > 0.0 {
             for q in qsum.iter_mut() {
@@ -259,11 +258,10 @@ impl Caller {
             group_qsums.push(qsum);
         }
         als_new |= 1;
-        if let Some(u) = site.unseen {
-            if u > 0 {
+        if let Some(u) = site.unseen
+            && u > 0 {
                 als_new &= !(1u32 << u);
             }
-        }
         let is_variant = als_new != 1;
         if self.opts.variants_only && !is_variant {
             return CallResult::Skip;

@@ -66,13 +66,11 @@ fn index_conf(args: &TabixArgs) -> Result<TabixConf> {
 
 /// The layout for reading headers: the existing index's, else as for indexing.
 fn header_conf(args: &TabixArgs) -> Result<TabixConf> {
-    if let Some(idx) = find_index_for(&args.input) {
-        if let Ok(index) = BinIndex::load(&idx) {
-            if let Some(h) = index.tabix_header() {
+    if let Some(idx) = find_index_for(&args.input)
+        && let Ok(index) = BinIndex::load(&idx)
+            && let Some(h) = index.tabix_header() {
                 return Ok(TabixConf::from_header(h));
             }
-        }
-    }
     Ok(index_conf(args).unwrap_or(TabixConf::VCF))
 }
 
@@ -180,10 +178,7 @@ fn cmd_query_tabix(args: &TabixArgs) -> Result<()> {
 
     for (chrom, beg, end) in &regions {
         let label = format!("{chrom}:{beg}-{end}");
-        match args.regions_overlap {
-            Some(1) => writeln!(out, "#{label}")?,
-            _ => {}
-        }
+        if let Some(1) = args.regions_overlap { writeln!(out, "#{label}")? }
         let prefix = args.regions_overlap == Some(2);
         reader.query(chrom, *beg, *end, |line| {
             if prefix {

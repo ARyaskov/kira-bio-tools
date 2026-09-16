@@ -3,7 +3,6 @@
     fn parse_to_pairs(info: &str) -> Vec<(String, String)> {
         parse_existing_info(info)
             .into_iter()
-            .map(|(k, v)| (k, v))
             .collect()
     }
 

@@ -133,11 +133,10 @@ pub fn cmd_view(args: ViewArgs) -> Result<()> {
             let Some(chr) = contig_name(m.rid) else { return false };
             let pos1 = m.pos.max(0) as u32 + 1;
             let rlen = m.rlen.max(0) as u32;
-            if let Some(tf) = &target_filter {
-                if tf.span_passes(&chr, pos1, rlen, args.targets_overlap) == targets_inverse {
+            if let Some(tf) = &target_filter
+                && tf.span_passes(&chr, pos1, rlen, args.targets_overlap) == targets_inverse {
                     return false;
                 }
-            }
             true
         };
         if let Some(rf) = indexed {
@@ -173,11 +172,10 @@ pub fn cmd_view(args: ViewArgs) -> Result<()> {
             if line.is_empty() || line.as_bytes()[0] == b'#' {
                 continue;
             }
-            if let Some(rf) = &region_filter {
-                if !rf.line_passes_mode(&line, args.regions_overlap) {
+            if let Some(rf) = &region_filter
+                && !rf.line_passes_mode(&line, args.regions_overlap) {
                     continue;
                 }
-            }
             if let Some(out_line) = process_view_record(&line, &ctx) {
                 sink.write_line(&out_line)?;
             }
@@ -226,43 +224,38 @@ fn process_view_record(line: &str, ctx: &RecordCtx<'_>) -> Option<String> {
         return None;
     }
 
-    if let Some(af) = ctx.apply_filters {
-        if !filter_passes_apply(cols[6], af) {
+    if let Some(af) = ctx.apply_filters
+        && !filter_passes_apply(cols[6], af) {
             return None;
         }
-    }
     if args.known && cols[2] == "." {
         return None;
     }
     if args.novel && cols[2] != "." {
         return None;
     }
-    if let Some(t) = ctx.type_filter {
-        if !t.passes(cols[3], cols[4]) {
+    if let Some(t) = ctx.type_filter
+        && !t.passes(cols[3], cols[4]) {
             return None;
         }
-    }
 
     let n_alleles = 1 + if cols[4] == "." || cols[4].is_empty() { 0 } else { cols[4].split(',').count() as u32 };
-    if let Some(min) = args.min_alleles {
-        if n_alleles < min {
+    if let Some(min) = args.min_alleles
+        && n_alleles < min {
             return None;
         }
-    }
-    if let Some(max) = args.max_alleles {
-        if n_alleles > max {
+    if let Some(max) = args.max_alleles
+        && n_alleles > max {
             return None;
         }
-    }
 
     let samples_slice: &[&str] = if cols.len() > 9 { &cols[9..] } else { &[] };
     let format_str: &str = if cols.len() > 8 { cols[8] } else { "" };
 
-    if let Some(f) = ctx.gt_filter {
-        if !f.passes(format_str, samples_slice, ctx.samples_keep) {
+    if let Some(f) = ctx.gt_filter
+        && !f.passes(format_str, samples_slice, ctx.samples_keep) {
             return None;
         }
-    }
     if args.phased && !any_phased(format_str, samples_slice) {
         return None;
     }
@@ -275,11 +268,10 @@ fn process_view_record(line: &str, ctx: &RecordCtx<'_>) -> Option<String> {
     if args.exclude_uncalled && any_uncalled(format_str, samples_slice) {
         return None;
     }
-    if let Some(f) = ctx.ac_filter {
-        if !f.passes(format_str, samples_slice, ctx.samples_keep, cols[7], n_alleles as usize) {
+    if let Some(f) = ctx.ac_filter
+        && !f.passes(format_str, samples_slice, ctx.samples_keep, cols[7], n_alleles as usize) {
             return None;
         }
-    }
     if args.private && !is_private(format_str, samples_slice) {
         return None;
     }
@@ -403,16 +395,14 @@ impl TypeFilter {
 
     fn passes(&self, refa: &str, alt: &str) -> bool {
         let ty = record_type(refa, alt);
-        if let Some(i) = self.incl {
-            if !Self::matches(i, ty) {
+        if let Some(i) = self.incl
+            && !Self::matches(i, ty) {
                 return false;
             }
-        }
-        if let Some(e) = self.excl {
-            if Self::matches(e, ty) {
+        if let Some(e) = self.excl
+            && Self::matches(e, ty) {
                 return false;
             }
-        }
         true
     }
 }
@@ -624,26 +614,22 @@ impl AcAfFilter {
         let af = |mode: AcMode| -> f64 {
             if an > 0 { Self::select(&ac, mode) as f64 / an as f64 } else { 0.0 }
         };
-        if let Some((v, m)) = self.min_ac {
-            if Self::select(&ac, m) < v {
+        if let Some((v, m)) = self.min_ac
+            && Self::select(&ac, m) < v {
                 return false;
             }
-        }
-        if let Some((v, m)) = self.max_ac {
-            if Self::select(&ac, m) > v {
+        if let Some((v, m)) = self.max_ac
+            && Self::select(&ac, m) > v {
                 return false;
             }
-        }
-        if let Some((v, m)) = self.min_af {
-            if af(m) < v {
+        if let Some((v, m)) = self.min_af
+            && af(m) < v {
                 return false;
             }
-        }
-        if let Some((v, m)) = self.max_af {
-            if af(m) > v {
+        if let Some((v, m)) = self.max_af
+            && af(m) > v {
                 return false;
             }
-        }
         true
     }
 }

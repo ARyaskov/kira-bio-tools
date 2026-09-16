@@ -14,7 +14,7 @@ use crate::bam::errmod::{Drand48, pack_base};
 use crate::call::haplotype::haplotype_pls;
 use crate::call::mcall::{CallResult, CallSite, Caller, CallerOpts, PL_MISSING};
 use anyhow::{Context, Result, bail};
-use fxhash::FxHashMap;
+use crate::fx::FxHashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 /// Reference contigs are loaded on demand through the `.fai` index.
 pub(crate) type Fasta = crate::fasta::IndexedFasta;
 
-pub(crate) fn load_fasta(p: &PathBuf) -> Result<Fasta> {
+pub(crate) fn load_fasta(p: &Path) -> Result<Fasta> {
     Fasta::open(p)
 }
 
@@ -144,7 +144,7 @@ pub fn cmd_mpileup(args: MpileupArgs) -> Result<()> {
     }
     let regions = collect_regions(&args)?;
 
-    let fasta = args.fasta_ref.as_ref().map(load_fasta).transpose()?;
+    let fasta = args.fasta_ref.as_ref().map(|p| load_fasta(p)).transpose()?;
     let out_path = args.output.clone().unwrap_or_else(|| PathBuf::from("out.mpileup.vcf"));
     let mut out = BufWriter::with_capacity(1 << 20, File::create(&out_path).context("create output")?);
 
@@ -582,11 +582,10 @@ fn run_streaming<W: Write>(
         _ => None,
     };
     crate::bam::mpileup_engine_streaming_opts(streams, &eo, hook.as_deref_mut(), &mut |site, reads| {
-        if err.is_none() {
-            if let Err(e) = write_site(site, reads, &ctx, &mut gvcf_blocker, &mut buf, out) {
+        if err.is_none()
+            && let Err(e) = write_site(site, reads, &ctx, &mut gvcf_blocker, &mut buf, out) {
                 err = Some(e);
             }
-        }
     })?;
     if let Some(e) = err {
         return Err(e);
@@ -638,7 +637,7 @@ pub fn run_mpileup_from_bams<W: Write>(
     let flag_filters = flag_filters(args)?;
     let gap_frac = preset.as_ref().and_then(|p| p.gap_frac).unwrap_or(args.gap_frac);
     let min_ireads = args.min_ireads;
-    let fasta = args.fasta_ref.as_ref().map(load_fasta).transpose()?;
+    let fasta = args.fasta_ref.as_ref().map(|p| load_fasta(p)).transpose()?;
     let timing = std::env::var("KIRA_BT_TIMING").is_ok();
 
     // In-memory inputs: one sample per reader, named from its read groups.
@@ -918,11 +917,10 @@ fn run_sequential<W: Write>(
     let mut buf: Vec<u8> = Vec::with_capacity(256);
     let eo = engine_opts(ctx.args, min_mq, min_bq, skip_indels);
     mpileup_engine_from_records_opts(records_per_sample, &eo, pos_filter, hook, &mut |site, overlapping| {
-        if err.is_none() {
-            if let Err(e) = write_site(site, overlapping, ctx, gvcf_blocker, &mut buf, out) {
+        if err.is_none()
+            && let Err(e) = write_site(site, overlapping, ctx, gvcf_blocker, &mut buf, out) {
                 err = Some(e);
             }
-        }
     })?;
     match err {
         Some(e) => Err(e),
@@ -1334,7 +1332,7 @@ fn emit_site(
             snv_alts.push((i, c));
         }
     }
-    snv_alts.sort_by(|a, b| b.1.cmp(&a.1));
+    snv_alts.sort_by_key(|a| std::cmp::Reverse(a.1));
     // Candidate alleles in REF-first order, as ACGT indices, plus the least
     // supported other base standing in for bcftools' unseen `<*>` allele:
     // it is never emitted, but weighs the reference hypothesis against
@@ -1442,16 +1440,14 @@ fn emit_site(
     if ctx.assemble && !ctx.skip_indels && !have_indel {
         let cfg = asm_cfg();
         let nonref = total.saturating_sub(agg.base_counts[ref_idx]);
-        if nonref >= cfg.nonref {
-            if let Some(fa) = ctx.fasta {
+        if nonref >= cfg.nonref
+            && let Some(fa) = ctx.fasta {
                 let w_lo = site.pos.saturating_sub(cfg.up);
-                if let Some(refw) = fa.slice_bytes(chr, w_lo + 1, cfg.len) {
-                    if let Some(call) = crate::call::haplotype::assemble_indel(overlapping_reads, w_lo, refw, cfg.min_sup, cfg.max_mm) {
+                if let Some(refw) = fa.slice_bytes(chr, w_lo + 1, cfg.len)
+                    && let Some(call) = crate::call::haplotype::assemble_indel(overlapping_reads, w_lo, refw, cfg.min_sup, cfg.max_mm) {
                         emit_assembled(call, site, overlapping_reads, chr, ctx, out, annotate);
                     }
-                }
             }
-        }
     }
 }
 

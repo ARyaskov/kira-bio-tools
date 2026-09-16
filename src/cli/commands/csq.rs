@@ -226,11 +226,10 @@ pub fn cmd_csq(args: CsqArgs) -> Result<()> {
         if line.is_empty() || line.as_bytes()[0] == b'#' {
             return Ok(());
         }
-        if let Some(tf) = &target_filter {
-            if tf.line_passes_mode(line, args.targets_overlap) == targets_inverse {
+        if let Some(tf) = &target_filter
+            && tf.line_passes_mode(line, args.targets_overlap) == targets_inverse {
                 return Ok(());
             }
-        }
         let Some(rec) = parse_vcf_record(line, 0, contigs).map_err(|e| anyhow::anyhow!("{e}"))?
         else {
             return Ok(());
@@ -253,14 +252,13 @@ pub fn cmd_csq(args: CsqArgs) -> Result<()> {
         })?;
     } else {
         while let Some(line) = reader.read_line()? {
-            if let Some(rf) = &region_filter {
-                if line.is_empty()
+            if let Some(rf) = &region_filter
+                && (line.is_empty()
                     || line.as_bytes()[0] == b'#'
-                    || !rf.line_passes_mode(&line, args.regions_overlap)
+                    || !rf.line_passes_mode(&line, args.regions_overlap))
                 {
                     continue;
                 }
-            }
             handle(&line, &mut caller, &mut contigs)?;
         }
     }
@@ -269,8 +267,8 @@ pub fn cmd_csq(args: CsqArgs) -> Result<()> {
         CsqOutput::Vcf(sink) => sink.finish()?,
         CsqOutput::Text(mut w) => w.flush()?,
     }
-    if args.write_index {
-        if let Some(out) = args.output.as_deref() {
+    if args.write_index
+        && let Some(out) = args.output.as_deref() {
             if matches!(kind, OutputKind::VcfGz(_) | OutputKind::Bcf(_)) && out != Path::new("-") {
                 let idx = std::path::PathBuf::from(format!("{}.csi", out.display()));
                 build_index(out, &idx, IndexKind::Csi, None)
@@ -281,6 +279,5 @@ pub fn cmd_csq(args: CsqArgs) -> Result<()> {
                 );
             }
         }
-    }
     Ok(())
 }

@@ -13,6 +13,9 @@ use core::arch::x86_64::*;
 const MAX_TABS_FULL: usize = 138;
 const MAX_TABS_MIN: usize = 8;
 
+/// # Safety
+/// The caller must have checked that the CPU supports AVX2
+/// (`is_x86_feature_detected!("avx2")`).
 #[target_feature(enable = "avx2")]
 pub unsafe fn parse_vcf_line_simd(line: &[u8]) -> Option<VcfFieldsFull<'_>> {
     if line.len() < 10 {
@@ -32,7 +35,7 @@ pub unsafe fn parse_vcf_line_simd(line: &[u8]) -> Option<VcfFieldsFull<'_>> {
 
     // Helper: safe slice
     #[inline(always)]
-    fn slice<'a>(s: &'a str, start: usize, end: usize) -> &'a str {
+    fn slice(s: &str, start: usize, end: usize) -> &str {
         if start <= end && end <= s.len() {
             &s[start..end]
         } else {
@@ -86,6 +89,9 @@ pub unsafe fn parse_vcf_line_simd(line: &[u8]) -> Option<VcfFieldsFull<'_>> {
     })
 }
 
+/// # Safety
+/// The caller must have checked that the CPU supports AVX2
+/// (`is_x86_feature_detected!("avx2")`).
 #[target_feature(enable = "avx2")]
 pub unsafe fn parse_vcf_fields_avx2(line: &[u8]) -> Option<VcfFields<'_>> {
     if line.len() < 10 {
@@ -102,7 +108,7 @@ pub unsafe fn parse_vcf_fields_avx2(line: &[u8]) -> Option<VcfFields<'_>> {
     let line_str = std::str::from_utf8(line).ok()?;
 
     #[inline(always)]
-    fn slice<'a>(s: &'a str, start: usize, end: usize) -> &'a str {
+    fn slice(s: &str, start: usize, end: usize) -> &str {
         if start <= end && end <= s.len() {
             &s[start..end]
         } else {
@@ -125,6 +131,9 @@ pub unsafe fn parse_vcf_fields_avx2(line: &[u8]) -> Option<VcfFields<'_>> {
     })
 }
 
+/// # Safety
+/// The caller must have checked that the CPU supports AVX2
+/// (`is_x86_feature_detected!("avx2")`).
 #[target_feature(enable = "avx2")]
 pub unsafe fn parse_chr_pos_avx2(line: &[u8]) -> Option<(u8, u32)> {
     let mut tabs = [0usize; 2];
@@ -183,6 +192,9 @@ unsafe fn find_tabs_avx2(buf: &[u8], out: &mut [usize]) -> usize {
     found
 }
 
+/// # Safety
+/// The caller must have checked that the CPU supports AVX2
+/// (`is_x86_feature_detected!("avx2")`).
 #[target_feature(enable = "avx2")]
 pub unsafe fn find_char_avx2(buf: &[u8], ch: u8) -> Option<usize> {
     let target = _mm256_set1_epi8(ch as i8);

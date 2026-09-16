@@ -112,13 +112,12 @@ pub fn cmd_norm(args: NormArgs) -> Result<()> {
     let version = version_header_line();
     for h in &headers {
         if h.starts_with("#CHROM") {
-            if let Some(tag) = &split_opts.old_rec_tag {
-                if !hdr.info.contains_key(tag) {
+            if let Some(tag) = &split_opts.old_rec_tag
+                && !hdr.info.contains_key(tag) {
                     out_headers.push(format!(
                         "##INFO=<ID={tag},Number=1,Type=String,Description=\"Original record before normalization (CHROM|POS|REF|ALT|USED_ALT_IDX)\">"
                     ));
                 }
-            }
             if !args.no_version {
                 out_headers.push(version.clone());
             }
@@ -134,12 +133,10 @@ pub fn cmd_norm(args: NormArgs) -> Result<()> {
 
     while let Some(line) = reader.read_line()? {
         if line.is_empty() || line.as_bytes()[0] == b'#' { continue; }
-        if let Some(rf) = &region_filter {
-            if !rf.line_passes_mode(&line, args.regions_overlap) { continue; }
-        }
-        if let Some(tf) = &target_filter {
-            if tf.line_passes_mode(&line, 0) == targets_inverse { continue; }
-        }
+        if let Some(rf) = &region_filter
+            && !rf.line_passes_mode(&line, args.regions_overlap) { continue; }
+        if let Some(tf) = &target_filter
+            && tf.line_passes_mode(&line, 0) == targets_inverse { continue; }
         let mut fields = line.splitn(3, '\t');
         let in_chrom = fields.next().unwrap_or("");
         let in_pos: u32 = fields
@@ -187,13 +184,12 @@ pub fn cmd_norm(args: NormArgs) -> Result<()> {
     outbuf.flush_all(&mut sink, &mut dedup, rm_dup)?;
     sink.finish()?;
 
-    if let (Some(kind_s), Some(out)) = (args.write_index.as_deref(), out_path.as_deref()) {
-        if matches!(kind, OutputKind::VcfGz(_) | OutputKind::Bcf(_)) && out != Path::new("-") {
+    if let (Some(kind_s), Some(out)) = (args.write_index.as_deref(), out_path.as_deref())
+        && matches!(kind, OutputKind::VcfGz(_) | OutputKind::Bcf(_)) && out != Path::new("-") {
             let (ik, ext) = if kind_s == "tbi" { (crate::csi::IndexKind::Tbi, "tbi") } else { (crate::csi::IndexKind::Csi, "csi") };
             let idx = std::path::PathBuf::from(format!("{}.{}", out.display(), ext));
             crate::csi::build_index(out, &idx, ik, None).with_context(|| format!("-W: write {}", idx.display()))?;
         }
-    }
     Ok(())
 }
 
@@ -527,11 +523,10 @@ fn join_group(group: Vec<Vec<String>>, hdr: &HeaderInfo) -> Vec<String> {
             };
             match info_keys.iter().position(|x| x == k) {
                 Some(p) => {
-                    if num.is_per_allele() {
-                        if let (Some(cur), Some(new)) = (info_vals[p].clone(), expanded) {
+                    if num.is_per_allele()
+                        && let (Some(cur), Some(new)) = (info_vals[p].clone(), expanded) {
                             info_vals[p] = Some(merge_missing(&cur, &new));
                         }
-                    }
                 }
                 None => {
                     info_keys.push(k.to_string());
@@ -629,11 +624,10 @@ fn combine_gt(cur: &str, new: &str) -> String {
         let free = |x: &Option<usize>| x.is_none_or(|v| v == 0);
         if free(&out[i]) {
             out[i] = Some(nb);
-        } else if !phased {
-            if let Some(slot) = out.iter().position(free) {
+        } else if !phased
+            && let Some(slot) = out.iter().position(free) {
                 out[slot] = Some(nb);
             }
-        }
     }
     if !phased {
         out.sort_by_key(|x| x.map(|v| v as i64).unwrap_or(i64::MAX));
@@ -781,7 +775,7 @@ fn verify_ref(cols: &[String], fa: &Fasta, mode: CheckRef) -> RefAction {
 
 /// `-c s`: set REF from the reference. When the reference base is one of the
 /// ALTs, REF and that ALT are swapped and genotypes and A/R/G fields follow.
-fn fix_ref(cols: &mut Vec<String>, new_ref: &str, hdr: &HeaderInfo) {
+fn fix_ref(cols: &mut [String], new_ref: &str, hdr: &HeaderInfo) {
     let alts: Vec<String> = cols[4].split(',').map(|s| s.to_string()).collect();
     let swap_idx = alts.iter().position(|a| a.eq_ignore_ascii_case(new_ref));
     let Some(k) = swap_idx else {
@@ -962,11 +956,10 @@ fn left_align_symbolic(
 
 fn info_get_u32(info: &str, key: &str) -> Option<u32> {
     for f in info.split(';') {
-        if let Some((k, v)) = f.split_once('=') {
-            if k == key {
+        if let Some((k, v)) = f.split_once('=')
+            && k == key {
                 return v.parse().ok();
             }
-        }
     }
     None
 }

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
-use fxhash::FxHashMap;
+use crate::fx::FxHashMap;
 
 use crate::bam::reader::FastaLike;
 
@@ -78,7 +78,7 @@ fn fai_matches_file(path: &Path, contigs: &[Contig]) -> bool {
             }
             let ok = match c.line_width - c.line_bases {
                 1 => b[0] == b'\n',
-                2 => b == [b'\r', b'\n'],
+                2 => b == *b"\r\n",
                 _ => false,
             };
             if !ok {

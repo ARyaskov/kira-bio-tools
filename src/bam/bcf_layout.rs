@@ -195,7 +195,7 @@ fn add_observation(
     let (pos, len, sc_len, sc_dist) = read_position(lr, qi);
     let epos = ((pos as f64 / (len + 1) as f64) * (NPOS - 1) as f64) as i64;
     let epos = epos.clamp(0, NPOS as i64 - 1) as usize;
-    let scl = if sc_len > 0 { ((15.0 * sc_len as f64 / (sc_dist + 1) as f64) as i64).min(99).max(0) as usize } else { 0 };
+    let scl = if sc_len > 0 { ((15.0 * sc_len as f64 / (sc_dist + 1) as f64) as i64).clamp(0, 99) as usize } else { 0 };
     if rev { bias.rev_mqs[mapq] += 1 } else { bias.fwd_mqs[mapq] += 1 }
     if is_diff {
         bias.alt_pos[epos] += 1;
@@ -244,11 +244,10 @@ fn aux_nm(lr: &LiveRead, is_ref: bool) -> Option<usize> {
     for &(k, l) in lr.cigar_pairs.iter() {
         match k {
             Kind::SoftClip => nm += l as i64,
-            Kind::Insertion | Kind::Deletion => {
-                if l > 1 {
+            Kind::Insertion | Kind::Deletion
+                if l > 1 => {
                     nm -= l as i64 - 1;
                 }
-            }
             _ => {}
         }
     }
@@ -316,13 +315,12 @@ fn combine(calls: &[SampleCall], ref4: Option<usize>) -> Combined {
         }
         i -= 1;
     }
-    if ref4.is_some() {
-        if ((r4 < 4 && j < 4) || (r4 == 4 && j < 5)) && i >= 0 {
+    if ref4.is_some()
+        && ((r4 < 4 && j < 4) || (r4 == 4 && j < 5)) && i >= 0 {
             unseen = j as i64;
             a[j] = ptr[i as usize] as i64;
             j += 1;
         }
-    }
     let n_alleles = j;
     let has_alt = !(n_alleles == 2 && unseen != -1);
 
@@ -738,18 +736,16 @@ fn write_record(
     info.push_str("QS=");
     push_list(&mut info, (0..n).map(|j| fmt_f32(comb.qsum[j] as f64)));
     if comb.has_alt {
-        if tags.info_vdb {
-            if let Some(v) = calc_vdb(&bias.alt_pos) {
+        if tags.info_vdb
+            && let Some(v) = calc_vdb(&bias.alt_pos) {
                 sep(&mut info);
                 info.push_str(&format!("VDB={}", fmt_f32(v)));
             }
-        }
-        if tags.info_sgb {
-            if let Some(v) = calc_seg_bias(calls, &comb.anno) {
+        if tags.info_sgb
+            && let Some(v) = calc_seg_bias(calls, &comb.anno) {
                 sep(&mut info);
                 info.push_str(&format!("SGB={}", fmt_f32(v)));
             }
-        }
         if tags.info_nm && (bias.nnm[0] > 0 || bias.nnm[1] > 0) {
             let nm: Vec<String> = (0..2).map(|i| fmt_g(if bias.nnm[i] > 0 { (bias.nm[i] / bias.nnm[i] as f32) as f64 } else { 0.0 })).collect();
             sep(&mut info);

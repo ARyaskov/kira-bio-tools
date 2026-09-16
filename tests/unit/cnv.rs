@@ -46,8 +46,8 @@
         let p = &s.gauss[CN2_PK_RA];
         assert!(norm_prob(0.5, p) > norm_prob(0.45, p));
         assert_eq!(copy_number_state(false, 3, 0), '3');
-        assert_eq!(copy_number_state(true, 4 * 1 + 2, 0), '1');
-        assert_eq!(copy_number_state(true, 4 * 1 + 2, 1), '2');
+        assert_eq!(copy_number_state(true, 4 + 2, 0), '1');
+        assert_eq!(copy_number_state(true, 4 + 2, 1), '2');
     }
 
     #[test]

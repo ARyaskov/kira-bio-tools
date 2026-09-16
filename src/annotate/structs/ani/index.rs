@@ -49,6 +49,10 @@ impl StringStorage {
             StringStorage::Mmap { len, .. } => *len,
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// LRU cache of decompressed string-pool blocks.
@@ -434,7 +438,7 @@ impl AniIndex {
         if end > self.mmap.len() {
             return None;
         }
-        if (start % std::mem::align_of::<u64>()) != 0 {
+        if !start.is_multiple_of(std::mem::align_of::<u64>()) {
             return None;
         }
         let n_expected = self.entries.len();
@@ -812,7 +816,7 @@ impl AniIndex {
             }
             let raw = std::str::from_utf8(&blob.values[start..end]).unwrap_or("");
             let values: Vec<String> = raw.split(',').map(|s| s.to_string()).collect();
-            let number = field_meta.get(&key).copied().unwrap_or_else(|| {
+            let number = field_meta.get(&key).copied().unwrap_or({
                 if values.len() == 1 {
                     FieldNumber::One
                 } else {
@@ -986,9 +990,9 @@ impl AniIndex {
 }
 
 fn infer_info_type(key: &str) -> FieldType {
-    if key.starts_with('I') && key.chars().nth(1).map_or(false, |c| c.is_uppercase()) {
+    if key.starts_with('I') && key.chars().nth(1).is_some_and(|c| c.is_uppercase()) {
         FieldType::Integer
-    } else if key.starts_with('F') && key.chars().nth(1).map_or(false, |c| c.is_uppercase()) {
+    } else if key.starts_with('F') && key.chars().nth(1).is_some_and(|c| c.is_uppercase()) {
         FieldType::Float
     } else {
         FieldType::String
@@ -1315,7 +1319,7 @@ fn read_pod_slice<T: Pod>(bytes: &[u8]) -> Result<Vec<T>> {
     if size == 0 {
         return Ok(Vec::new());
     }
-    if bytes.len() % size != 0 {
+    if !bytes.len().is_multiple_of(size) {
         return Err(anyhow!("ANI blob size misaligned"));
     }
     let mut out = Vec::with_capacity(bytes.len() / size);
@@ -1365,7 +1369,7 @@ fn read_header(mmap: &Mmap) -> Result<AniHeader> {
                 entry_keys_len: h6.entry_keys_len,
             })
         }
-        2 | 3 | 4 | 5 => Err(anyhow!(
+        2..=5 => Err(anyhow!(
             "Unsupported ANI version {} (rebuild index)",
             h3.version
         )),

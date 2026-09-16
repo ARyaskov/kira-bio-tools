@@ -23,11 +23,10 @@ pub fn merge_default_values(
         return merge_append_values(vcf_val, db_val);
     }
 
-    if let Some(val) = vcf_value {
-        if !is_missing_value(val) || mode.carry_over_missing {
+    if let Some(val) = vcf_value
+        && (!is_missing_value(val) || mode.carry_over_missing) {
             return val.to_string();
         }
-    }
 
     db_val.to_string()
 }

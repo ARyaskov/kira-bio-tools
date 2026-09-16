@@ -456,11 +456,10 @@ fn allele_counts(s: &Site, selected: &[usize], n_al: usize) -> (Vec<u32>, u32) {
 
 fn info_af_bin(info: &str, tag: &str, alt_idx: usize) -> usize {
     for kv in info.split(';') {
-        if let Some(v) = kv.strip_prefix(tag).and_then(|r| r.strip_prefix('=')) {
-            if let Some(af) = v.split(',').nth(alt_idx).and_then(|x| x.parse::<f64>().ok()) {
+        if let Some(v) = kv.strip_prefix(tag).and_then(|r| r.strip_prefix('='))
+            && let Some(af) = v.split(',').nth(alt_idx).and_then(|x| x.parse::<f64>().ok()) {
                 return ((af * (AF_BINS as f64 - 1.0)) as usize).min(AF_BINS - 1);
             }
-        }
     }
     0
 }
@@ -594,27 +593,22 @@ impl Input {
         loop {
             let Some(line) = self.reader.read_line()? else { self.next = None; return Ok(()); };
             if line.is_empty() || line.as_bytes()[0] == b'#' { continue; }
-            if let Some(rf) = &self.region {
-                if !rf.line_passes_mode(&line, self.regions_overlap) { continue; }
-            }
-            if let Some(tf) = &self.target {
-                if tf.line_passes_mode(&line, 0) == self.target_inverse { continue; }
-            }
+            if let Some(rf) = &self.region
+                && !rf.line_passes_mode(&line, self.regions_overlap) { continue; }
+            if let Some(tf) = &self.target
+                && tf.line_passes_mode(&line, 0) == self.target_inverse { continue; }
             if let Some(af) = &self.apply_filters {
-                let f = line.splitn(8, '\t').nth(6).unwrap_or(".");
+                let f = line.split('\t').nth(6).unwrap_or(".");
                 let pass = if f == "." || f.is_empty() { af.iter().any(|a| a == ".") } else { f.split(';').any(|t| af.iter().any(|a| a == t)) };
                 if !pass { continue; }
             }
-            if self.include.is_some() || self.exclude.is_some() {
-                if let Some(rec) = parse_vcf_line(&line) {
-                    if let Some(e) = &self.include {
-                        if !e.eval(&rec).map(|r| r.pass_site).unwrap_or(true) { continue; }
-                    }
-                    if let Some(e) = &self.exclude {
-                        if e.eval(&rec).map(|r| r.pass_site).unwrap_or(false) { continue; }
-                    }
+            if (self.include.is_some() || self.exclude.is_some())
+                && let Some(rec) = parse_vcf_line(&line) {
+                    if let Some(e) = &self.include
+                        && !e.eval(&rec).map(|r| r.pass_site).unwrap_or(true) { continue; }
+                    if let Some(e) = &self.exclude
+                        && e.eval(&rec).map(|r| r.pass_site).unwrap_or(false) { continue; }
                 }
-            }
             if let Some(site) = Site::parse(&line, contigs) {
                 self.next = Some(site);
                 return Ok(());

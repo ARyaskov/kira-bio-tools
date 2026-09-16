@@ -55,6 +55,7 @@ impl Genotype {
         })
     }
 
+    #[allow(clippy::inherent_to_string)]
     pub fn to_string(&self) -> String {
         let sep = if self.phased { "|" } else { "/" };
         self.alleles

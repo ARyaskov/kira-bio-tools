@@ -420,11 +420,10 @@ impl BinIndex {
                         bin = bin_parent(bin);
                     }
                 }
-                if found.is_none() {
-                    if let Some(e) = r.bins.get(&0) {
+                if found.is_none()
+                    && let Some(e) = r.bins.get(&0) {
                         found = Some(e.loffset);
                     }
-                }
                 found.unwrap_or(0)
             }
         };
@@ -447,14 +446,13 @@ impl BinIndex {
         chunks.sort_unstable();
         let mut merged: Vec<(u64, u64)> = Vec::with_capacity(chunks.len());
         for (s, e) in chunks {
-            if let Some(last) = merged.last_mut() {
-                if s <= last.1 || (s >> 16) == (last.1 >> 16) {
+            if let Some(last) = merged.last_mut()
+                && (s <= last.1 || (s >> 16) == (last.1 >> 16)) {
                     if e > last.1 {
                         last.1 = e;
                     }
                     continue;
                 }
-            }
             merged.push((s, e));
         }
         merged

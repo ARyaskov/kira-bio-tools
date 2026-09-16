@@ -67,11 +67,10 @@ impl StreamingBam {
                 for r in reader.records() {
                     let rec = r.with_context(|| format!("read BAM record from {}", path.display()))?;
                     let Some(mut lr) = build_live_from_bam_with(&rec, &|rg| resolver(rg)) else { continue };
-                    if let Some(h) = hook.as_mut() {
-                        if !h(&mut lr, &names) {
+                    if let Some(h) = hook.as_mut()
+                        && !h(&mut lr, &names) {
                             continue;
                         }
-                    }
                     if tx.send(lr).is_err() {
                         break;
                     }

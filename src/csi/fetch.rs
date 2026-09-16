@@ -152,12 +152,11 @@ impl IndexedVcfReader {
         chunks.sort_unstable();
         let mut merged: Vec<(u64, u64)> = Vec::with_capacity(chunks.len());
         for (s, e) in chunks {
-            if let Some(m) = merged.last_mut() {
-                if s >> 16 <= m.1 >> 16 {
+            if let Some(m) = merged.last_mut()
+                && s >> 16 <= m.1 >> 16 {
                     m.1 = m.1.max(e);
                     continue;
                 }
-            }
             merged.push((s, e));
         }
         Some((merged, max_end))

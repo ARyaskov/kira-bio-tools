@@ -270,11 +270,10 @@ impl<T: TransitionFn> Hmm<T> {
                 self.vprob_tmp[j] /= vnorm;
             }
             std::mem::swap(&mut self.vprob, &mut self.vprob_tmp);
-            if let Some(s) = &mut self.snapshot {
-                if sites[i] == s.snap_at_pos {
+            if let Some(s) = &mut self.snapshot
+                && sites[i] == s.snap_at_pos {
                     s.vit_prob.copy_from_slice(&self.vprob);
                 }
-            }
         }
         let mut iptr = 0usize;
         for i in 1..ns {
@@ -328,12 +327,11 @@ impl<T: TransitionFn> Hmm<T> {
             for j in 0..ns {
                 self.fwd[(i + 1) * ns + j] /= norm;
             }
-            if let Some(s) = &mut self.snapshot {
-                if sites[i] == s.snap_at_pos {
+            if let Some(s) = &mut self.snapshot
+                && sites[i] == s.snap_at_pos {
                     s.fwd_prob
                         .copy_from_slice(&self.fwd[(i + 1) * ns..(i + 2) * ns]);
                 }
-            }
         }
         let mut prev_pos = sites[n - 1];
         for i in 0..n {
@@ -453,9 +451,7 @@ impl<T: TransitionFn> Hmm<T> {
                             / norm;
                 }
             }
-            for j in 0..ns {
-                self.fwd[row + j] = fwd_bwd[j];
-            }
+            self.fwd[row..row + ns].copy_from_slice(&fwd_bwd[..ns]);
             std::mem::swap(&mut self.bwd, &mut self.bwd_tmp);
         }
         for j in 0..ns {

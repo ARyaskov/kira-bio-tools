@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use fxhash::FxHashMap;
+use crate::fx::FxHashMap;
 use memchr::memchr;
 
 use crate::util::Region;
@@ -134,12 +134,11 @@ impl RegionSet {
             v.sort_unstable();
             let mut merged: Vec<(u32, u32)> = Vec::with_capacity(v.len());
             for r in v.drain(..) {
-                if let Some(last) = merged.last_mut() {
-                    if r.0 <= last.1.saturating_add(1) {
+                if let Some(last) = merged.last_mut()
+                    && r.0 <= last.1.saturating_add(1) {
                         last.1 = last.1.max(r.1);
                         continue;
                     }
-                }
                 merged.push(r);
             }
             *v = merged;

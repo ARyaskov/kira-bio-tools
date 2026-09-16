@@ -150,7 +150,7 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
     }
     postproc.match_tags = columns.iter()
         .filter_map(|c| {
-            let s = c.trim().trim_start_matches(|ch| ch == '+' || ch == '-' || ch == '=');
+            let s = c.trim().trim_start_matches(['+', '-', '=']);
             let key = s.strip_prefix("INFO/").unwrap_or(s);
             if key.is_empty() || key == "CHROM" || key == "POS" || key == "ID" || key == "REF" || key == "ALT" || key == "QUAL" || key == "FILTER" || key == "~ID" { None }
             else { Some(key.to_string()) }
@@ -1030,11 +1030,10 @@ fn should_rebuild_ani(source: &Path, ani: &Path, columns: Option<&str>) -> Resul
         .with_context(|| format!("Failed to stat annotation source {:?}", source))?;
     let ani_meta =
         std::fs::metadata(ani).with_context(|| format!("Failed to stat ANI index {:?}", ani))?;
-    if let (Ok(src_time), Ok(ani_time)) = (source_meta.modified(), ani_meta.modified()) {
-        if src_time > ani_time {
+    if let (Ok(src_time), Ok(ani_time)) = (source_meta.modified(), ani_meta.modified())
+        && src_time > ani_time {
             return Ok(true);
         }
-    }
     if source.extension().and_then(|e| e.to_str()) == Some("tab") {
         return Ok(!ani_meta_matches(source, ani, columns, &source_meta)?);
     }

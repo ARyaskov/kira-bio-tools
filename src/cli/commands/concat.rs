@@ -107,13 +107,12 @@ pub fn cmd_concat(args: ConcatArgs) -> Result<()> {
     }
     sink.finish()?;
 
-    if let (Some(kind_s), Some(out)) = (args.write_index.as_deref(), args.output.as_deref()) {
-        if matches!(kind, OutputKind::VcfGz(_) | OutputKind::Bcf(_)) && out != Path::new("-") {
+    if let (Some(kind_s), Some(out)) = (args.write_index.as_deref(), args.output.as_deref())
+        && matches!(kind, OutputKind::VcfGz(_) | OutputKind::Bcf(_)) && out != Path::new("-") {
             let (ik, ext) = if kind_s == "tbi" { (crate::csi::IndexKind::Tbi, "tbi") } else { (crate::csi::IndexKind::Csi, "csi") };
             let idx = PathBuf::from(format!("{}.{}", out.display(), ext));
             crate::csi::build_index(out, &idx, ik, None).with_context(|| format!("-W: write {}", idx.display()))?;
         }
-    }
     Ok(())
 }
 
@@ -196,9 +195,8 @@ fn concat_streaming(inputs: &[PathBuf], headers: &[String], ctx: &Ctx<'_>, sink:
         let mut first_in_file = true;
         while let Some(line) = r.read_line()? {
             if line.is_empty() || line.as_bytes()[0] == b'#' { continue; }
-            if let Some(rf) = ctx.region {
-                if !rf.line_passes_mode(&line, ctx.regions_overlap) { continue; }
-            }
+            if let Some(rf) = ctx.region
+                && !rf.line_passes_mode(&line, ctx.regions_overlap) { continue; }
             if first_in_file {
                 first_in_file = false;
                 if let (Some((c, pos)), Some((lr, lp))) = (record_key(&line), last) {
@@ -227,12 +225,11 @@ fn concat_streaming(inputs: &[PathBuf], headers: &[String], ctx: &Ctx<'_>, sink:
 fn chrom_order(p: &Path) -> Result<Vec<String>> {
     let is_bcf = is_bcf_file(p).unwrap_or(false);
     let index = crate::csi::find_index_for(p).and_then(|ip| crate::csi::BinIndex::load(&ip).ok());
-    if !is_bcf {
-        if let Some(idx) = &index {
+    if !is_bcf
+        && let Some(idx) = &index {
             let names: Vec<String> = idx.names().to_vec();
             if !names.is_empty() { return Ok(names); }
         }
-    }
     let mut r = UnifiedVcfReader::open(p).with_context(|| format!("open {:?}", p))?;
     let headers = r.header()?;
     if is_bcf {
@@ -275,22 +272,19 @@ fn concat_sorted(inputs: &[PathBuf], ctx: &Ctx<'_>, sink: &mut VcfSink) -> Resul
     let fetch = |p: &Path, chrom: &str| -> Result<Vec<(u32, String, String, u32, String)>> {
         let mut out = Vec::new();
         let mut push = |line: &str| {
-            if let Some(rf) = ctx.region {
-                if !rf.line_passes_mode(line, ctx.regions_overlap) { return; }
-            }
-            if let Some((c, pos, refa, alt)) = line_site(line) {
-                if c == chrom {
+            if let Some(rf) = ctx.region
+                && !rf.line_passes_mode(line, ctx.regions_overlap) { return; }
+            if let Some((c, pos, refa, alt)) = line_site(line)
+                && c == chrom {
                     let vt = record_type(&refa, &alt);
                     out.push((pos, refa, alt, vt, line.to_string()));
                 }
-            }
         };
-        if crate::csi::find_index_for(p).is_some() {
-            if let Ok(mut ir) = crate::csi::IndexedVcfReader::open(p) {
+        if crate::csi::find_index_for(p).is_some()
+            && let Ok(mut ir) = crate::csi::IndexedVcfReader::open(p) {
                 ir.query(chrom, 1, u32::MAX, |line| { push(line); Ok(true) })?;
                 return Ok(out);
             }
-        }
         let mut r = UnifiedVcfReader::open(p).with_context(|| format!("open {:?}", p))?;
         let _ = r.header()?;
         while let Some(line) = r.read_line()? {
@@ -370,9 +364,8 @@ impl LReader {
         if self.peek.is_some() || self.done { return Ok(()); }
         while let Some(line) = self.reader.read_line()? {
             if line.is_empty() || line.as_bytes()[0] == b'#' { continue; }
-            if let Some(rf) = ctx.region {
-                if !rf.line_passes_mode(&line, ctx.regions_overlap) { continue; }
-            }
+            if let Some(rf) = ctx.region
+                && !rf.line_passes_mode(&line, ctx.regions_overlap) { continue; }
             let Some((chrom, pos, refa, alt)) = line_site(&line) else { continue };
             self.peek = Some(LLine { chrom, pos, refa, alt, text: line });
             return Ok(());
@@ -664,15 +657,14 @@ fn concat_ligate(inputs_all: &[PathBuf], args: &ConcatArgs, samples: &[String], 
                 .min()
                 .map(|(_, p, c)| (c, p))
             else { break };
-            if let Some((sc, sp)) = &seek {
-                if *sc == chrom && *sp > pos {
+            if let Some((sc, sp)) = &seek
+                && *sc == chrom && *sp > pos {
                     // Records starting before the seek position are skipped (bcftools seek semantics).
                     for r in readers.iter_mut() {
                         if r.peek.as_ref().is_some_and(|l| l.chrom == chrom && l.pos == pos) { r.peek = None; }
                     }
                     continue;
                 }
-            }
             seek = None;
             // Open the next file once its first position is reached; it joins this position.
             while ifname < inputs.len() && start_pos[ifname].is_some_and(|s| pos >= s) {

@@ -571,7 +571,13 @@ cargo test
 ```
 
 Rust unit tests live beside the code (included from `tests/unit/`), with
-end-to-end pipeline tests in `tests/*.rs`.
+end-to-end pipeline tests in `tests/*.rs`. `tests/unit/props.rs` holds
+proptest property tests for the parsers and formatters that face untrusted
+input (float rendering, record canonicalisation, BCF round trips, tabix and
+genotype parsing never panic). The crate builds on stable Rust
+(`rust-version` in `Cargo.toml`); CI runs `cargo clippy --all-targets -D
+warnings` under the default lint set, with the few structural lints the code
+does not follow listed at the top of `src/lib.rs`.
 
 Alongside them are **404** bcftools comparison fixtures, grouped per command in
 `tests/<mode>/testN`. Each fixture contains:

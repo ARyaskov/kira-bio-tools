@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use fxhash::FxHashMap;
+use crate::fx::FxHashMap;
 use memchr::memchr;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -193,7 +193,7 @@ fn parse_id_token(s: &str) -> (String, usize) {
     }
     if end == 0 { return (String::new(), 0); }
     if bytes.get(end) == Some(&b'/')
-        && bytes.get(end + 1).map_or(false, |b| b.is_ascii_alphanumeric() || *b == b'_')
+        && bytes.get(end + 1).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
     {
         let mut p = end + 1;
         while p < bytes.len() && (bytes[p].is_ascii_alphanumeric() || bytes[p] == b'_') {
@@ -224,12 +224,11 @@ pub fn apply_to_header(headers: Vec<String>, opts: &HeaderOptions<'_>) -> Vec<St
             chrom_line = Some(h);
             continue;
         }
-        if let Some(rest) = h.strip_prefix("##contig=") {
-            if let Some(rmap) = opts.rename_chrs {
+        if let Some(rest) = h.strip_prefix("##contig=")
+            && let Some(rmap) = opts.rename_chrs {
                 out.push(format!("##contig={}", rewrite_contig_id(rest, rmap)));
                 continue;
             }
-        }
         if let Some(line) = filter_header_line(&h, opts) {
             out.push(line);
         }
@@ -237,11 +236,10 @@ pub fn apply_to_header(headers: Vec<String>, opts: &HeaderOptions<'_>) -> Vec<St
     for extra in opts.extra_header_lines {
         if !out.iter().any(|h| h == extra) { out.push(extra.clone()); }
     }
-    if !opts.no_version {
-        if let Some(v) = opts.version_line {
+    if !opts.no_version
+        && let Some(v) = opts.version_line {
             out.push(v.to_string());
         }
-    }
     if let Some(m) = opts.mark_sites {
         let line = format!(
             "##INFO=<ID={},Number=0,Type=Flag,Description=\"Site is {} in -a file\">",
@@ -266,12 +264,11 @@ fn rewrite_contig_id(rest: &str, rmap: &FxHashMap<String, String>) -> String {
     if let Some(body) = rest.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
         let mut parts: Vec<String> = Vec::new();
         for kv in split_top_commas(body) {
-            if let Some(rest) = kv.strip_prefix("ID=") {
-                if let Some(new) = rmap.get(rest) {
+            if let Some(rest) = kv.strip_prefix("ID=")
+                && let Some(new) = rmap.get(rest) {
                     parts.push(format!("ID={}", new));
                     continue;
                 }
-            }
             parts.push(kv.to_string());
         }
         format!("<{}>", parts.join(","))
@@ -305,9 +302,8 @@ fn split_top_commas(s: &str) -> Vec<&str> {
 fn filter_header_line(h: &str, opts: &HeaderOptions<'_>) -> Option<String> {
     let kind_id = parse_struct_header(h);
     if let Some((kind, id)) = kind_id {
-        if let Some(rm) = opts.remove {
-            if remove_drops_header(rm, kind, id) { return None; }
-        }
+        if let Some(rm) = opts.remove
+            && remove_drops_header(rm, kind, id) { return None; }
         if let Some(ren) = opts.rename_annots {
             let map = match kind { "INFO" => &ren.info, "FORMAT" => &ren.format, "FILTER" => &ren.filter, _ => return Some(h.to_string()) };
             if let Some(new) = map.get(id) {
@@ -321,8 +317,8 @@ fn filter_header_line(h: &str, opts: &HeaderOptions<'_>) -> Option<String> {
 fn parse_struct_header(h: &str) -> Option<(&str, &str)> {
     let kind = if let Some(rest) = h.strip_prefix("##INFO=<") { ("INFO", rest) }
         else if let Some(rest) = h.strip_prefix("##FORMAT=<") { ("FORMAT", rest) }
-        else if let Some(rest) = h.strip_prefix("##FILTER=<") { ("FILTER", rest) }
-        else { return None; };
+        else {
+            let rest = h.strip_prefix("##FILTER=<")?; ("FILTER", rest) };
     let body = kind.1.strip_suffix('>')?;
     let id_part = body.strip_prefix("ID=")?;
     let end = id_part.find(',').unwrap_or(id_part.len());
@@ -442,12 +438,11 @@ pub fn process_record_cols(
         }
     }
 
-    if let Some(t) = &pp.set_id {
-        if !t.fill_only_missing || id == "." || id.is_empty() {
+    if let Some(t) = &pp.set_id
+        && (!t.fill_only_missing || id == "." || id.is_empty()) {
             let new = render_id_template(t, chrom, cols_borrow[1], cols_borrow[3], cols_borrow[4], &id, &info);
             if new != id { id = new; modified = true; }
         }
-    }
 
     if let Some(m) = &pp.mark_sites {
         let detected = if !pp.match_tags.is_empty() && !(info == "." || info.is_empty()) {
@@ -470,13 +465,12 @@ pub fn process_record_cols(
         }
     }
 
-    if let Some(keep) = &pp.samples_keep {
-        if !samples.is_empty() {
+    if let Some(keep) = &pp.samples_keep
+        && !samples.is_empty() {
             let filtered: Vec<String> = keep.iter().filter_map(|&i| samples.get(i).cloned()).collect();
             samples = filtered;
             modified = true;
         }
-    }
 
     if let Some(ren) = &pp.rename_annots {
         if !ren.info.is_empty() {
@@ -640,9 +634,8 @@ pub fn read_samples_file<P: AsRef<Path>>(p: P) -> Result<(Vec<String>, bool)> {
         let line = line?;
         let t = line.trim();
         if t.is_empty() || t.starts_with('#') { continue; }
-        if i == 0 {
-            if let Some(rest) = t.strip_prefix('^') { inverse = true; names.push(rest.to_string()); continue; }
-        }
+        if i == 0
+            && let Some(rest) = t.strip_prefix('^') { inverse = true; names.push(rest.to_string()); continue; }
         names.push(t.to_string());
     }
     Ok((names, inverse))

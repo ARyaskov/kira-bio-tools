@@ -57,11 +57,10 @@ pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
     }
 
     let mut handle = |rec: &crate::vcf::VcfRecord| -> Result<()> {
-        if let Some(tf) = &target_filter {
-            if !tf.record_passes(&rec.chrom, rec.pos, &rec.ref_allele, &rec.alt, 0) {
+        if let Some(tf) = &target_filter
+            && !tf.record_passes(&rec.chrom, rec.pos, &rec.ref_allele, &rec.alt, 0) {
                 return Ok(());
             }
-        }
         let eval = filter_engine.eval(rec)?;
         let site_pass = if let Some(ps) = eval.pass_samples.as_ref() {
             sample_idx.iter().any(|&i| ps.get(i).copied().unwrap_or(false))
@@ -98,11 +97,10 @@ pub fn cmd_query(args: QueryCompatArgs) -> Result<()> {
         })?;
     } else {
         while let Some(rec) = reader.next_record()? {
-            if let Some(rf) = &region_filter {
-                if !rf.record_passes(&rec.chrom, rec.pos, &rec.ref_allele, &rec.alt, 1) {
+            if let Some(rf) = &region_filter
+                && !rf.record_passes(&rec.chrom, rec.pos, &rec.ref_allele, &rec.alt, 1) {
                     continue;
                 }
-            }
             handle(&rec)?;
         }
     }
@@ -115,7 +113,7 @@ fn record_all_missing(rec: &crate::vcf::VcfRecord) -> bool {
     if rec.samples.is_empty() { return false; }
     rec.samples.iter().all(|s| {
         let gt = s.split(':').next().unwrap_or(".");
-        gt.split(|c| c == '/' || c == '|').all(|a| a == "." || a.is_empty())
+        gt.split(['/', '|']).all(|a| a == "." || a.is_empty())
     })
 }
 
@@ -324,9 +322,8 @@ fn parse_query_args(args: &[String]) -> Result<QueryConfig> {
     cfg.regions_overlap = 1;
     let mut i = 0usize;
     let load_expr = |s: &str| -> String {
-        if let Some(path) = s.strip_prefix('@') {
-            if let Ok(c) = std::fs::read_to_string(path) { return c.trim().to_string(); }
-        }
+        if let Some(path) = s.strip_prefix('@')
+            && let Ok(c) = std::fs::read_to_string(path) { return c.trim().to_string(); }
         s.to_string()
     };
     while i < args.len() {
@@ -677,11 +674,10 @@ impl QueryFormatContext {
             return Ok(".".to_string());
         }
         if tok == "VKX" {
-            if let Some(rs) = info_value(&rec.info, "RS").and_then(|v| v.parse::<u32>().ok()) {
-                if let Some(v) = known_vkx_for_rs(rs) {
+            if let Some(rs) = info_value(&rec.info, "RS").and_then(|v| v.parse::<u32>().ok())
+                && let Some(v) = known_vkx_for_rs(rs) {
                     return Ok(v.to_string());
                 }
-            }
             if let Some(vk) = variantkey_hex(rec) {
                 return Ok(vk);
             }
@@ -732,11 +728,10 @@ impl QueryFormatContext {
             let gt = sample.and_then(|i| sample_fmt(rec, i, "GT"));
             return Ok(format_tgt(gt, &rec.ref_allele, &rec.alt));
         }
-        if let Some(i) = sample {
-            if let Some(v) = sample_fmt(rec, i, tok) {
+        if let Some(i) = sample
+            && let Some(v) = sample_fmt(rec, i, tok) {
                 return Ok(self.format_text(tok, v));
             }
-        }
         if let Some(v) = info_value(&rec.info, tok) {
             return Ok(self.info_text(tok, v));
         }
@@ -870,11 +865,10 @@ fn parse_qparts(format: &str) -> Result<Vec<QPart>> {
 
 fn info_value<'a>(info: &'a str, key: &str) -> Option<&'a str> {
     for item in info.split(';') {
-        if let Some((k, v)) = item.split_once('=') {
-            if k == key {
+        if let Some((k, v)) = item.split_once('=')
+            && k == key {
                 return Some(v);
             }
-        }
     }
     None
 }
@@ -882,14 +876,12 @@ fn info_value<'a>(info: &'a str, key: &str) -> Option<&'a str> {
 fn parse_indexed_info(tok: &str) -> Option<(String, usize)> {
     for open in &['[', '{'] {
         let close = if *open == '[' { ']' } else { '}' };
-        if let Some((key, rest)) = tok.split_once(*open) {
-            if let Some(r) = rest.strip_suffix(close) {
-                if let Ok(i) = r.parse::<usize>() {
+        if let Some((key, rest)) = tok.split_once(*open)
+            && let Some(r) = rest.strip_suffix(close)
+                && let Ok(i) = r.parse::<usize>() {
                     let k = key.strip_prefix("INFO/").unwrap_or(key).to_string();
                     return Some((k, i));
                 }
-            }
-        }
     }
     None
 }

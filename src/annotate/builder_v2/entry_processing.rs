@@ -1,4 +1,4 @@
-use fxhash::FxHashMap;
+use crate::fx::FxHashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::annotate::structs::ani::{AniEntry, make_variant_key};

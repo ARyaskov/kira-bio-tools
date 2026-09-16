@@ -318,11 +318,10 @@ fn read_fai(path: &Path) -> Result<Vec<(String, u64)>> {
             continue;
         }
         let mut it = line.split('\t');
-        if let (Some(name), Some(len)) = (it.next(), it.next()) {
-            if let Ok(v) = len.parse::<u64>() {
+        if let (Some(name), Some(len)) = (it.next(), it.next())
+            && let Ok(v) = len.parse::<u64>() {
                 out.push((name.to_string(), v));
             }
-        }
     }
     Ok(out)
 }
@@ -513,11 +512,10 @@ fn merge_headers_for_bcf(
         }
     }
 
-    if !fileformat_done {
-        if let Some(ff) = new_fileformat {
+    if !fileformat_done
+        && let Some(ff) = new_fileformat {
             out.insert(0, ff);
         }
-    }
 
     for line in new_meta {
         if let Some(k) = extract_meta_key(line) {

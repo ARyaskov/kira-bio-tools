@@ -277,7 +277,7 @@ pub fn glocal_with(
             let z = f[idx(i, u)] * b[idx(i, u)];
             if z > max {
                 max = z;
-                max_k = ((k as i32 - 1) << 2) | 0;
+                max_k = (k as i32 - 1) << 2;
             }
             sum += z;
             let z = f[idx(i, u + 1)] * b[idx(i, u + 1)];

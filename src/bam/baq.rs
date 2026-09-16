@@ -217,7 +217,7 @@ pub fn nm_weight_qual(seq: &[u8], qual: &mut [u8], cigar: &[(Kind, u32)], ref_se
                 for i in 0..l {
                     if q_pos + i < seq.len() && r_pos + i < ref_seq.len() {
                         alen += 1;
-                        if seq[q_pos + i].to_ascii_uppercase() != ref_seq[r_pos + i].to_ascii_uppercase() {
+                        if !seq[q_pos + i].eq_ignore_ascii_case(&ref_seq[r_pos + i]) {
                             mism += 1;
                         }
                     }

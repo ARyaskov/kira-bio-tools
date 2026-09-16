@@ -133,11 +133,10 @@ const PASSTHROUGH_COMMANDS: &[&str] = &["convert", "idx", "index", "polysomy", "
 fn main() -> Result<()> {
     let mut argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let sub = argv.get(1).and_then(|s| s.to_str()).map(str::to_string);
-    if let Some(sub) = sub {
-        if !PASSTHROUGH_COMMANDS.contains(&sub.as_str()) {
+    if let Some(sub) = sub
+        && !PASSTHROUGH_COMMANDS.contains(&sub.as_str()) {
             argv.retain(|a| a != "--");
         }
-    }
     // One thread budget for every pool in the process (BGZF, rayon, BAM decoding).
     let argv_utf8: Vec<String> = argv.iter().filter_map(|a| a.to_str().map(str::to_string)).collect();
     if let Some(n) = kira_bio_tools::threads::budget_from_argv(&argv_utf8) {

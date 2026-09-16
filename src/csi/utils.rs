@@ -101,7 +101,7 @@ pub fn depth_for(min_shift: u8, max_len: u64) -> u8 {
 /// Levels used by tabix for a CSI of `min_shift` (htslib `tbx_index`).
 pub fn tabix_depth_for(min_shift: u8) -> u8 {
     const TBX_MAX_SHIFT: u8 = 31;
-    (TBX_MAX_SHIFT.saturating_sub(min_shift) + 2) / 3
+    TBX_MAX_SHIFT.saturating_sub(min_shift).div_ceil(3)
 }
 
 #[cfg(test)]

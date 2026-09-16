@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -20,10 +20,9 @@ use crate::vcf::{UnifiedVcfReader, VcfReader, VcfRecord, VcfRecordRef};
 pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
     let total_start = Instant::now();
     eprintln!(
-        "filter start backend={} gpu_requested={} gpu_active={}",
+        "filter start backend={} gpu_requested={} gpu_active=false",
         filter_arch::arch_name(),
-        args.gpu,
-        false
+        args.gpu
     );
     let (expr, exclude) = resolve_expr(args);
 
@@ -168,13 +167,12 @@ pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
             let gap_start = Instant::now();
             let var_type = variant_type_flags(&out_rec);
             let ref_len = record_rlen(&out_rec);
-            if let Some(last) = buffer.back() {
-                if last.rec.chrom != out_rec.chrom {
+            if let Some(last) = buffer.back()
+                && last.rec.chrom != out_rec.chrom {
                     let flush_start = Instant::now();
                     flush_buffer(&mut buffer, &mut writer, filter_name.is_some())?;
                     stats.flush_time += flush_start.elapsed();
                 }
-            }
             buffer.push_back(BufferedRecord {
                 rec: out_rec,
                 var_type,
@@ -251,11 +249,10 @@ fn maybe_write_index(out: Option<&std::path::Path>, kind: Option<&str>, output_t
 }
 
 fn load_expr(s: &str) -> String {
-    if let Some(path) = s.strip_prefix('@') {
-        if let Ok(c) = std::fs::read_to_string(path) {
+    if let Some(path) = s.strip_prefix('@')
+        && let Ok(c) = std::fs::read_to_string(path) {
             return c.trim().to_string();
         }
-    }
     s.to_string()
 }
 
@@ -315,7 +312,7 @@ fn apply_filter_mode(
             return Some(name.to_string());
         }
         let mut parts: Vec<&str> = current.split(';').filter(|s| !s.is_empty()).collect();
-        if !parts.iter().any(|s| *s == name) {
+        if !parts.contains(&name) {
             parts.push(name);
         }
         return Some(parts.join(";"));
@@ -382,11 +379,10 @@ fn extract_filter_id(line: &str) -> Option<String> {
 
 fn ensure_filter_header(headers: &mut Vec<String>, id: &str, desc: &str) {
     for h in headers.iter() {
-        if let Some(existing) = extract_filter_id(h) {
-            if existing == id {
+        if let Some(existing) = extract_filter_id(h)
+            && existing == id {
                 return;
             }
-        }
     }
 
     let line = format!(
@@ -617,11 +613,7 @@ fn run_parallel_filter(
         let mask = mask.clone();
         let filter_name = filter_name.clone();
         let handle = std::thread::spawn(move || {
-            loop {
-                let (idx, rec) = match rx.recv() {
-                    Ok(v) => v,
-                    Err(_) => break,
-                };
+            while let Ok((idx, rec)) = rx.recv() {
                 stats.records.fetch_add(1, Ordering::Relaxed);
                 let eval_start = Instant::now();
                 let res = match engine.eval(&rec) {
@@ -881,14 +873,12 @@ fn mask_pass_kbi(mask: &KbiMask, rec: &VcfRecord) -> bool {
             None => return !mask.negate,
         };
         for (_pos, offset) in hits {
-            if let Ok(line) = fetcher.fetch(offset) {
-                if let Some((mchr, mbeg, mend)) = parse_mask_vcf_bounds(line, mask.overlap) {
-                    if mchr == rec.chrom && mbeg <= end && mend >= beg {
+            if let Ok(line) = fetcher.fetch(offset)
+                && let Some((mchr, mbeg, mend)) = parse_mask_vcf_bounds(line, mask.overlap)
+                    && mchr == rec.chrom && mbeg <= end && mend >= beg {
                         hit = true;
                         break;
                     }
-                }
-            }
         }
     }
     if mask.negate { hit } else { !hit }
@@ -994,7 +984,7 @@ fn try_load_kbi_mask(
     Ok(None)
 }
 
-fn resolve_kbi_data_path(kbi_path: &PathBuf) -> (PathBuf, bool) {
+fn resolve_kbi_data_path(kbi_path: &Path) -> (PathBuf, bool) {
     let base = kbi_path.with_extension("");
     if base.exists() {
         return (base, true);
@@ -1005,7 +995,7 @@ fn resolve_kbi_data_path(kbi_path: &PathBuf) -> (PathBuf, bool) {
             return (gz, true);
         }
     }
-    (kbi_path.clone(), false)
+    (kbi_path.to_path_buf(), false)
 }
 
 const VCF_SNP: u32 = 1;
@@ -1087,11 +1077,10 @@ fn buffered_filters(
         let mut last_to: Option<u32> = None;
         let mut idx = 0usize;
         for rec in buffer.iter_mut() {
-            if let Some(last) = last_to {
-                if last < rec.rec.pos.saturating_sub(1) {
+            if let Some(last) = last_to
+                && last < rec.rec.pos.saturating_sub(1) {
                     break;
                 }
-            }
             k_flush += 1;
             if rec.var_type & VCF_INDEL == 0 {
                 idx += 1;
@@ -1119,12 +1108,11 @@ fn buffered_filters(
                     continue;
                 }
                 let qual = rec.rec.qual.parse::<f64>().unwrap_or(f64::NEG_INFINITY);
-                if qual > 0.0 {
-                    if qual > max_qual {
+                if qual > 0.0
+                    && qual > max_qual {
                         max_qual = qual;
                         best_idx = Some(i);
                     }
-                }
                 if max_qual == f64::NEG_INFINITY {
                     let ac = first_alt_ac(&rec.rec).unwrap_or(i64::MIN);
                     if ac > max_ac {
@@ -1216,7 +1204,7 @@ fn add_filter_tag(current: &str, tag: &str) -> String {
         return tag.to_string();
     }
     let mut parts: Vec<&str> = current.split(';').filter(|s| !s.is_empty()).collect();
-    if !parts.iter().any(|s| *s == tag) {
+    if !parts.contains(&tag) {
         parts.push(tag);
     }
     parts.join(";")
@@ -1327,7 +1315,7 @@ fn variant_type_for_alt(ref_bytes: &[u8], alt_bytes: &[u8]) -> u32 {
 }
 
 fn eq_icase(a: u8, b: u8) -> bool {
-    a.to_ascii_uppercase() == b.to_ascii_uppercase()
+    a.eq_ignore_ascii_case(&b)
 }
 
 fn set_genotypes(
@@ -1391,7 +1379,7 @@ fn gt_ploidy(gt: &str) -> usize {
     if gt == "." {
         return 1;
     }
-    gt.split(|c| c == '/' || c == '|').count()
+    gt.split(['/', '|']).count()
 }
 
 fn build_gt(ploidy: usize, sep: char, allele: &str) -> String {
@@ -1488,7 +1476,7 @@ fn compute_ac_an_from_gts(rec: &VcfRecord, alt_count: usize) -> (i64, Vec<i64>) 
             continue;
         }
         let gt = parts[gt_index];
-        for allele in gt.split(|c| c == '/' || c == '|') {
+        for allele in gt.split(['/', '|']) {
             if allele == "." || allele.is_empty() {
                 continue;
             }

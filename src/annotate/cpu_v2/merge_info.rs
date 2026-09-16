@@ -1,4 +1,4 @@
-use fxhash::FxHashMap;
+use crate::fx::FxHashMap;
 use indexmap::IndexMap;
 use std::collections::HashMap;
 
@@ -165,13 +165,11 @@ pub fn merge_info_fields(
     let mut bundle_ref_values: HashMap<&str, &str> = HashMap::new();
     for lookup in &bundle_lookups {
         for field in lookup.by_key.iter(lookup.bundle) {
-            if let Some(field_number) = field_meta.get(&field.key) {
-                if *field_number == FieldNumber::R {
-                    if let Some(ref_val) = field.values.first() {
+            if let Some(field_number) = field_meta.get(&field.key)
+                && *field_number == FieldNumber::R
+                    && let Some(ref_val) = field.values.first() {
                         bundle_ref_values.insert(field.key.as_str(), ref_val.as_str());
                     }
-                }
-            }
         }
     }
 
@@ -179,15 +177,12 @@ pub fn merge_info_fields(
         (multiallelic_lookup.as_ref(), multiallelic_bundle.as_ref())
     {
         for field in by_key.iter(bundle) {
-            if let Some(field_number) = field_meta.get(&field.key) {
-                if *field_number == FieldNumber::R
+            if let Some(field_number) = field_meta.get(&field.key)
+                && *field_number == FieldNumber::R
                     && !bundle_ref_values.contains_key(field.key.as_str())
-                {
-                    if let Some(ref_val) = field.values.first() {
+                    && let Some(ref_val) = field.values.first() {
                         bundle_ref_values.insert(field.key.as_str(), ref_val.as_str());
                     }
-                }
-            }
         }
     }
 
@@ -230,11 +225,10 @@ pub fn merge_info_fields(
         };
         let field_type = infer_field_type(src_key);
         let is_integer = field_type == "Integer";
-        if is_integer {
-            if let Some(idx) = existing_parts.iter().position(|v| is_missing_value(v)) {
+        if is_integer
+            && let Some(idx) = existing_parts.iter().position(|v| is_missing_value(v)) {
                 existing_parts.truncate(idx + 1);
             }
-        }
 
         if field_number == FieldNumber::Zero {
             let has_flag = bundle_lookups
@@ -286,12 +280,10 @@ pub fn merge_info_fields(
             for lookup in &bundle_lookups {
                 if let Some(joined) =
                     read_record_value_from_bundle(lookup.bundle, &lookup.by_key, src_raw, src_key)
-                {
-                    if !is_missing_value(&joined) {
+                    && !is_missing_value(&joined) {
                         annotated_val = Some(joined);
                         break;
                     }
-                }
             }
 
             let has_annotation_data = annotated_val
@@ -315,11 +307,10 @@ pub fn merge_info_fields(
                 false,
             );
 
-            if should_transfer {
-                if let Some(val) = annotated_val {
+            if should_transfer
+                && let Some(val) = annotated_val {
                     dirty |= insert_if_changed(&mut info_map, dst_key, val);
                 }
-            }
 
             continue;
         }
@@ -470,15 +461,14 @@ fn collect_annotations_for_field<'a>(
 
             match field_number {
                 FieldNumber::A => {
-                    if let Some(val) = field.values.first() {
-                        if lookup.vcf_idx < values.len() {
+                    if let Some(val) = field.values.first()
+                        && lookup.vcf_idx < values.len() {
                             values[lookup.vcf_idx] = Some(val.as_str());
                         }
-                    }
                 }
                 FieldNumber::R => {
-                    if let Some(alt_val) = field.values.get(1) {
-                        if lookup.vcf_idx < values.len() {
+                    if let Some(alt_val) = field.values.get(1)
+                        && lookup.vcf_idx < values.len() {
                             values[lookup.vcf_idx] = Some(alt_val.as_str());
 
                             if debug {
@@ -490,14 +480,12 @@ fn collect_annotations_for_field<'a>(
                                 );
                             }
                         }
-                    }
                 }
                 _ => {
-                    if let Some(val) = field.values.first() {
-                        if lookup.vcf_idx < values.len() {
+                    if let Some(val) = field.values.first()
+                        && lookup.vcf_idx < values.len() {
                             values[lookup.vcf_idx] = Some(val.as_str());
                         }
-                    }
                 }
             }
         }
@@ -715,11 +703,11 @@ pub(crate) fn parse_existing_info(info: &str) -> IndexMap<String, String> {
     let bytes = info.as_bytes();
     map.reserve(8);
 
-    let mut iter = memchr::memchr2_iter(b';', b'=', bytes);
+    let iter = memchr::memchr2_iter(b';', b'=', bytes);
     let mut pair_start: usize = 0;
     let mut eq_pos: Option<usize> = None;
 
-    while let Some(idx) = iter.next() {
+    for idx in iter {
         match bytes[idx] {
             b'=' => {
                 if eq_pos.is_none() {

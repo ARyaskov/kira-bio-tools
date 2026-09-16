@@ -104,12 +104,11 @@ pub fn cmd_merge(args: MergeArgs) -> Result<()> {
     for (k, r) in &rules.rules {
         if matches!(r, InfoRule::Join) {
             for l in all_meta_lines.iter_mut() {
-                if l.starts_with(&format!("##INFO=<ID={k},")) && !l.contains("Number=.") {
-                    if let Some(s) = l.find("Number=") {
+                if l.starts_with(&format!("##INFO=<ID={k},")) && !l.contains("Number=.")
+                    && let Some(s) = l.find("Number=") {
                         let e = l[s..].find(',').map(|x| s + x).unwrap_or(l.len());
                         l.replace_range(s..e, "Number=.");
                     }
-                }
             }
         }
     }
@@ -345,7 +344,7 @@ fn types_compatible(mode: MergeMode, sel_types: u32, sel_ref: &str, sel_alts: &[
     for a in rec.alt.split(',') {
         if allele_type(&rec.refa, a).ty == VT_REF { continue; }
         let p = pad_alt(a, &rec.refa, &long_ref);
-        if sel_padded.iter().any(|s| *s == p) { return true; }
+        if sel_padded.contains(&p) { return true; }
     }
     false
 }
@@ -446,9 +445,8 @@ fn stage_round(bufs: &[Vec<Record>], done: &[Vec<bool>], mode: MergeMode) -> Vec
             if selected_type & reader_types[i] != 0 && selected_type & t == 0 { continue; }
             if selected_type & reader_types[i] == 0 && t & M_REF != 0 { cur = Some(j); break; }
             if selected_type == M_REF { cur = Some(j); break; }
-            if let Some(k) = icnt {
-                if rec_alleles(i, j).contains(&k) { cur = Some(j); break; }
-            }
+            if let Some(k) = icnt
+                && rec_alleles(i, j).contains(&k) { cur = Some(j); break; }
         }
         if cur.is_none() && mode != MergeMode::None_ && mode != MergeMode::Id {
             for &j in &cand[i] {
@@ -503,9 +501,8 @@ impl Source {
                 return Ok(());
             };
             if line.is_empty() || line.as_bytes()[0] == b'#' { continue; }
-            if let Some(rf) = &self.region_filter {
-                if !rf.line_passes_mode(&line, self.regions_overlap) { continue; }
-            }
+            if let Some(rf) = &self.region_filter
+                && !rf.line_passes_mode(&line, self.regions_overlap) { continue; }
             let rec = parse_record(line, contigs)?;
             if is_gvcf_block(&rec) {
                 self.gvcf_block = Some(rec.clone());
@@ -768,13 +765,12 @@ fn merge_group(group: &[(usize, Record)], readers: &[Source], ctx: &MergeCtx<'_>
                     .collect();
                 sample_cols[global] = out_vals.join(":");
                 sample_filled[global] = true;
-            } else if ctx.missing_to_ref {
-                if let Some(gi) = gt_idx {
+            } else if ctx.missing_to_ref
+                && let Some(gi) = gt_idx {
                     let mut parts: Vec<&str> = sample_cols[global].split(':').map(|_| ".").collect();
                     parts[gi] = "0/0";
                     sample_cols[global] = parts.join(":");
                 }
-            }
         }
     }
 
@@ -864,12 +860,11 @@ fn find_common_format(group: &[(usize, Record)]) -> String {
             if !keys.iter().any(|x| x == k) { keys.push(k.to_string()); }
         }
     }
-    if let Some(p) = keys.iter().position(|k| k == "GT") {
-        if p != 0 {
+    if let Some(p) = keys.iter().position(|k| k == "GT")
+        && p != 0 {
             let gt = keys.remove(p);
             keys.insert(0, gt);
         }
-    }
     keys.join(":")
 }
 
@@ -947,8 +942,8 @@ fn merge_info(
     }
 
     // AN/AC follow the merged genotypes.
-    if let (Some(gi), false) = (gt_idx, ctx.rules.keep_ac_an) {
-        if hdr.info.contains_key("AC") || hdr.info.contains_key("AN") {
+    if let (Some(gi), false) = (gt_idx, ctx.rules.keep_ac_an)
+        && (hdr.info.contains_key("AC") || hdr.info.contains_key("AN")) {
             let mut ac = vec![0u32; n_new];
             let mut an = 0u32;
             let mut any_gt = false;
@@ -968,7 +963,6 @@ fn merge_info(
                 }
             }
         }
-    }
     join_info(&items)
 }
 

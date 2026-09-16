@@ -178,9 +178,7 @@ fn annotate_batch_simd(
     (0..batch.len())
         .into_par_iter()
         .map(|i| {
-            let Some(line_keys) = line_keys[i].as_ref() else {
-                return None;
-            };
+            let line_keys = line_keys[i].as_ref()?;
             let (s, e) = line_ranges[i];
             annotate_line_with_mph_hints(
                 batch.line(i),
@@ -203,7 +201,7 @@ fn annotate_batch_simd(
 #[allow(unused_imports)]
 use annotate_line as _scalar_annotate_line;
 
-fn annotated_line<'a>(batch: &'a AnnotatedBatch, idx: usize) -> &'a str {
+fn annotated_line(batch: &AnnotatedBatch, idx: usize) -> &str {
     if let Some(Some(line)) = batch.output.get(idx) {
         return line.as_str();
     }

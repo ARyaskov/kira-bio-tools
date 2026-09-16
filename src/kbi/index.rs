@@ -164,16 +164,16 @@ impl KbiIndex {
         }
         // Sections are not necessarily 8-aligned inside the file: decode by value.
         let keys: Vec<u64> = mmap[keys_start..keys_end]
-            .chunks_exact(8)
-            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<8>().0.iter()
+            .map(|c| u64::from_le_bytes(*c))
             .collect();
         let offsets: Vec<u64> = mmap[offsets_start..offsets_end]
-            .chunks_exact(8)
-            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<8>().0.iter()
+            .map(|c| u64::from_le_bytes(*c))
             .collect();
         let slot_to_idx: Vec<u32> = mmap[slots_start..slots_end]
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>().0.iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect();
 
         let mut contigs = ContigDict::new();

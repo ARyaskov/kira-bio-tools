@@ -55,16 +55,14 @@ pub fn cmd_consensus(args: ConsensusArgs) -> Result<()> {
             continue;
         }
         let Some(rec) = parse_vcf_line(&line) else { bail!("cannot parse VCF line: {line}") };
-        if let Some(rf) = &regions {
-            if !rf.record_passes(&rec.chrom, rec.pos, &rec.ref_allele, &rec.alt, args.regions_overlap) {
+        if let Some(rf) = &regions
+            && !rf.record_passes(&rec.chrom, rec.pos, &rec.ref_allele, &rec.alt, args.regions_overlap) {
                 continue;
             }
-        }
-        if let Some(e) = &engine {
-            if !e.eval(&rec)?.pass_site {
+        if let Some(e) = &engine
+            && !e.eval(&rec)?.pass_site {
                 continue;
             }
-        }
         vcf.entry(rec.chrom.clone()).or_default().push(Rec::from_record(&rec));
     }
     let contigs: HashMap<String, ()> = hdr.contigs.names().iter().map(|n| (n.clone(), ())).collect();
@@ -151,7 +149,7 @@ fn resolve_samples(
         (None, Some(f)) => {
             let text = std::fs::read_to_string(f).with_context(|| format!("read {}", f.display()))?;
             for line in text.lines() {
-                let s = line.trim().split_whitespace().next().unwrap_or("");
+                let s = line.split_whitespace().next().unwrap_or("");
                 if !s.is_empty() {
                     wanted.push(s.strip_prefix('^').inspect(|_| negate = true).unwrap_or(s).to_string());
                 }

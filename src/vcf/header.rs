@@ -1,6 +1,6 @@
 //! VCF header metadata: contig dictionary, INFO/FORMAT field definitions, samples.
 
-use fxhash::FxHashMap;
+use crate::fx::FxHashMap;
 
 /// Contig name <-> id table in header order. Ids are dense `u32`, assigned in
 /// order of declaration; contigs seen in data but absent from the header are

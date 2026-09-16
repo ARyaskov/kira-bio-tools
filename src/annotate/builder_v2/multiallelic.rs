@@ -33,17 +33,13 @@ pub fn split_info_for_allele(
                         result.push(field.to_string());
                     }
                 }
-                Some(FieldNumber::R) => {
-                    if parts.len() == num_alts + 1 {
-                        if let Some(ref_val) = parts.first() {
-                            if let Some(alt_val) = parts.get(alt_idx + 1) {
+                Some(FieldNumber::R)
+                    if parts.len() == num_alts + 1 => {
+                        if let Some(ref_val) = parts.first()
+                            && let Some(alt_val) = parts.get(alt_idx + 1) {
                                 result.push(format!("{}={},{}", key, ref_val, alt_val));
                             }
-                        }
-                    } else {
-                        result.push(field.to_string());
                     }
-                }
                 _ => {
                     result.push(field.to_string());
                 }
@@ -55,7 +51,7 @@ pub fn split_info_for_allele(
 
     let final_result = result.join(";");
 
-    if debug && result.len() > 0 {
+    if debug && !result.is_empty() {
         eprintln!(
             "[split_info] alt_idx={} num_alts={} -> '{}'",
             alt_idx,

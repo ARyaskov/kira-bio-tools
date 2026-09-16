@@ -18,6 +18,12 @@ pub struct BundleTimingAccum {
     samples_ns: AtomicU64,
 }
 
+impl Default for BundleTimingAccum {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BundleTimingAccum {
     pub fn new() -> Self {
         Self {
@@ -648,15 +654,13 @@ pub fn annotate_line_with_mph_hints<'a>(
         None
     };
 
-    let Some(chr_id) = line_keys.chr_id else {
-        return None;
-    };
+    let chr_id = line_keys.chr_id?;
     let ref_allele = parsed.ref_allele;
     let pos = parsed.pos;
     let ref_hash = fast_hash64(ref_allele.as_bytes());
 
-    if entry_info_fast && alt_alleles.len() == 1 {
-        if let Some(entry_idx) =
+    if entry_info_fast && alt_alleles.len() == 1
+        && let Some(entry_idx) =
             exact_mph_entry_idx(ani, chr_id, pos, ref_allele, alt_alleles[0], mph_hits)
         {
             let info = ani
@@ -667,7 +671,6 @@ pub fn annotate_line_with_mph_hints<'a>(
             }
             return Some(build_info_replaced_line(line, parsed, &info));
         }
-    }
 
     let mut bundles = Vec::with_capacity(alt_alleles.len());
     for (vcf_idx, alt) in alt_alleles.iter().enumerate() {
@@ -990,8 +993,8 @@ fn annotate_record_with_alts(
         base_info,
         bundles,
         &None,
-        &parsed.ref_allele,
-        &alt_alleles,
+        parsed.ref_allele,
+        alt_alleles,
         field_meta,
         column_modes,
     );
@@ -1011,32 +1014,28 @@ fn annotate_record_with_alts(
             }
             match dst_ref.to_ascii_uppercase().as_str() {
                 "ID" => {
-                    if let Some(db_id) = read_scalar_from_bundle(bundle, src_ref) {
-                        if let Some(v) = merge_scalar_field(&new_id, &db_id, *mode, ";") {
+                    if let Some(db_id) = read_scalar_from_bundle(bundle, src_ref)
+                        && let Some(v) = merge_scalar_field(&new_id, &db_id, *mode, ";") {
                             new_id = v;
                         }
-                    }
                 }
                 "QUAL" => {
-                    if let Some(db_qual) = read_scalar_from_bundle(bundle, src_ref) {
-                        if let Some(v) = merge_scalar_field(&new_qual, &db_qual, *mode, ";") {
+                    if let Some(db_qual) = read_scalar_from_bundle(bundle, src_ref)
+                        && let Some(v) = merge_scalar_field(&new_qual, &db_qual, *mode, ";") {
                             new_qual = v;
                         }
-                    }
                 }
                 "FILTER" => {
-                    if let Some(db_filter) = read_scalar_from_bundle(bundle, src_ref) {
-                        if let Some(v) = merge_scalar_field(&new_filter, &db_filter, *mode, ";") {
+                    if let Some(db_filter) = read_scalar_from_bundle(bundle, src_ref)
+                        && let Some(v) = merge_scalar_field(&new_filter, &db_filter, *mode, ";") {
                             new_filter = v;
                         }
-                    }
                 }
                 "ALT" => {
-                    if let Some(db_alt) = read_scalar_from_bundle(bundle, src_ref) {
-                        if let Some(v) = merge_scalar_field(&new_alt, &db_alt, *mode, ",") {
+                    if let Some(db_alt) = read_scalar_from_bundle(bundle, src_ref)
+                        && let Some(v) = merge_scalar_field(&new_alt, &db_alt, *mode, ",") {
                             new_alt = v;
                         }
-                    }
                 }
                 "FMT" | "FORMAT" => {
                     let (fmt, samples) = merge_all_format(
@@ -1070,13 +1069,13 @@ fn annotate_record_with_alts(
     }
 
     let mut out = String::new();
-    out.push_str(&parsed.chrom);
+    out.push_str(parsed.chrom);
     out.push('\t');
     out.push_str(&parsed.pos.to_string());
     out.push('\t');
     out.push_str(&new_id);
     out.push('\t');
-    out.push_str(&parsed.ref_allele);
+    out.push_str(parsed.ref_allele);
     out.push('\t');
     out.push_str(&new_alt);
     out.push('\t');
@@ -1092,7 +1091,7 @@ fn annotate_record_with_alts(
             out.push_str(&fmt);
             for s in &new_samples {
                 out.push('\t');
-                out.push_str(&s);
+                out.push_str(s);
             }
         }
     } else if let Some(tail) = raw_tail {
@@ -1232,32 +1231,28 @@ fn annotate_record_with_alts_and_info(
             }
             match dst_ref.to_ascii_uppercase().as_str() {
                 "ID" => {
-                    if let Some(db_id) = read_scalar_from_bundle(bundle, src_ref) {
-                        if let Some(v) = merge_scalar_field(&new_id, &db_id, *mode, ";") {
+                    if let Some(db_id) = read_scalar_from_bundle(bundle, src_ref)
+                        && let Some(v) = merge_scalar_field(&new_id, &db_id, *mode, ";") {
                             new_id = v;
                         }
-                    }
                 }
                 "QUAL" => {
-                    if let Some(db_qual) = read_scalar_from_bundle(bundle, src_ref) {
-                        if let Some(v) = merge_scalar_field(&new_qual, &db_qual, *mode, ";") {
+                    if let Some(db_qual) = read_scalar_from_bundle(bundle, src_ref)
+                        && let Some(v) = merge_scalar_field(&new_qual, &db_qual, *mode, ";") {
                             new_qual = v;
                         }
-                    }
                 }
                 "FILTER" => {
-                    if let Some(db_filter) = read_scalar_from_bundle(bundle, src_ref) {
-                        if let Some(v) = merge_scalar_field(&new_filter, &db_filter, *mode, ";") {
+                    if let Some(db_filter) = read_scalar_from_bundle(bundle, src_ref)
+                        && let Some(v) = merge_scalar_field(&new_filter, &db_filter, *mode, ";") {
                             new_filter = v;
                         }
-                    }
                 }
                 "ALT" => {
-                    if let Some(db_alt) = read_scalar_from_bundle(bundle, src_ref) {
-                        if let Some(v) = merge_scalar_field(&new_alt, &db_alt, *mode, ",") {
+                    if let Some(db_alt) = read_scalar_from_bundle(bundle, src_ref)
+                        && let Some(v) = merge_scalar_field(&new_alt, &db_alt, *mode, ",") {
                             new_alt = v;
                         }
-                    }
                 }
                 "FMT" | "FORMAT" => {
                     let (fmt, samples) = merge_all_format(
@@ -1291,13 +1286,13 @@ fn annotate_record_with_alts_and_info(
     }
 
     let mut out = String::new();
-    out.push_str(&parsed.chrom);
+    out.push_str(parsed.chrom);
     out.push('\t');
     out.push_str(&parsed.pos.to_string());
     out.push('\t');
     out.push_str(&new_id);
     out.push('\t');
-    out.push_str(&parsed.ref_allele);
+    out.push_str(parsed.ref_allele);
     out.push('\t');
     out.push_str(&new_alt);
     out.push('\t');
@@ -1313,7 +1308,7 @@ fn annotate_record_with_alts_and_info(
             out.push_str(&fmt);
             for s in &new_samples {
                 out.push('\t');
-                out.push_str(&s);
+                out.push_str(s);
             }
         }
     } else if let Some(tail) = raw_tail {
@@ -1495,11 +1490,10 @@ fn merge_all_format(
         } else {
             sample_map.get(input_idx).and_then(|v| *v)
         };
-        if let Some(idx) = db_idx {
-            if idx >= bundle.format_samples.len() {
+        if let Some(idx) = db_idx
+            && idx >= bundle.format_samples.len() {
                 db_idx = None;
             }
-        }
 
         if debug {
             eprintln!("[FORMAT] Sample {} -> DB idx {:?}", input_idx, db_idx);
@@ -1548,7 +1542,7 @@ fn merge_all_format(
                             }
                         }
                     };
-                    if v.map_or(true, |s| s.is_empty()) && key_idx != MISSING_IDX {
+                    if v.is_none_or(|s| s.is_empty()) && key_idx != MISSING_IDX {
                         v = if let Some(raw_vals) = raw_split.as_ref() {
                             raw_vals.get(key_idx).copied()
                         } else {
@@ -1571,7 +1565,7 @@ fn merge_all_format(
                         }
                     }
                 };
-                if input_val.map_or(true, |s| s.is_empty()) && key_idx != MISSING_IDX {
+                if input_val.is_none_or(|s| s.is_empty()) && key_idx != MISSING_IDX {
                     input_val = if let Some(raw_vals) = raw_split.as_ref() {
                         raw_vals.get(key_idx).copied()
                     } else {
@@ -1632,23 +1626,20 @@ fn merge_format_value_str(
     let input_missing = is_missing_value(input_val);
     let db_missing = is_missing_value(db_val);
 
-    if mode.replace_all {
-        if !db_missing || mode.carry_over_missing {
+    if mode.replace_all
+        && (!db_missing || mode.carry_over_missing) {
             return db_val.to_string();
         }
-    }
 
-    if mode.replace_missing && input_missing {
-        if !db_missing || mode.carry_over_missing {
+    if mode.replace_missing && input_missing
+        && (!db_missing || mode.carry_over_missing) {
             return db_val.to_string();
         }
-    }
 
-    if mode.replace_non_missing && !input_missing {
-        if !db_missing || mode.carry_over_missing {
+    if mode.replace_non_missing && !input_missing
+        && (!db_missing || mode.carry_over_missing) {
             return db_val.to_string();
         }
-    }
 
     if mode.set_or_append {
         return merge_scalar_field(input_val, db_val, mode, ",")

@@ -370,16 +370,14 @@ fn passes(side: &Side, rec: &Rec) -> bool {
         return true;
     }
     let Some(v) = parse_vcf_line(&rec.line) else { return true };
-    if let Some(e) = &side.include {
-        if !e.eval(&v).map(|r| r.pass_site).unwrap_or(true) {
+    if let Some(e) = &side.include
+        && !e.eval(&v).map(|r| r.pass_site).unwrap_or(true) {
             return false;
         }
-    }
-    if let Some(e) = &side.exclude {
-        if e.eval(&v).map(|r| r.pass_site).unwrap_or(false) {
+    if let Some(e) = &side.exclude
+        && e.eval(&v).map(|r| r.pass_site).unwrap_or(false) {
             return false;
         }
-    }
     true
 }
 
@@ -484,12 +482,11 @@ impl Gtcheck {
                 if q.0 == 0 { continue; }
                 self.score(i, &q, &g, &hwe_dsg, &mut diff);
             }
-            if let Some(ds) = self.ds.as_mut() {
-                if !diff.is_empty() {
+            if let Some(ds) = self.ds.as_mut()
+                && !diff.is_empty() {
                     let r = self.rng.next();
                     ds.push((diff.len() as u32, qry.chrom.clone(), qry.pos, r, diff));
                 }
-            }
             return;
         }
         let qsel = &qside.sel;
@@ -560,8 +557,8 @@ pub fn cmd_gtcheck(args: GtcheckArgs) -> Result<()> {
         None
     };
     let keep = |line: &str| -> bool {
-        if let Some(r) = &region { if !r.line_passes_mode(line, args.regions_overlap) { return false; } }
-        if let Some(t) = &target { if !t.line_passes_mode(line, args.targets_overlap) { return false; } }
+        if let Some(r) = &region && !r.line_passes_mode(line, args.regions_overlap) { return false; }
+        if let Some(t) = &target && !t.line_passes_mode(line, args.targets_overlap) { return false; }
         true
     };
 
@@ -630,7 +627,7 @@ pub fn cmd_gtcheck(args: GtcheckArgs) -> Result<()> {
         let mut v: Vec<(usize, usize)> = Vec::new();
         if let Some(p) = &args.pairs {
             let toks: Vec<&str> = p.split(',').map(|t| t.trim()).filter(|t| !t.is_empty()).collect();
-            if toks.len() % 2 != 0 { bail!("Expected even number of comma-delimited samples with -p"); }
+            if !toks.len().is_multiple_of(2) { bail!("Expected even number of comma-delimited samples with -p"); }
             for c in toks.chunks(2) {
                 v.push((find(&qside.samples, c[0], &qry_path)?, find(gnames, c[1], gpath)?));
             }
@@ -640,7 +637,7 @@ pub fn cmd_gtcheck(args: GtcheckArgs) -> Result<()> {
                 let l = line?;
                 let t = l.trim();
                 if t.is_empty() || t.starts_with('#') { continue; }
-                let mut it = t.split(|c: char| c == '\t' || c == ',' || c == ' ').filter(|x| !x.is_empty());
+                let mut it = t.split(['\t', ',', ' ']).filter(|x| !x.is_empty());
                 let (Some(a), Some(b)) = (it.next(), it.next()) else { bail!("Could not parse {}: {}", f.display(), t) };
                 v.push((find(&qside.samples, a, &qry_path)?, find(gnames, b, gpath)?));
             }

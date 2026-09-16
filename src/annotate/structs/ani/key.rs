@@ -19,7 +19,7 @@
 
 use std::hash::Hasher;
 
-use fxhash::FxHasher;
+use crate::fx::FxHasher;
 
 /// Composes a deterministic, non-commutative `u64` key from a variant
 /// coordinate. Used identically at build and lookup time — any change here

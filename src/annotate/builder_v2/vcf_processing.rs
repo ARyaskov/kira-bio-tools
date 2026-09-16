@@ -1,5 +1,5 @@
 use anyhow::Result;
-use fxhash::FxHashMap;
+use crate::fx::FxHashMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -53,8 +53,7 @@ pub fn process_vcf_line_multiallelic_simd(
     let mut samples = parsed.samples.clone();
     if expected_sample_count > 0
         && (samples.len() != expected_sample_count || samples.iter().any(|s| s.is_empty()))
-    {
-        if let Ok(line_str) = std::str::from_utf8(line) {
+        && let Ok(line_str) = std::str::from_utf8(line) {
             let cols: Vec<&str> = line_str.split('\t').collect();
             if cols.len() > 9 {
                 samples = cols[9..].to_vec();
@@ -62,7 +61,6 @@ pub fn process_vcf_line_multiallelic_simd(
                 samples.clear();
             }
         }
-    }
 
     let format_ofs = if samples.is_empty() {
         ANI_STR_NONE

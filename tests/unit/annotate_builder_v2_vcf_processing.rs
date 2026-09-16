@@ -4,7 +4,7 @@
     use crate::annotate::structs::ani::{ANI_STR_NONE, ContigDict};
     use crate::annotate::structs::bundle::FieldNumber;
     use crate::util::read_cstring;
-    use fxhash::FxHashMap;
+    use crate::fx::FxHashMap;
     use std::collections::HashMap;
     use std::sync::atomic::AtomicUsize;
 

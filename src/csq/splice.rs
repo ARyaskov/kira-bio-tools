@@ -119,13 +119,13 @@ pub(crate) fn splice_build_hap(sp: &mut Splice, tref: &[u8], tr: &Tscript, beg: 
     let vpos = sp.vcf.pos as i64;
     let vrlen = sp.vcf.rlen as i64;
     let valen = sp.vcf.alen as i64;
-    let roff: i64;
-    if rbeg < vpos {
+    
+    let roff: i64 = if rbeg < vpos {
         sp.kref.extend(sub(tref, pad + rbeg - tr_beg, vpos - rbeg));
-        roff = 0;
+        0
     } else {
-        roff = rbeg - vpos;
-    }
+        rbeg - vpos
+    };
     if roff < vrlen && (sp.kref.len() as i64) < rlen {
         let mut l = vrlen - roff;
         if l > rlen - sp.kref.len() as i64 {
@@ -234,11 +234,10 @@ fn region_and_donor_after(
     };
     if region_beg && sp.ref_end > ex_end.wrapping_add(n2) {
         sp.csq |= CSQ_SPLICE_REGION;
-        if let Some((r, a)) = refalt {
-            if strncmp_eq(r, a, n8 as usize) {
+        if let Some((r, a)) = refalt
+            && strncmp_eq(r, a, n8 as usize) {
                 sp.csq |= CSQ_SYNONYMOUS_VARIANT;
             }
-        }
     }
     let donor = if strict_region {
         sp.ref_beg < ex_end.wrapping_add(n2)
@@ -278,11 +277,10 @@ fn region_and_donor_before(
     };
     if region_end && sp.ref_beg < ex_beg.wrapping_sub(n2) {
         sp.csq |= CSQ_SPLICE_REGION;
-        if let Some((r, a)) = refalt {
-            if strncmp_eq(r, a, n8 as usize) {
+        if let Some((r, a)) = refalt
+            && strncmp_eq(r, a, n8 as usize) {
                 sp.csq |= CSQ_SYNONYMOUS_VARIANT;
             }
-        }
     }
     let donor = if inclusive {
         sp.ref_end >= ex_beg.wrapping_sub(n2)
@@ -470,8 +468,8 @@ fn shifted_del_synonymous(
     let pad = N_REF_PAD as i64;
     let pos = sp.vcf.pos as i64;
     let ptr_vcf = &sp.vcf.ref_[alt_len as usize..];
-    let ref_off: i64;
-    if tr.strand == STRAND_REV {
+    
+    let ref_off: i64 = if tr.strand == STRAND_REV {
         let vcf_ref_end = pos + ref_len - 1;
         let tr_ref_end = tr.end as i64 + pad;
         if vcf_ref_end + ndel > tr_ref_end {
@@ -485,7 +483,7 @@ fn shifted_del_synonymous(
             }
             return false;
         }
-        ref_off = pad + (vcf_ref_end + 1 - tr.beg as i64);
+        pad + (vcf_ref_end + 1 - tr.beg as i64)
     } else {
         let vcf_block_beg = pos + ref_len - 2 * ndel;
         if vcf_block_beg < 0 {
@@ -502,8 +500,8 @@ fn shifted_del_synonymous(
             }
             return false;
         }
-        ref_off = pad + vcf_block_beg - tr.beg as i64;
-    }
+        pad + vcf_block_beg - tr.beg as i64
+    };
     let mut i = 0i64;
     while c_at(ptr_vcf, i) != 0 && c_at(ptr_vcf, i) == c_at(tref, ref_off + i) {
         i += 1;
@@ -655,7 +653,7 @@ fn splice_csq_del(
         if (sp.ref_beg.wrapping_add(1) < ex_beg && sp.ref_end >= ex_beg)
             || (sp.ref_beg.wrapping_add(1) < ex_end && sp.ref_end >= ex_end)
         {
-            sp.csq |= if sp.ref_end.wrapping_sub(sp.ref_beg) % 3 != 0 {
+            sp.csq |= if !sp.ref_end.wrapping_sub(sp.ref_beg).is_multiple_of(3) {
                 CSQ_FRAMESHIFT_VARIANT
             } else {
                 CSQ_INFRAME_DELETION

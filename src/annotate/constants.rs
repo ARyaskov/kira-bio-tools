@@ -1,6 +1,6 @@
 //! Pipeline sizing constants.
 
-pub const BATCH_SIZE: usize = 1000_000;
+pub const BATCH_SIZE: usize = 1_000_000;
 pub const CHANNEL_DEPTH: usize = 8;
 pub const OUTPUT_BUFFER_SIZE: usize = 512 * 1024 * 1024;
 pub const ESTIMATE_BYTES_PER_LINE: usize = 200;

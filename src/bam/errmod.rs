@@ -115,6 +115,7 @@ impl Drand48 {
         Self(z & ((1u64 << 48) - 1))
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> f64 {
         self.0 = (self.0.wrapping_mul(0x5DEE_CE66D).wrapping_add(0xB)) & ((1u64 << 48) - 1);
         self.0 as f64 / (1u64 << 48) as f64
@@ -147,7 +148,7 @@ impl ErrorModel {
 
     /// `errmod_cal`: phred-scaled genotype likelihoods `q[i * m + j]` over
     /// `m` base codes. `bases` is reordered (sorted, subsampled when deep).
-    pub fn cal(&self, bases: &mut Vec<u16>, m: usize, rng: &mut Drand48) -> Vec<f32> {
+    pub fn cal(&self, bases: &mut [u16], m: usize, rng: &mut Drand48) -> Vec<f32> {
         let mut q = vec![0.0f32; m * m];
         if bases.is_empty() || m == 0 || m > 16 {
             return q;
@@ -172,12 +173,7 @@ impl ErrorModel {
         for j in (0..n).rev() {
             let b = bases[j];
             let mut qv = (b >> 5) as usize;
-            if qv < 4 {
-                qv = 4;
-            }
-            if qv > 63 {
-                qv = 63;
-            }
+            qv = qv.clamp(4, 63);
             let k = (b & 0x1f) as usize;
             let kb = k & 0xf;
             let fkw = coef.fk[(w[k] as usize).min(255)];
@@ -227,7 +223,7 @@ impl ErrorModel {
     /// PLs for the genotypes over `alleles` (base codes in output allele
     /// order, VCF genotype order), min-normalised and capped at 255 like
     /// `bcf_call_combine`.
-    pub fn pls(&self, bases: &mut Vec<u16>, alleles: &[u8], rng: &mut Drand48) -> Vec<u32> {
+    pub fn pls(&self, bases: &mut [u16], alleles: &[u8], rng: &mut Drand48) -> Vec<u32> {
         let m = 1 + alleles.iter().copied().max().unwrap_or(0) as usize;
         let m = m.max(alleles.len()).min(16);
         let q = self.cal(bases, m, rng);

@@ -119,13 +119,13 @@ impl WindowSpiller {
             let id = (ref_id, w as u32);
             // Split the borrows: `dir` is read while `writers` is mutated.
             let Self { dir, writers, .. } = self;
-            if !writers.contains_key(&id) {
+            if let std::collections::btree_map::Entry::Vacant(e) = writers.entry(id) {
                 let path = window_path(dir, id);
                 let file = File::create(&path)
                     .with_context(|| format!("create window spill {}", path.display()))?;
                 let mut w = bam::io::Writer::new(BufWriter::with_capacity(1 << 20, file));
                 w.write_header(header).context("write spill header")?;
-                writers.insert(id, w);
+                e.insert(w);
             }
             writers
                 .get_mut(&id)

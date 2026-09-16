@@ -1,3 +1,18 @@
+// Structural lints this codebase deliberately does not follow: wide
+// signatures mirror bcftools' C functions, index loops keep ported numeric
+// code readable, and the k-way merges need their iterators dropped before
+// the loop body mutates the readers. Everything else clippy reports is fixed.
+#![allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::needless_range_loop,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::field_reassign_with_default,
+    clippy::while_let_loop,
+    clippy::single_match,
+    clippy::explicit_counter_loop
+)]
 
 pub mod af_file;
 pub mod align;
@@ -15,6 +30,7 @@ pub mod fasta;
 pub mod filter;
 pub mod hmm;
 pub mod filter_arch;
+pub mod fx;
 pub mod kbi;
 pub mod norm;
 pub mod regions;
@@ -31,3 +47,7 @@ pub use util::{ChrId, GenomicKey, Region, VcfFormat, chr_name_to_id, detect_form
 pub use vcf::{
     ContigDict, HeaderInfo, InfoParser, LineFetcher, VcfParser, VcfReader, VcfRecord, VcfSink, fetch_line,
 };
+
+#[cfg(test)]
+#[path = "../tests/unit/props.rs"]
+mod props;

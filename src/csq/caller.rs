@@ -356,13 +356,9 @@ fn tscript_init_ref(
         return Ok(seq.to_vec());
     }
     let mut out = Vec::with_capacity((tr_len + 2 * pad) as usize);
-    for _ in 0..(pad - pad_beg).max(0) {
-        out.push(b'N');
-    }
+    out.extend(std::iter::repeat_n(b'N', (pad - pad_beg).max(0) as usize));
     out.extend_from_slice(seq);
-    for _ in 0..(pad - pad_end).max(0) {
-        out.push(b'N');
-    }
+    out.extend(std::iter::repeat_n(b'N', (pad - pad_end).max(0) as usize));
     Ok(out)
 }
 
@@ -382,7 +378,7 @@ fn sanity_check_ref(aux: &TscriptAux, tr: &gff::Tscript, rec: &RecInfo) -> Resul
         if r == 0 || v == 0 {
             break;
         }
-        if r != v && r.to_ascii_uppercase() != v.to_ascii_uppercase() {
+        if r != v && !r.eq_ignore_ascii_case(&v) {
             bail!(
                 "Error: the fasta reference does not match the VCF REF allele at {}:{} .. fasta={} vcf={}",
                 rec.chrom,
@@ -618,8 +614,8 @@ impl Caller {
                 );
             }
         }
-        if let Some((_, ppos)) = &self.prev {
-            if *ppos > rec.pos {
+        if let Some((_, ppos)) = &self.prev
+            && *ppos > rec.pos {
                 bail!(
                     "Error: The file is not sorted, {}:{} comes before {}:{}",
                     rec.chrom,
@@ -628,7 +624,6 @@ impl Caller {
                     rec.pos + 1
                 );
             }
-        }
         let mut call_csq = true;
         if rec.n_allele() < 2 {
             call_csq = false;
@@ -640,11 +635,10 @@ impl Caller {
         } else if rec.alleles[1].starts_with('<') && !rec.alleles[1].starts_with("<INS") {
             call_csq = false;
         }
-        if call_csq {
-            if let Some(p) = filter_pass {
+        if call_csq
+            && let Some(p) = filter_pass {
                 call_csq = p;
             }
-        }
         if !call_csq {
             if self.out.is_text() {
                 return Ok(());
@@ -764,11 +758,10 @@ impl Caller {
                 continue;
             }
             let tr_end = self.gff.tscripts[tr_i].end;
-            if let Some(vbuf) = self.buf.get_mut(vb) {
-                if vbuf.keep_until < tr_end {
+            if let Some(vbuf) = self.buf.get_mut(vb)
+                && vbuf.keep_until < tr_end {
                     vbuf.keep_until = tr_end;
                 }
-            }
             ret = true;
             if self.aux[tr_i].is_none() {
                 let r = tscript_init_ref(&self.fasta, &self.opts, &self.gff, tr_i, &chr)?;
@@ -870,9 +863,9 @@ impl Caller {
                     continue;
                 }
                 let mut gt = [Some(g0), rec.gt(ismpl, 1)];
-                if ngts > 1 {
-                    if let Some(g1) = gt[1] {
-                        if g1.allele >= 0 && g0.allele != g1.allele {
+                if ngts > 1
+                    && let Some(g1) = gt[1]
+                        && g1.allele >= 0 && g0.allele != g1.allele {
                             if phase == Phase::Merge && g0.allele == 0 {
                                 gt[0] = Some(g1);
                             }
@@ -896,8 +889,6 @@ impl Caller {
                                 }
                             }
                         }
-                    }
-                }
                 for ihap in 0..ngts {
                     let Some(g) = gt[ihap] else { continue };
                     if g.allele < 0 {

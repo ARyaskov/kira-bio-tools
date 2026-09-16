@@ -360,7 +360,7 @@ pub(crate) fn hap_finalize(
             if strand == STRAND_FWD {
                 let mut ibeg: i64 = -1;
                 let mut i = 0usize;
-                while i + 1 <= is {
+                while i < is {
                     i += 1;
                     let n_dlen = aux.nodes[hap.stack[i].node].dlen;
                     dlen += n_dlen;

@@ -160,8 +160,8 @@ impl PriorFreqsSpec {
         match self {
             PriorFreqsSpec::Af(tag) => {
                 for kv in info.split(';') {
-                    if let Some((k, v)) = kv.split_once('=') {
-                        if k == tag {
+                    if let Some((k, v)) = kv.split_once('=')
+                        && k == tag {
                             let alts: Vec<f64> = v.split(',').filter_map(|s| s.parse().ok()).collect();
                             let mut af = vec![0.0f64; n_alleles];
                             let alt_sum: f64 = alts.iter().sum();
@@ -171,7 +171,6 @@ impl PriorFreqsSpec {
                             }
                             return Some(af);
                         }
-                    }
                 }
                 None
             }

@@ -57,8 +57,8 @@ fn load_field_metadata(ani: &AniIndex, debug: bool) -> Result<HashMap<String, Fi
             continue;
         }
 
-        if let Some(key) = extract_info_key(&line) {
-            if let Some(number) = extract_info_number(&line) {
+        if let Some(key) = extract_info_key(&line)
+            && let Some(number) = extract_info_number(&line) {
                 metadata.insert(key.clone(), number);
 
                 if debug {
@@ -68,7 +68,6 @@ fn load_field_metadata(ani: &AniIndex, debug: bool) -> Result<HashMap<String, Fi
                     );
                 }
             }
-        }
     }
 
     if debug {

@@ -49,7 +49,7 @@
         let fb = h.fwd_bwd_prob();
         // Row 0 is the initial distribution, row i+1 the posterior of site i.
         assert_eq!(&fb[..2], &[0.5, 0.5]);
-        assert!(fb[1 * 2] > 0.9);
+        assert!(fb[2] > 0.9);
         assert!(fb[6 * 2 + 1] > 0.9);
         for i in 1..=6 {
             assert!((fb[i * 2] + fb[i * 2 + 1] - 1.0).abs() < 1e-12);

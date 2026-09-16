@@ -56,11 +56,10 @@ pub fn cmd_samview(args: SamViewArgs) -> Result<()> {
         text_writer = Some(writer);
     }
 
-    if args.with_header || args.header_only {
-        if let Some(w) = text_writer.as_mut() {
+    if (args.with_header || args.header_only)
+        && let Some(w) = text_writer.as_mut() {
             write_text_header(w, &header)?;
         }
-    }
     if args.header_only { return finish(bam_writer, text_writer); }
 
     let region_filter = if use_index { None } else { parse_region(args.region.as_deref(), &header)? };
@@ -133,8 +132,8 @@ fn write_sam_record<W: Write>(w: &mut W, header: &sam::Header, rec: &bam::Record
             .unwrap_or_else(|| "*".to_string()),
         None => "*".to_string(),
     };
-    let pos = rec.alignment_start().transpose().ok().flatten().map(|p| usize::from(p)).unwrap_or(0);
-    let mapq = rec.mapping_quality().map(|m| u8::from(m)).unwrap_or(255);
+    let pos = rec.alignment_start().transpose().ok().flatten().map(usize::from).unwrap_or(0);
+    let mapq = rec.mapping_quality().map(u8::from).unwrap_or(255);
     let cigar = {
         let mut s = String::new();
         use noodles_sam::alignment::record::cigar::op::Kind;
@@ -155,7 +154,7 @@ fn write_sam_record<W: Write>(w: &mut W, header: &sam::Header, rec: &bam::Record
             .unwrap_or_else(|| "*".to_string()),
         None => "*".to_string(),
     };
-    let mpos = rec.mate_alignment_start().transpose().ok().flatten().map(|p| usize::from(p)).unwrap_or(0);
+    let mpos = rec.mate_alignment_start().transpose().ok().flatten().map(usize::from).unwrap_or(0);
     let isize_v = rec.template_length();
     let seq: Vec<u8> = rec.sequence().iter().collect();
     let qual_raw: Vec<u8> = rec.quality_scores().iter().collect();

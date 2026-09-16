@@ -1,5 +1,5 @@
 use anyhow::Result;
-use fxhash::FxHashMap;
+use crate::fx::FxHashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::entry_processing::{EntryEntry, insert_or_update_entry, make_position_key};
@@ -107,14 +107,13 @@ pub fn process_tab_line_multiallelic(
 
     let mut base_info_str = String::new();
 
-    if let Some(info_idx) = schema.info_start {
-        if let Some(info_str) = parts.get(info_idx) {
+    if let Some(info_idx) = schema.info_start
+        && let Some(info_str) = parts.get(info_idx) {
             let info_str = info_str.trim();
             if !info_str.is_empty() && info_str != "." {
                 base_info_str.push_str(info_str);
             }
         }
-    }
 
     for col in &schema.info_cols {
         if let Some(val_str) = parts.get(col.index) {

@@ -21,11 +21,10 @@ pub fn n_diploid_genotypes(n_alleles: usize) -> usize {
 fn inverse_map(n_new: usize, map: &AlleleMap) -> Vec<Option<usize>> {
     let mut inv = vec![None; n_new];
     for (old, new) in map.iter().enumerate() {
-        if let Some(j) = *new {
-            if j < n_new && inv[j].is_none() {
+        if let Some(j) = *new
+            && j < n_new && inv[j].is_none() {
                 inv[j] = Some(old);
             }
-        }
     }
     inv
 }
@@ -142,8 +141,8 @@ pub fn remap_info(info: &str, hdr: &HeaderInfo, n_old: usize, n_new: usize, map:
         match kv.split_once('=') {
             Some((k, v)) => {
                 let num = hdr.info_number(k);
-                if num.is_per_allele() {
-                    if let Some(nv) = remap_value(v, num, n_old, n_new, map) {
+                if num.is_per_allele()
+                    && let Some(nv) = remap_value(v, num, n_old, n_new, map) {
                         if nv.is_empty() {
                             // No alleles left for a per-ALT tag: drop it.
                             if out.ends_with(';') {
@@ -157,7 +156,6 @@ pub fn remap_info(info: &str, hdr: &HeaderInfo, n_old: usize, n_new: usize, map:
                         out.push_str(&nv);
                         continue;
                     }
-                }
                 out.push_str(kv);
             }
             None => out.push_str(kv),

@@ -86,7 +86,7 @@
         };
         let mut recs = Vec::new();
         for i in 0..2000u32 {
-            let gt = if i < 500 || i >= 1500 { "0/1" } else { "1/1" };
+            let gt = if !(500..1500).contains(&i) { "0/1" } else { "1/1" };
             recs.push(rec("1", 1000 + i * 1000, "G", ".", "GT", &[gt]));
         }
         let (out, stats) = run(opts, &recs);
@@ -99,11 +99,11 @@
         let beg: u32 = f[3].parse().unwrap();
         let end: u32 = f[4].parse().unwrap();
         assert!(
-            beg >= 1000 + 480 * 1000 && beg <= 1000 + 520 * 1000,
+            (1000 + 480 * 1000..=1000 + 520 * 1000).contains(&beg),
             "{rg:?}"
         );
         assert!(
-            end >= 1000 + 1480 * 1000 && end <= 1000 + 1520 * 1000,
+            (1000 + 1480 * 1000..=1000 + 1520 * 1000).contains(&end),
             "{rg:?}"
         );
         let st: Vec<&str> = out.lines().filter(|l| l.starts_with("ST\t")).collect();

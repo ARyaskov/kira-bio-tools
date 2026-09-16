@@ -11,7 +11,7 @@ pub use tab_processing::process_tab_line_multiallelic;
 pub use vcf_processing::process_vcf_line_multiallelic_simd;
 
 use anyhow::Result;
-use fxhash::FxHashMap;
+use crate::fx::FxHashMap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -80,7 +80,7 @@ pub fn build_ani_index_auto_v2(input: &Path, output: &Path) -> Result<()> {
         )?;
 
         count += processed;
-        if count > 0 && count % report_interval == 0 {
+        if count > 0 && count.is_multiple_of(report_interval) {
             report_progress(&total_variants, &entries_map, &duplicates_skipped);
         }
     }
@@ -200,7 +200,7 @@ pub fn build_ani_index_from_tab(input: &Path, output: &Path, columns: Option<&st
         )?;
 
         count += processed;
-        if count > 0 && count % report_interval == 0 {
+        if count > 0 && count.is_multiple_of(report_interval) {
             report_progress(&total_variants, &entries_map, &duplicates_skipped);
         }
     }
@@ -345,12 +345,11 @@ fn infer_number_from_data(
         let num_values = val.split(',').count();
         value_counts.push(num_values);
 
-        if let Some(alt_idx) = alt_idx {
-            if let Some(alt) = parts.get(alt_idx) {
+        if let Some(alt_idx) = alt_idx
+            && let Some(alt) = parts.get(alt_idx) {
                 let num_alts = alt.split(',').count();
                 alt_counts.push(num_alts);
             }
-        }
     }
 
     if value_counts.is_empty() {
@@ -412,11 +411,10 @@ fn extract_info_metadata(headers: &[String]) -> HashMap<String, FieldNumber> {
         if !h.starts_with("##INFO=") {
             continue;
         }
-        if let Some(key) = extract_info_key(h) {
-            if let Some(number) = extract_info_number(h) {
+        if let Some(key) = extract_info_key(h)
+            && let Some(number) = extract_info_number(h) {
                 meta.insert(key, number);
             }
-        }
     }
     meta
 }
@@ -427,11 +425,10 @@ fn extract_format_metadata(headers: &[String]) -> HashMap<String, FieldNumber> {
         if !h.starts_with("##FORMAT=") {
             continue;
         }
-        if let Some(key) = extract_info_key(h) {
-            if let Some(number) = extract_info_number(h) {
+        if let Some(key) = extract_info_key(h)
+            && let Some(number) = extract_info_number(h) {
                 meta.insert(key, number);
             }
-        }
     }
     meta
 }

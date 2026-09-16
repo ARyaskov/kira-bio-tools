@@ -9,7 +9,7 @@
 
 use std::borrow::Cow;
 
-use fxhash::FxHashSet;
+use crate::fx::FxHashSet;
 use memchr::{memchr, memchr_iter};
 
 use super::header::{FieldType, HeaderInfo};

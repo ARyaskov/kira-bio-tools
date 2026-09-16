@@ -74,7 +74,7 @@ pub fn apply_hmm_baq_to_reads_masked(
     {
         let n = reads.len().min(1000);
         let sum: usize = reads.iter().take(n).map(|r| r.seq().len()).sum();
-        crate::bam::baq::init_nm_profile(nm_weight, if n > 0 { sum / n } else { 0 });
+        crate::bam::baq::init_nm_profile(nm_weight, sum.checked_div(n).unwrap_or(0));
     }
 
     let no_pb = std::env::var("KIRA_BT_NO_PROGRESS").is_ok();
@@ -109,11 +109,10 @@ pub fn apply_hmm_baq_to_reads_masked(
             let batch_off = batch_idx * BATCH;
             for (i, lr) in batch.iter_mut().enumerate() {
                 let global = batch_off + i;
-                if let Some(mask) = needs {
-                    if !mask.get(global).copied().unwrap_or(true) {
+                if let Some(mask) = needs
+                    && !mask.get(global).copied().unwrap_or(true) {
                         continue;
                     }
-                }
                 baq_read(lr, ref_names, fasta, redo);
             }
             counter.fetch_add(batch.len() as u64, Ordering::Relaxed);
@@ -129,14 +128,13 @@ pub fn apply_hmm_baq_to_reads_masked(
 /// `redo` (`-E`). The reference window reaches a read length past both ends
 /// of the alignment, as `sam_prob_realn` may look that far.
 pub fn baq_read(lr: &mut LiveRead, ref_names: &[String], fasta: &impl FastaLike, redo: bool) {
-    if let Some(tag) = lr.bq_tag.take() {
-        if !redo {
+    if let Some(tag) = lr.bq_tag.take()
+        && !redo {
             let (_, qual) = lr.seq_qual_mut();
             if crate::bam::baq::apply_bq_tag(qual, &tag) {
                 return;
             }
         }
-    }
     let Some(chr) = ref_names.get(lr.ref_id) else { return };
     let span = ref_span(&lr.cigar_pairs);
     let ref_start = lr.ref_start;
@@ -370,15 +368,14 @@ impl BamReader {
 /// `chr`, `chr:pos` or `chr:beg-end` (1-based, inclusive; open end allowed).
 fn parse_region(s: &str) -> Result<(String, u32, u32)> {
     let s = s.trim();
-    if let Some((c, r)) = s.rsplit_once(':') {
-        if r.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+    if let Some((c, r)) = s.rsplit_once(':')
+        && r.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
             let num = |t: &str| crate::util::parse_coordinate(t).ok_or_else(|| anyhow::anyhow!("bad region {s:?}"));
             return match r.split_once('-') {
-                Some((b, e)) => Ok((c.to_string(), (num(b)? as u32).max(1), if e.is_empty() { u32::MAX } else { num(e)? as u32 })),
-                None => { let p = num(r)? as u32; Ok((c.to_string(), p.max(1), p)) }
+                Some((b, e)) => Ok((c.to_string(), num(b)?.max(1), if e.is_empty() { u32::MAX } else { num(e)? })),
+                None => { let p = num(r)?; Ok((c.to_string(), p.max(1), p)) }
             };
         }
-    }
     Ok((s.to_string(), 1, u32::MAX))
 }
 

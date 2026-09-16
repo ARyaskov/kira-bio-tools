@@ -119,12 +119,11 @@ impl IndexBuilder {
     fn flush_pending(&mut self) {
         let Some(p) = self.pending.take() else { return };
         let list = self.refs[p.tid].bins.entry(p.bin).or_default();
-        if let Some(last) = list.last_mut() {
-            if last.1 >> 16 == p.start >> 16 {
+        if let Some(last) = list.last_mut()
+            && last.1 >> 16 == p.start >> 16 {
                 last.1 = p.end;
                 return;
             }
-        }
         list.push((p.start, p.end));
     }
 
@@ -189,14 +188,13 @@ impl IndexBuilder {
                 list.sort_unstable();
                 let mut merged: Vec<(u64, u64)> = Vec::with_capacity(list.len());
                 for (s, e) in list {
-                    if let Some(m) = merged.last_mut() {
-                        if m.1 >> 16 >= s >> 16 {
+                    if let Some(m) = merged.last_mut()
+                        && m.1 >> 16 >= s >> 16 {
                             if e > m.1 {
                                 m.1 = e;
                             }
                             continue;
                         }
-                    }
                     merged.push((s, e));
                 }
                 let bot = bin_bot(id, depth) as usize;
@@ -387,13 +385,11 @@ pub fn tabix_line_interval<'a>(conf: &TabixConf, line: &'a str) -> Option<(&'a s
                         }
                     } else if id == 8 {
                         let v = field.strip_prefix("END=").or_else(|| field.find(";END=").map(|k| &field[k + 5..]));
-                        if let Some(v) = v.filter(|v| !v.starts_with('.')) {
-                            if let Some(e) = leading_i64(v) {
-                                if e > beg {
+                        if let Some(v) = v.filter(|v| !v.starts_with('.'))
+                            && let Some(e) = leading_i64(v)
+                                && e > beg {
                                     end = e;
                                 }
-                            }
-                        }
                     }
                 }
                 _ => {}
@@ -455,7 +451,7 @@ pub fn build_tabix_index(input: &Path, conf: &TabixConf, kind: IndexKind, min_sh
     let mut reader = noodles_bgzf::io::Reader::new(f);
     let mut b: Option<IndexBuilder> = None;
     let mut names: Vec<String> = Vec::new();
-    let mut name_ids: fxhash::FxHashMap<String, usize> = fxhash::FxHashMap::default();
+    let mut name_ids: crate::fx::FxHashMap<String, usize> = crate::fx::FxHashMap::default();
     let mut line = String::new();
     let mut lineno = 0i64;
     let mut max_ref_len = 0i64;
@@ -469,11 +465,10 @@ pub fn build_tabix_index(input: &Path, conf: &TabixConf, kind: IndexKind, min_sh
         lineno += 1;
         let end = u64::from(reader.virtual_position());
         let is_meta = line.as_bytes().first() == Some(&conf.meta);
-        if is_meta && kind == IndexKind::Csi {
-            if let Some(l) = header_ref_len(conf, line.trim_end_matches(['\r', '\n'])) {
+        if is_meta && kind == IndexKind::Csi
+            && let Some(l) = header_ref_len(conf, line.trim_end_matches(['\r', '\n'])) {
                 max_ref_len = max_ref_len.max(l);
             }
-        }
         if lineno <= conf.skip as i64 || is_meta || line.trim_end().is_empty() {
             continue;
         }

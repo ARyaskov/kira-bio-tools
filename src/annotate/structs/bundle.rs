@@ -97,7 +97,7 @@ pub fn infer_structured_info_fields(
         if let Some((key, value)) = pair.split_once('=') {
             let values: Vec<String> = value.split(',').map(|s| s.to_string()).collect();
 
-            let number = field_meta.get(key).copied().unwrap_or_else(|| {
+            let number = field_meta.get(key).copied().unwrap_or({
                 if values.len() == 1 {
                     FieldNumber::One
                 } else {

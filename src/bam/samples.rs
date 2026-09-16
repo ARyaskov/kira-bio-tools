@@ -171,11 +171,10 @@ impl SampleMap {
         if rg_smpl.is_some() && !*logic {
             return false;
         }
-        if let Some(s) = rg_smpl {
-            if !s.starts_with('\t') {
+        if let Some(s) = rg_smpl
+            && !s.starts_with('\t') {
                 *smpl_name = Some(s.as_str());
             }
-        }
         true
     }
 
@@ -210,15 +209,14 @@ impl SampleMap {
                     (Some(new), true) => r = new,
                 }
             }
-            if accept {
-                if let Some(rgs) = &opts.read_groups {
+            if accept
+                && let Some(rgs) = &opts.read_groups {
                     let mut renamed: Option<&str> = None;
                     accept = Self::keep_readgroup(rgs, fname, &id, &mut renamed);
                     if let Some(n) = renamed {
                         r = n;
                     }
                 }
-            }
             let r = r.to_string();
             if accept {
                 self.add_readgroup(file, &id, Some(&r));
@@ -234,11 +232,10 @@ impl SampleMap {
         let nsmpls = bam_smpls.len();
         let mut smpl_name: Option<&str> = None;
         let mut accept_null_rg = true;
-        if let Some(rgs) = &opts.read_groups {
-            if !Self::keep_readgroup(rgs, fname, "?", &mut smpl_name) {
+        if let Some(rgs) = &opts.read_groups
+            && !Self::keep_readgroup(rgs, fname, "?", &mut smpl_name) {
                 accept_null_rg = false;
             }
-        }
         if opts.samples.is_some() && first_smpl.is_none() {
             accept_null_rg = false;
         }

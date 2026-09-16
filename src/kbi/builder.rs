@@ -21,7 +21,7 @@ impl KbiBuilder {
             entries: Vec::new(),
             gamma: 1.27,
             max_rehash: 16,
-            salt: 0xC0FF_EE00_D15E_A5E,
+            salt: 0x0C0F_FEE0_0D15_EA5E,
             contigs: ContigDict::new(),
         }
     }

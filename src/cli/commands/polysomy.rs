@@ -379,11 +379,10 @@ impl Region {
     }
 
     fn contains(&self, chrom: &str, pos: u32) -> bool {
-        if let Some(c) = &self.chrom {
-            if c != chrom {
+        if let Some(c) = &self.chrom
+            && c != chrom {
                 return false;
             }
-        }
         pos >= self.start && pos <= self.end
     }
 }
@@ -485,8 +484,8 @@ fn site_alt_fraction(rec: &crate::vcf::structs::VcfRecord, sample_idx: usize) ->
     let sample = rec.samples.get(sample_idx)?.as_str();
     let vals = sample.split(':').collect::<Vec<_>>();
 
-    if let Some(ad_i) = keys.iter().position(|k| *k == "AD") {
-        if let Some(ad) = vals.get(ad_i) {
+    if let Some(ad_i) = keys.iter().position(|k| *k == "AD")
+        && let Some(ad) = vals.get(ad_i) {
             let parts = ad
                 .split(',')
                 .filter_map(|x| x.parse::<f64>().ok())
@@ -500,13 +499,11 @@ fn site_alt_fraction(rec: &crate::vcf::structs::VcfRecord, sample_idx: usize) ->
                 }
             }
         }
-    }
 
-    if let Some(gt_i) = keys.iter().position(|k| *k == "GT") {
-        if let Some(gt) = vals.get(gt_i) {
+    if let Some(gt_i) = keys.iter().position(|k| *k == "GT")
+        && let Some(gt) = vals.get(gt_i) {
             return gt_to_fraction(gt);
         }
-    }
 
     None
 }

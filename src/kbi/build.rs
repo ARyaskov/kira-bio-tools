@@ -18,7 +18,7 @@ pub fn build_kbi_index<P: AsRef<Path>>(vcf_path: P, output_path: P) -> Result<Kb
         builder.add_record(&record);
         count += 1;
 
-        if count % 1_000_000 == 0 {
+        if count.is_multiple_of(1_000_000) {
             eprintln!("Processed {} records...", count);
         }
     }

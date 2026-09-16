@@ -576,7 +576,7 @@ impl<'a> Consensus<'a> {
             let rest = &header[name_end + 1..];
             let digits = |s: &str| s.bytes().take_while(u8::is_ascii_digit).count();
             let nf = digits(rest);
-            if nf == 0 || rest[nf..].as_bytes().first() != Some(&b'-') {
+            if nf == 0 || rest.as_bytes().get(nf) != Some(&b'-') {
                 from = 0;
             } else {
                 from = rest[..nf].parse::<i64>().unwrap_or(0) - 1;
@@ -1082,7 +1082,7 @@ impl<'a> Consensus<'a> {
             // A SNP or insert right after a deletion loses its reference base
             // in the buffer; allow that one-base overlap.
             let mut fail = true;
-            if self.prev_base_pos == rec.pos && refa[0].to_ascii_uppercase() == self.prev_base.to_ascii_uppercase() {
+            if self.prev_base_pos == rec.pos && refa[0].eq_ignore_ascii_case(&self.prev_base) {
                 if rlen == 1 {
                     fail = false;
                 } else if strncasecmp_eq(&refa[1..], &self.fa_buf[idx + 1..], rlen as usize - 1) {
@@ -1135,9 +1135,8 @@ impl<'a> Consensus<'a> {
             self.prev_base_pos = rec.pos + rlen - 1;
             self.prev_is_insert = false;
             self.fa_frz_mod = idx as i64 + alen;
-            for i in trim_beg as usize..alen_u {
-                self.fa_buf[idx + i] = alt_allele[i];
-            }
+            let tb = trim_beg as usize;
+            self.fa_buf[idx + tb..idx + alen_u].copy_from_slice(&alt_allele[tb..alen_u]);
             if len_diff != 0 {
                 self.fa_buf.drain(idx + alen_u..idx + rlen_u);
             }
@@ -1152,9 +1151,7 @@ impl<'a> Consensus<'a> {
             while ibeg < alen_u && refa.get(ibeg) == alt_allele.get(ibeg) && rec.pos + ibeg as i64 <= self.prev_base_pos {
                 ibeg += 1;
             }
-            for i in ibeg..alen_u {
-                self.fa_buf[idx + i] = alt_allele[i];
-            }
+            self.fa_buf[idx + ibeg..idx + alen_u].copy_from_slice(&alt_allele[ibeg..alen_u]);
             self.fa_frz_mod = idx as i64 + alen - ibeg as i64 + 1;
         }
         if let (Some(chain), true) = (self.chain.as_mut(), len_diff != 0) {
@@ -1206,7 +1203,7 @@ fn mark_ins(refa: &[u8], alt: &mut [u8], mark: Mark) {
 fn mark_snv(refa: &[u8], alt: &mut [u8], mark: Mark) {
     let n = refa.len().min(alt.len());
     for i in 0..n {
-        if refa[i].to_ascii_lowercase() != alt[i].to_ascii_lowercase() {
+        if !refa[i].eq_ignore_ascii_case(&alt[i]) {
             match mark {
                 Mark::Lower => alt[i] = alt[i].to_ascii_lowercase(),
                 Mark::Upper => alt[i] = alt[i].to_ascii_uppercase(),

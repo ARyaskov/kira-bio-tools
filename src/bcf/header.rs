@@ -1,4 +1,4 @@
-use fxhash::FxHashMap;
+use crate::fx::FxHashMap;
 
 use crate::vcf::header::{parse_struct_line, samples_from_chrom_line};
 
@@ -159,14 +159,14 @@ pub fn parse_header_to_dict(headers: &[String]) -> BcfHeaderDict {
                     f.idx = ids.assign(&id, explicit);
                     match kind {
                         "INFO" => {
-                            if !d.info_idx.contains_key(&id) {
-                                d.info_idx.insert(id, f.idx);
+                            if let std::collections::hash_map::Entry::Vacant(e) = d.info_idx.entry(id) {
+                                e.insert(f.idx);
                                 d.info.push(f);
                             }
                         }
                         "FORMAT" => {
-                            if !d.format_idx.contains_key(&id) {
-                                d.format_idx.insert(id, f.idx);
+                            if let std::collections::hash_map::Entry::Vacant(e) = d.format_idx.entry(id) {
+                                e.insert(f.idx);
                                 d.format.push(f);
                             }
                         }
@@ -174,8 +174,8 @@ pub fn parse_header_to_dict(headers: &[String]) -> BcfHeaderDict {
                             if id == "PASS" {
                                 have_pass_line = true;
                             }
-                            if !d.filter_idx.contains_key(&id) {
-                                d.filter_idx.insert(id, f.idx);
+                            if let std::collections::hash_map::Entry::Vacant(e) = d.filter_idx.entry(id) {
+                                e.insert(f.idx);
                                 d.filter.push(f);
                             }
                         }
@@ -288,11 +288,10 @@ pub fn serialize_header(d: &BcfHeaderDict) -> String {
 }
 
 fn inject_idx(line: &str, idx: u32) -> String {
-    if let Some((_, kvs)) = parse_struct_line(line) {
-        if kvs.iter().any(|(k, _)| *k == "IDX") {
+    if let Some((_, kvs)) = parse_struct_line(line)
+        && kvs.iter().any(|(k, _)| *k == "IDX") {
             return line.to_string();
         }
-    }
     if let Some(p) = line.rfind('>') {
         let mut s = String::with_capacity(line.len() + 12);
         s.push_str(&line[..p]);

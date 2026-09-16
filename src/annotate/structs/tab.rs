@@ -132,11 +132,10 @@ impl TabSchema {
                 continue;
             }
 
-            if let Some(key) = extract_info_key(&line) {
-                if let Some(number) = extract_info_number(&line) {
+            if let Some(key) = extract_info_key(&line)
+                && let Some(number) = extract_info_number(&line) {
                     metadata.insert(key, number);
                 }
-            }
         }
 
         Ok(metadata)
@@ -209,8 +208,7 @@ impl TabSchema {
                 .or_else(|| clean_part.strip_prefix("FORMAT/"))
                 .unwrap_or(clean_part);
 
-            if base_part.starts_with('^') {
-                let except_tag = &base_part[1..];
+            if let Some(except_tag) = base_part.strip_prefix('^') {
                 let except_clean = except_tag.strip_prefix("INFO/").unwrap_or(except_tag);
                 info_all_except.push(except_clean.to_string());
                 continue;

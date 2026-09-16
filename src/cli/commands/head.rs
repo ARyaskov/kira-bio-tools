@@ -46,11 +46,10 @@ pub fn cmd_head(args: HeadArgs) -> Result<()> {
     let mut record_count = cfg.n.unwrap_or(0);
     if let Some(s) = cfg.s {
         record_count = s;
-        if let Some(chrom) = chrom_line {
-            if !out.iter().any(|l| *l == chrom) {
+        if let Some(chrom) = chrom_line
+            && !out.contains(&chrom) {
                 out.push(chrom);
             }
-        }
     }
 
     if record_count > 0 {

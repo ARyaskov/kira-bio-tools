@@ -122,11 +122,10 @@ pub fn assemble_indel(reads: &[LiveRead], win_lo: u32, refw: &[u8], min_support:
             continue;
         }
         total += 1;
-        if let Some((ind, mm)) = discover_indel(&sub, refw) {
-            if mm <= max_mm {
+        if let Some((ind, mm)) = discover_indel(&sub, refw)
+            && mm <= max_mm {
                 *votes.entry(ind).or_insert(0) += 1;
             }
-        }
     }
     if total == 0 || votes.is_empty() {
         return None;

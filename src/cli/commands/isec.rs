@@ -98,27 +98,22 @@ impl Source {
                 return Ok(());
             };
             if line.is_empty() || line.as_bytes()[0] == b'#' { continue; }
-            if let Some(rf) = &self.region {
-                if !rf.line_passes_mode(&line, self.regions_overlap) { continue; }
-            }
-            if let Some(tf) = &self.target {
-                if tf.line_passes_mode(&line, 0) == self.target_inverse { continue; }
-            }
+            if let Some(rf) = &self.region
+                && !rf.line_passes_mode(&line, self.regions_overlap) { continue; }
+            if let Some(tf) = &self.target
+                && tf.line_passes_mode(&line, 0) == self.target_inverse { continue; }
             if let Some(af) = &self.apply_filters {
-                let f = line.splitn(8, '\t').nth(6).unwrap_or(".");
+                let f = line.split('\t').nth(6).unwrap_or(".");
                 let pass = if f == "." || f.is_empty() { af.iter().any(|a| a == ".") } else { f.split(';').any(|t| af.iter().any(|a| a == t)) };
                 if !pass { continue; }
             }
-            if self.include.is_some() || self.exclude.is_some() {
-                if let Some(rec) = parse_vcf_line(&line) {
-                    if let Some(e) = &self.include {
-                        if !e.eval(&rec).map(|r| r.pass_site).unwrap_or(true) { continue; }
-                    }
-                    if let Some(e) = &self.exclude {
-                        if e.eval(&rec).map(|r| r.pass_site).unwrap_or(false) { continue; }
-                    }
+            if (self.include.is_some() || self.exclude.is_some())
+                && let Some(rec) = parse_vcf_line(&line) {
+                    if let Some(e) = &self.include
+                        && !e.eval(&rec).map(|r| r.pass_site).unwrap_or(true) { continue; }
+                    if let Some(e) = &self.exclude
+                        && e.eval(&rec).map(|r| r.pass_site).unwrap_or(false) { continue; }
                 }
-            }
             let mut it = line.splitn(3, '\t');
             let chrom = it.next().unwrap_or("").to_string();
             let pos: u32 = it
@@ -283,11 +278,10 @@ pub fn cmd_isec(args: IsecArgs) -> Result<()> {
                     if let Some(w) = writers.get_mut(i).and_then(|w| w.as_mut()) {
                         w.write_line(&r.line)?;
                     }
-                    if i == stdout_file {
-                        if let Some(s) = stdout_sink.as_mut() {
+                    if i == stdout_file
+                        && let Some(s) = stdout_sink.as_mut() {
                             s.write_line(&r.line)?;
                         }
-                    }
                 }
                 // Every record of a file is listed; a later file's record is
                 // skipped only when an earlier file already carried that site.

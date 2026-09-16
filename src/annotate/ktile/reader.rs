@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use flate2::{Decompress, FlushDecompress, Status};
-use fxhash::FxHashMap;
+use crate::fx::FxHashMap;
 use memmap2::{Mmap, MmapOptions};
 
 use super::format::{CompressedChunkEntry, KtileError, KtileHeader};
@@ -496,11 +496,9 @@ impl KtileReader {
         while let Ok((idx, data)) = cache_borrow.prefetched.try_recv() {
             if cache_borrow.pending.len() >= PENDING_MAX
                 && !cache_borrow.pending.contains_key(&idx)
-            {
-                if let Some(&smallest) = cache_borrow.pending.keys().min() {
+                && let Some(&smallest) = cache_borrow.pending.keys().min() {
                     cache_borrow.pending.remove(&smallest);
                 }
-            }
             cache_borrow.pending.insert(idx, data);
         }
 
@@ -510,8 +508,8 @@ impl KtileReader {
             .position(|c| c.chunk_idx == chunk_idx);
 
         // Path 2: target chunk waiting in the reorder buffer.
-        if entry_pos.is_none() {
-            if let Some(data) = cache_borrow.pending.remove(&chunk_idx) {
+        if entry_pos.is_none()
+            && let Some(data) = cache_borrow.pending.remove(&chunk_idx) {
                 if cache_borrow.entries.len() >= CACHE_DEPTH {
                     cache_borrow.entries.remove(0);
                 }
@@ -521,7 +519,6 @@ impl KtileReader {
                 });
                 entry_pos = Some(cache_borrow.entries.len() - 1);
             }
-        }
 
         // Path 4: synchronous fallback decompress.
         if entry_pos.is_none() {
@@ -644,7 +641,7 @@ impl KtileReader {
         let mut cache_borrow = cache.borrow_mut();
         let needs_refill = cache_borrow
             .as_ref()
-            .map_or(true, |c| !c.covers(pool_start, pool_end));
+            .is_none_or(|c| !c.covers(pool_start, pool_end));
 
         if needs_refill {
             let want = target_chunk.min(pool_len - pool_start) as usize;

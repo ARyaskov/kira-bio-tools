@@ -230,11 +230,10 @@ fn scan_for_intervals(entries: &[AniEntry], pool: &mut StringPool) -> bool {
                     .position(|&b| b == 0)
                     .map(|p| alt_ofs + p)
                     .unwrap_or(raw.len());
-                if let Ok(s) = std::str::from_utf8(&raw[alt_ofs..end]) {
-                    if s.parse::<u32>().is_ok() {
+                if let Ok(s) = std::str::from_utf8(&raw[alt_ofs..end])
+                    && s.parse::<u32>().is_ok() {
                         return true;
                     }
-                }
             }
         }
     }
@@ -361,7 +360,7 @@ fn write_ani_file(
     }
     let hdr_size = mem::size_of::<AniHeaderV6>();
     let index_size = index_bytes.len();
-    let ent_size = n * mem::size_of::<AniEntry>();
+    let ent_size = std::mem::size_of_val(entries);
     let block_size = pool.block_size();
     let blocks = pool.blocks();
     let block_index_size = blocks.len() * mem::size_of::<AniBlockEntry>();
@@ -486,7 +485,7 @@ fn write_ani_file(
 fn build_pos_index(entries: &[AniEntry]) -> Vec<u8> {
     // chr_id is u32 now — use a HashMap to avoid pre-allocating a `Vec` sized
     // by max chr_id (which could be huge for ultra-multi-contig assemblies).
-    use fxhash::FxHashMap;
+    use crate::fx::FxHashMap;
     let mut per_chr: FxHashMap<u32, Vec<(u32, u32)>> = FxHashMap::default();
     for (idx, entry) in entries.iter().enumerate() {
         // Skip sentinel slots (empty near-MPH holes — chr_id=u32::MAX). They'd

@@ -134,6 +134,6 @@ pub fn parse_vcf_full_line(line: &str) -> Option<VcfParsedRecord> {
 pub fn extract_contig_id(line: &str) -> Option<String> {
     let start = line.find("ID=")? + 3;
     let rest = &line[start..];
-    let end = rest.find(|c| c == ',' || c == '>')?;
+    let end = rest.find([',', '>'])?;
     Some(rest[..end].to_string())
 }

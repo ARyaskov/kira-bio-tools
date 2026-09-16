@@ -247,13 +247,12 @@ impl<W: Write> CallStream<W> {
                 }
             }
         }
-        if let Some(b) = &self.gvcf_block {
-            if b.dp_range != dp_range || b.chrom != chrom || pos > b.end + 1 {
+        if let Some(b) = &self.gvcf_block
+            && (b.dp_range != dp_range || b.chrom != chrom || pos > b.end + 1) {
                 needs_flush = true;
             }
-        }
-        if needs_flush {
-            if let Some(mut b) = self.gvcf_block.take() {
+        if needs_flush
+            && let Some(mut b) = self.gvcf_block.take() {
                 // An indel record at the block's last position keeps that
                 // position out of the block.
                 if b.chrom == chrom && pos == b.end {
@@ -261,7 +260,6 @@ impl<W: Write> CallStream<W> {
                 }
                 self.write_gvcf_block(&b)?;
             }
-        }
         if can_collapse {
             match &mut self.gvcf_block {
                 Some(b) => {
@@ -509,11 +507,10 @@ fn select_samples(
     let ordered = |listed: &[String], keep: &[usize]| -> Vec<usize> {
         let mut out = Vec::new();
         for n in listed {
-            if let Some(i) = idx_of(n) {
-                if keep.contains(&i) && !out.contains(&i) {
+            if let Some(i) = idx_of(n)
+                && keep.contains(&i) && !out.contains(&i) {
                     out.push(i);
                 }
-            }
         }
         out
     };
@@ -1318,14 +1315,12 @@ fn call_record_legacy(
 
         // A haploid sample contributes one allele to AC/AN, a ploidy-0 sample none.
         let called = [call.allele0, call.allele1];
-        for a in called.iter().take(ploidy as usize) {
-            if let Some(x) = a {
-                an += 1;
-                if *x > 0 {
-                    let idx = (*x - 1) as usize;
-                    if let Some(slot) = ac.get_mut(idx) {
-                        *slot += 1;
-                    }
+        for x in called.iter().take(ploidy as usize).flatten() {
+            an += 1;
+            if *x > 0 {
+                let idx = (*x - 1) as usize;
+                if let Some(slot) = ac.get_mut(idx) {
+                    *slot += 1;
                 }
             }
         }

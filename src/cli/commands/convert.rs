@@ -972,11 +972,9 @@ fn emit_vcf_from_gvcf(cfg: &ConvertCfg) -> Result<()> {
     while let Some(rec) = r.next_record()? {
         if let Some(target) = filter_target.as_deref()
             && rec.filter != target
-        {
-            if rec.alt != "." {
+            && rec.alt != "." {
                 continue;
             }
-        }
         if rec.alt != "." {
             print_record(&rec);
             continue;
