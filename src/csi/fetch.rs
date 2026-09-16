@@ -94,14 +94,20 @@ impl IndexedVcfReader {
 
     /// BCF sources only: like [`query`] but the callback receives the
     /// encoded `(shared, indiv)` blocks of each overlapping record.
-    pub fn query_raw<F>(&mut self, chrom: &str, beg1: u32, end1: u32, mut f: F) -> Result<()>
+    pub fn query_raw<F>(&mut self, chrom: &str, beg1: u32, end1: u32, f: F) -> Result<()>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<bool>,
+    {
+        self.query_raw_multi(chrom, &[(beg1, end1)], f)
+    }
+
+    /// [`query_multi`] over encoded BCF records.
+    pub fn query_raw_multi<F>(&mut self, chrom: &str, ranges: &[(u32, u32)], mut f: F) -> Result<()>
     where
         F: FnMut(&[u8], &[u8]) -> Result<bool>,
     {
         let Some(rid) = self.ref_id(chrom) else { return Ok(()) };
-        let beg0 = beg1.saturating_sub(1) as u64;
-        let end0 = end1 as u64;
-        let chunks = self.index.query(rid, beg0, end0);
+        let Some((chunks, max_end)) = self.merged_chunks(rid, ranges) else { return Ok(()) };
         let Source::Bcf(r) = &mut self.src else { bail!("query_raw needs a BCF input") };
         for (s, e) in chunks {
             r.seek(s)?;
@@ -115,10 +121,10 @@ impl IndexedVcfReader {
                     continue;
                 }
                 let rb = m.pos.max(0) as u64;
-                if rb >= end0 {
+                if rb >= max_end {
                     return Ok(());
                 }
-                if record_end0(&m) > beg0 && !f(&shared, &indiv)? {
+                if ranges_overlap(ranges, rb, record_end0(&m)) && !f(&shared, &indiv)? {
                     return Ok(());
                 }
             }
@@ -126,16 +132,55 @@ impl IndexedVcfReader {
         Ok(())
     }
 
+    /// The index chunks of every range, sorted and merged so each BGZF
+    /// block is read once (`hts_itr_multi`), with the furthest range end.
+    fn merged_chunks(&self, rid: usize, ranges: &[(u32, u32)]) -> Option<(Vec<(u64, u64)>, u64)> {
+        let mut chunks: Vec<(u64, u64)> = Vec::new();
+        let mut max_end = 0u64;
+        for &(beg1, end1) in ranges {
+            let beg0 = beg1.saturating_sub(1) as u64;
+            let end0 = end1 as u64;
+            if end0 <= beg0 {
+                continue;
+            }
+            max_end = max_end.max(end0);
+            chunks.extend(self.index.query(rid, beg0, end0));
+        }
+        if chunks.is_empty() {
+            return None;
+        }
+        chunks.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(chunks.len());
+        for (s, e) in chunks {
+            if let Some(m) = merged.last_mut() {
+                if s >> 16 <= m.1 >> 16 {
+                    m.1 = m.1.max(e);
+                    continue;
+                }
+            }
+            merged.push((s, e));
+        }
+        Some((merged, max_end))
+    }
+
     /// Visit records overlapping `[beg1, end1]` (1-based, inclusive) on
     /// `chrom`, in file order. The callback returns `false` to stop early.
-    pub fn query<F>(&mut self, chrom: &str, beg1: u32, end1: u32, mut f: F) -> Result<()>
+    pub fn query<F>(&mut self, chrom: &str, beg1: u32, end1: u32, f: F) -> Result<()>
+    where
+        F: FnMut(&str) -> Result<bool>,
+    {
+        self.query_multi(chrom, &[(beg1, end1)], f)
+    }
+
+    /// Records overlapping any of `ranges` (1-based inclusive, sorted and
+    /// non-overlapping) on `chrom`, in file order, each visited once: the
+    /// ranges' chunk lists are merged and read in a single pass.
+    pub fn query_multi<F>(&mut self, chrom: &str, ranges: &[(u32, u32)], mut f: F) -> Result<()>
     where
         F: FnMut(&str) -> Result<bool>,
     {
         let Some(rid) = self.ref_id(chrom) else { return Ok(()) };
-        let beg0 = beg1.saturating_sub(1) as u64;
-        let end0 = end1 as u64;
-        let chunks = self.index.query(rid, beg0, end0);
+        let Some((chunks, max_end)) = self.merged_chunks(rid, ranges) else { return Ok(()) };
         let conf = self.conf;
         match &mut self.src {
             Source::Vcf(r) => {
@@ -160,10 +205,10 @@ impl IndexedVcfReader {
                         if c != chrom {
                             continue;
                         }
-                        if rb >= end0 {
+                        if rb >= max_end {
                             return Ok(());
                         }
-                        if re > beg0 && !f(l)? {
+                        if ranges_overlap(ranges, rb, re) && !f(l)? {
                             return Ok(());
                         }
                     }
@@ -182,10 +227,10 @@ impl IndexedVcfReader {
                             continue;
                         }
                         let rb = m.pos.max(0) as u64;
-                        if rb >= end0 {
+                        if rb >= max_end {
                             return Ok(());
                         }
-                        if record_end0(&m) > beg0 {
+                        if ranges_overlap(ranges, rb, record_end0(&m)) {
                             let line = r.decode(&shared, &indiv)?;
                             if !f(&line)? {
                                 return Ok(());
@@ -197,4 +242,11 @@ impl IndexedVcfReader {
         }
         Ok(())
     }
+}
+
+/// Does `[rb0, re0)` overlap any of the sorted, non-overlapping 1-based
+/// inclusive `ranges`? Only the last range starting before `re0` can.
+fn ranges_overlap(ranges: &[(u32, u32)], rb0: u64, re0: u64) -> bool {
+    let i = ranges.partition_point(|&(b1, _)| (b1.saturating_sub(1) as u64) < re0);
+    i > 0 && ranges[i - 1].1 as u64 > rb0
 }

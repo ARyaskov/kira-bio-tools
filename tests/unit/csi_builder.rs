@@ -146,3 +146,36 @@
         let _ = std::fs::remove_file(&bed);
         let _ = std::fs::remove_file(&ip);
     }
+
+    /// Overlapping and adjacent regions read the file once: every record is
+    /// emitted a single time, in file order, whichever regions cover it.
+    #[test]
+    fn multi_region_query_reads_each_record_once() {
+        let vcf = tmp("multi.vcf.gz");
+        let mut lines = header();
+        for pos in (100..=100_000).step_by(100) {
+            lines.push(format!("scaffold_9\t{pos}\t.\tACGT\tA\t.\t.\t."));
+        }
+        write_bgzf_vcf(&vcf, &lines);
+        let idx = build_index_in_memory(&vcf, IndexKind::Csi, None).unwrap();
+        let mut ip = vcf.as_os_str().to_os_string();
+        ip.push(".csi");
+        idx.save(&ip).unwrap();
+        let regions = crate::regions::RegionSet::from_cli(
+            "scaffold_9:150-260,scaffold_9:261-400,scaffold_9:390-450,scaffold_9:50000-50003,scaffold_9:99990-200000",
+        )
+        .unwrap();
+        let mut seen: Vec<u32> = Vec::new();
+        regions.stream_with_index(&vcf, 1, |l| {
+            seen.push(l.split('\t').nth(1).unwrap().parse().unwrap());
+            Ok(())
+        }).unwrap();
+        // 200 overlaps 150-260 by its 4-base span (200..203); 100 (100..103) does not reach 150.
+        assert_eq!(seen, vec![200, 300, 400, 50000, 100000]);
+        let mut r = IndexedVcfReader::open(&vcf).unwrap();
+        let mut n = 0;
+        r.query_multi("scaffold_9", &[(1, 1000), (1001, 100_000)], |_| { n += 1; Ok(true) }).unwrap();
+        assert_eq!(n, 1000);
+        let _ = std::fs::remove_file(&vcf);
+        let _ = std::fs::remove_file(&ip);
+    }

@@ -240,14 +240,13 @@ impl RegionSet {
         chroms.sort_by_key(|c| reader.ref_id(c).unwrap_or(usize::MAX));
         for chrom in chroms {
             let Some(ranges) = self.by_chr.get(chrom) else { continue };
-            for &(beg, end) in ranges {
-                reader.query(chrom, beg, end, |line| {
-                    if self.line_passes_mode(line, mode) {
-                        cb(line)?;
-                    }
-                    Ok(true)
-                })?;
-            }
+            // One merged pass per contig: every record is read and emitted once.
+            reader.query_multi(chrom, ranges, |line| {
+                if self.line_passes_mode(line, mode) {
+                    cb(line)?;
+                }
+                Ok(true)
+            })?;
         }
         Ok(())
     }
@@ -277,16 +276,14 @@ impl RegionSet {
         chroms.sort_by_key(|c| reader.ref_id(c).unwrap_or(usize::MAX));
         for chrom in chroms {
             let Some(ranges) = self.by_chr.get(chrom) else { continue };
-            for &(beg, end) in ranges {
-                reader.query_raw(chrom, beg, end, |shared, indiv| {
-                    let Some(m) = crate::bcf::record::record_meta(shared) else { return Ok(true) };
-                    let pos1 = m.pos.max(0) as u32 + 1;
-                    if self.span_passes(chrom, pos1, m.rlen.max(0) as u32, mode) {
-                        cb(shared, indiv)?;
-                    }
-                    Ok(true)
-                })?;
-            }
+            reader.query_raw_multi(chrom, ranges, |shared, indiv| {
+                let Some(m) = crate::bcf::record::record_meta(shared) else { return Ok(true) };
+                let pos1 = m.pos.max(0) as u32 + 1;
+                if self.span_passes(chrom, pos1, m.rlen.max(0) as u32, mode) {
+                    cb(shared, indiv)?;
+                }
+                Ok(true)
+            })?;
         }
         Ok(())
     }
