@@ -1,0 +1,91 @@
+name: Accuracy benchmark
+
+# Manual: calls GIAB HG002 on a GRCh38 chr20 window with the default
+# pipeline and every mpileup extension, scores each call set against the
+# NIST v4.2.1 truth set inside the confident regions, and posts the table
+# to the job summary. Inputs default to the public GIAB/UCSC URLs; the BAM
+# is read through HTTP range requests so only the window is downloaded.
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: Region to call (contig[:start-end])
+        default: "chr20:1-20000000"
+      ref_url:
+        description: Reference FASTA (gzip ok), chr20 only is enough
+        default: "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/chromosomes/chr20.fa.gz"
+      bam_url:
+        description: Indexed BAM/CRAM URL (HG002, GRCh38)
+        default: "https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/data/AshkenazimTrio/HG002_NA24385_son/NIST_Illumina_2x250bps/novoalign_bams/HG002.GRCh38.2x250.bam"
+      truth_url:
+        description: Truth VCF (bgzip)
+        default: "https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/release/AshkenazimTrio/HG002_NA24385_son/NISTv4.2.1/GRCh38/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
+      bed_url:
+        description: Confident-region BED
+        default: "https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/release/AshkenazimTrio/HG002_NA24385_son/NISTv4.2.1/GRCh38/HG002_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.bed"
+      configs:
+        description: Space-separated name=flags list (underscores become spaces); empty = all
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  accuracy:
+    name: HG002 ${{ github.event.inputs.region }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-ubuntu-latest
+      - name: Build
+        run: cargo build --release
+      - name: Tools
+        run: sudo apt-get update && sudo apt-get install -y samtools tabix
+      - name: Fetch data
+        env:
+          REGION: ${{ github.event.inputs.region }}
+          REF_URL: ${{ github.event.inputs.ref_url }}
+          BAM_URL: ${{ github.event.inputs.bam_url }}
+          TRUTH_URL: ${{ github.event.inputs.truth_url }}
+          BED_URL: ${{ github.event.inputs.bed_url }}
+        run: |
+          mkdir -p data
+          curl -sSL "$REF_URL" -o data/ref.fa.gz
+          gzip -dc data/ref.fa.gz > data/ref.fa
+          samtools faidx data/ref.fa
+          curl -sSL "$TRUTH_URL" -o data/truth.vcf.gz
+          curl -sSL "$TRUTH_URL.tbi" -o data/truth.vcf.gz.tbi || true
+          curl -sSL "$BED_URL" -o data/confident.bed
+          # Only the window is transferred: htslib fetches the index and the
+          # BGZF blocks the region needs.
+          samtools view -b -o data/reads.bam "$BAM_URL" "$REGION"
+          samtools index data/reads.bam
+          ls -la data
+      - name: Run
+        env:
+          KIRA_BT: target/release/kira-bt
+          CONFIGS: ${{ github.event.inputs.configs }}
+          REGION: ${{ github.event.inputs.region }}
+        run: |
+          if [ -z "$CONFIGS" ]; then unset CONFIGS; fi
+          bash bench/accuracy/run.sh data/ref.fa data/reads.bam data/truth.vcf.gz data/confident.bed "$REGION" results
+      - name: Summary
+        run: |
+          echo "## HG002 ${{ github.event.inputs.region }}" >> "$GITHUB_STEP_SUMMARY"
+          cat results/results.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: accuracy-${{ github.run_id }}
+          path: |
+            results/results.tsv
+            results/results.md
+            results/*.json
+            results/*.happy.csv
+          if-no-files-found: ignore
+          retention-days: 30

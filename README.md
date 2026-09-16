@@ -643,6 +643,19 @@ genotype parsing never panic). The crate builds on stable Rust
 warnings` under the default lint set, with the few structural lints the code
 does not follow listed at the top of `src/lib.rs`.
 
+`bench/accuracy/` holds the accuracy benchmark: `evaluate.py` (standard
+library only) scores a call set against a truth VCF at the site and
+genotype level, per SNP/indel class, after reducing every allele to its
+canonical core and restricting both sides to a confident-region BED and/or
+a region; `run.sh` calls a BAM with the default pipeline and with each
+mpileup extension (`--hp-indel`, `--indel-realign all`, `--assemble`,
+`--recal`, `--nm-weight auto`, and all together), scores every call set
+and writes `results.tsv`/`results.md` (hap.py is run alongside when
+`HAPPY` points at it). The `Accuracy benchmark` workflow
+(`workflow_dispatch`) fetches GIAB HG002 for a GRCh38 chr20 window through
+HTTP range requests, runs the script and posts the table to the job
+summary; the URLs, region and configuration list are workflow inputs.
+
 Alongside them are **404** bcftools comparison fixtures, grouped per command in
 `tests/<mode>/testN`. Each fixture contains:
 - command scripts (`bcftools.sh`, `kira.sh`)
