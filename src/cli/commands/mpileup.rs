@@ -2135,16 +2135,24 @@ fn emit_site(site: &PileupSite, overlapping_reads: &[LiveRead], ctx: &EmitCtx, o
             && let Some(fa) = ctx.fasta
         {
             let w_lo = site.pos.saturating_sub(cfg.up);
-            if let Some(refw) = fa.slice_bytes(chr, w_lo + 1, cfg.len)
-                && let Some(call) = crate::call::haplotype::assemble_indel(
-                    overlapping_reads,
-                    w_lo,
-                    refw,
-                    cfg.min_sup,
-                    cfg.max_mm,
-                )
-            {
-                emit_assembled(call, site, overlapping_reads, chr, ctx, out, annotate);
+            if let Some(refw) = fa.slice_bytes(chr, w_lo + 1, cfg.len) {
+                let calls =
+                    crate::call::assembly::assemble_window(overlapping_reads, w_lo, refw, &cfg.asm);
+                if calls.is_empty() {
+                    if let Some(call) = crate::call::haplotype::assemble_indel(
+                        overlapping_reads,
+                        w_lo,
+                        refw,
+                        cfg.min_sup,
+                        cfg.max_mm,
+                    ) {
+                        emit_assembled(call, site, chr, ctx, out, annotate);
+                    }
+                } else {
+                    for call in calls {
+                        emit_assembled(call, site, chr, ctx, out, annotate);
+                    }
+                }
             }
         }
     }
@@ -2610,6 +2618,9 @@ struct AsmCfg {
     nonref: u32,
     min_sup: u32,
     max_mm: u32,
+    /// Graph assembler: k-mer sizes (`KIRA_ASM_K`, comma list), reads per
+    /// non-reference edge (`KIRA_ASM_KMER`), haplotypes kept (`KIRA_ASM_HAPS`).
+    asm: crate::call::assembly::AsmParams,
 }
 /// Assembler window/gate, env-tunable. The mismatch-modeled indel's anchor sits
 /// UPSTREAM of the non-ref trigger, so `up` must reach back far enough to cover it.
@@ -2622,12 +2633,26 @@ fn asm_cfg() -> &'static AsmCfg {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(d)
         };
+        let min_sup = g("KIRA_ASM_SUP", 3);
+        let mut asm = crate::call::assembly::AsmParams {
+            min_support: min_sup,
+            ..Default::default()
+        };
+        if let Ok(v) = std::env::var("KIRA_ASM_K") {
+            let ks: Vec<usize> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+            if !ks.is_empty() {
+                asm.ks = ks;
+            }
+        }
+        asm.min_kmer = g("KIRA_ASM_KMER", asm.min_kmer);
+        asm.max_haps = g("KIRA_ASM_HAPS", asm.max_haps as u32) as usize;
         AsmCfg {
             up: g("KIRA_ASM_UP", 6),
             len: g("KIRA_ASM_LEN", 57) as usize,
             nonref: g("KIRA_ASM_NONREF", 3),
-            min_sup: g("KIRA_ASM_SUP", 3),
+            min_sup,
             max_mm: g("KIRA_ASM_MM", 3),
+            asm,
         }
     })
 }
@@ -2637,19 +2662,18 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
-/// Emit an assembled indel: per-sample PLs come from read-vs-haplotype
-/// likelihoods on the pair-HMM, the site from the multiallelic caller.
+/// Emit an assembled indel: per-sample PLs come from the call's read-vs-
+/// haplotype pair-HMM likelihoods, the site from the multiallelic caller.
 fn emit_assembled(
     call: crate::call::haplotype::AssembledCall,
     site: &PileupSite,
-    reads: &[LiveRead],
     chr: &str,
     ctx: &EmitCtx,
     out: &mut Vec<u8>,
     annotate: &AnnotateSpec,
 ) {
     let args = ctx.args;
-    let hs = haplotype_pls(reads, site.per_sample.len(), &call);
+    let hs = haplotype_pls(site.per_sample.len(), &call);
     let mut kept_samples: Vec<usize> = Vec::new();
     let mut pls_all: Vec<i32> = Vec::new();
     let mut qs = [0.0f64; 2];

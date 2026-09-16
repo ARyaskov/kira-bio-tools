@@ -62,17 +62,6 @@ fn haplotype_pls_separate_carriers_from_reference_reads() {
     let mut alt = Vec::new();
     alt.extend_from_slice(&REFW[..12]);
     alt.extend_from_slice(&REFW[14..]);
-    let call = AssembledCall {
-        pos1: 12,
-        ref_str: "GG".into(),
-        alt_str: "G".into(),
-        support: 2,
-        total: 4,
-        win_lo: 0,
-        win_hi: REFW.len() as u32,
-        hap_ref: REFW.to_vec(),
-        hap_alt: alt.clone(),
-    };
     let mk = |seq: &[u8], cigar: Vec<(Kind, u32)>, sample: usize| {
         LiveRead::new(
             seq,
@@ -99,7 +88,16 @@ fn haplotype_pls_separate_carriers_from_reference_reads() {
             1,
         ),
     ];
-    let hs = haplotype_pls(&reads, 2, &call);
+    let call = AssembledCall {
+        pos1: 12,
+        ref_str: "GG".into(),
+        alt_str: "G".into(),
+        support: 2,
+        total: 4,
+        read_ll: read_hap_lls(&reads, 0, REFW.len() as u32, REFW, &alt),
+    };
+    assert_eq!(call.read_ll.len(), 4);
+    let hs = haplotype_pls(2, &call);
     assert_eq!(hs[0].pl[0], 0, "{:?}", hs[0]);
     assert!(hs[0].pl[2] > 20, "{:?}", hs[0]);
     assert_eq!((hs[0].n_ref, hs[0].n_alt), (2, 0));

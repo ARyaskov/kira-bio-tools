@@ -423,8 +423,14 @@ Commands: `query`, `cnv`.
   tract it sits in, a log-linear slippage model in the spirit of Dindel and
   Strelka2, instead of a fixed homopolymer penalty),
   `--indel-realign off|ins|all` (pair-HMM realignment of indel candidates),
-  `--assemble` (local assembly in active regions with haplotype PLs from the
-  same pair-HMM kernel) and `--recal` (empirical base-quality recalibration
+  `--assemble` (local assembly in active regions: a read-threading de Bruijn
+  graph over the spanning reads and the reference yields candidate
+  haplotypes, a global alignment of each haplotype reads off its indels,
+  and per-sample PLs follow a diploid haplotype model on read-vs-haplotype
+  pair-HMM likelihoods, the best haplotype carrying an event against the
+  best without it, so a SNP or second indel on the same haplotype no longer
+  penalises a carrier read; the pair-HMM realignment vote remains the
+  fallback when the graph finds nothing) and `--recal` (empirical base-quality recalibration
   by reported Q × trinucleotide × strand × cycle, learned at non-variant
   sites; `--recal-known <sites.ani|vcf>` also masks known variant sites, a
   `.ani` index being queried through its position index without decoding a

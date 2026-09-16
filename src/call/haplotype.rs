@@ -1,8 +1,8 @@
-//! Local indel recovery in active regions. Each read is realigned to the
-//! reference window with the glocal pair-HMM; the MAP state path yields the
-//! indel it implies plus the residual mismatch count, and indels supported by
-//! enough clean-fitting reads are called. Genotype likelihoods come from
-//! read-vs-haplotype likelihoods on the same kernel.
+//! Indel calls of an assembled window and their genotype likelihoods, plus
+//! the realignment fallback: each read is realigned to the reference window
+//! with the glocal pair-HMM, the MAP state path yields the indel it implies
+//! and its residual mismatch count, and the indel with the most clean votes
+//! is called. The graph assembler lives in `call::assembly`.
 
 use crate::align::{GlocalParams, encode_nt, glocal};
 use crate::bam::pileup::LiveRead;
@@ -121,11 +121,61 @@ pub struct AssembledCall {
     pub alt_str: String,
     pub support: u32,
     pub total: u32,
-    /// Window and the two haplotypes the reads are scored against.
-    pub win_lo: u32,
-    pub win_hi: u32,
-    pub hap_ref: Vec<u8>,
-    pub hap_alt: Vec<u8>,
+    /// Per spanning read: sample, log P(read | best haplotype without the
+    /// event), log P(read | best haplotype carrying it).
+    pub read_ll: Vec<(usize, f64, f64)>,
+}
+
+/// VCF alleles of `ind` in `refw`: (anchor offset, REF, ALT); `None` when
+/// there is no anchor base before it.
+pub fn indel_alleles(refw: &[u8], ind: &Indel) -> Option<(usize, String, String)> {
+    if ind.ref_off == 0 || ind.ref_off > refw.len() {
+        return None;
+    }
+    let anchor_idx = ind.ref_off - 1;
+    let anchor_base = refw[anchor_idx] as char;
+    if ind.is_ins {
+        let mut a = String::with_capacity(1 + ind.len);
+        a.push(anchor_base);
+        for &b in &ind.bases {
+            a.push(b as char);
+        }
+        Some((anchor_idx, anchor_base.to_string(), a))
+    } else {
+        let end = (ind.ref_off + ind.len).min(refw.len());
+        let mut r = String::with_capacity(1 + ind.len);
+        r.push(anchor_base);
+        for &b in &refw[ind.ref_off..end] {
+            r.push(b as char);
+        }
+        Some((anchor_idx, r, anchor_base.to_string()))
+    }
+}
+
+/// Every spanning read's log-likelihood under two haplotypes, as
+/// `(sample, log P(read | hap_ref), log P(read | hap_alt))`.
+pub fn read_hap_lls(
+    reads: &[LiveRead],
+    win_lo: u32,
+    win_hi: u32,
+    hap_ref: &[u8],
+    hap_alt: &[u8],
+) -> Vec<(usize, f64, f64)> {
+    let mut out = Vec::new();
+    for lr in reads {
+        let Some((bases, quals)) = lr.query_window_qual(win_lo, win_hi) else {
+            continue;
+        };
+        if bases.len() < 12 {
+            continue;
+        }
+        let lr_ref = read_vs_hap_loglik(&bases, &quals, hap_ref);
+        let lr_alt = read_vs_hap_loglik(&bases, &quals, hap_alt);
+        if lr_ref.is_finite() && lr_alt.is_finite() {
+            out.push((lr.sample_idx, lr_ref, lr_alt));
+        }
+    }
+    out
 }
 
 /// Recover the best clean indel near a window. Each read votes for the indel its
@@ -160,39 +210,20 @@ pub fn assemble_indel(
         return None;
     }
     let (ind, support) = votes.into_iter().max_by_key(|(_, c)| *c)?;
-    if support < min_support || ind.ref_off == 0 {
+    if support < min_support {
         return None;
     }
-    let anchor_idx = ind.ref_off - 1;
-    let anchor_base = refw[anchor_idx] as char;
+    let (anchor_idx, ref_str, alt_str) = indel_alleles(refw, &ind)?;
     let pos1 = (win_lo as u64) + anchor_idx as u64 + 1;
-    let (ref_str, alt_str) = if ind.is_ins {
-        let mut a = String::with_capacity(1 + ind.len);
-        a.push(anchor_base);
-        for &b in &ind.bases {
-            a.push(b as char);
-        }
-        (anchor_base.to_string(), a)
-    } else {
-        let end = (ind.ref_off + ind.len).min(refw.len());
-        let mut r = String::with_capacity(1 + ind.len);
-        r.push(anchor_base);
-        for &b in &refw[ind.ref_off..end] {
-            r.push(b as char);
-        }
-        (r, anchor_base.to_string())
-    };
     let hap_alt = apply_indel(refw, &ind);
+    let read_ll = read_hap_lls(reads, win_lo, hi, refw, &hap_alt);
     Some(AssembledCall {
         pos1,
         ref_str,
         alt_str,
         support,
         total,
-        win_lo,
-        win_hi: hi,
-        hap_ref: refw.to_vec(),
-        hap_alt,
+        read_ll,
     })
 }
 
@@ -205,33 +236,25 @@ pub struct HapSample {
     pub n_alt: u32,
 }
 
-/// Genotype likelihoods from read-vs-haplotype likelihoods: P(read | 0/1)
-/// is the mean of the two haplotype likelihoods.
-pub fn haplotype_pls(reads: &[LiveRead], n_samples: usize, call: &AssembledCall) -> Vec<HapSample> {
+/// Genotype likelihoods from the per-read haplotype likelihoods of a call:
+/// P(read | 0/1) is the mean of the two haplotype likelihoods.
+pub fn haplotype_pls(n_samples: usize, call: &AssembledCall) -> Vec<HapSample> {
     let mut ll = vec![[0.0f64; 3]; n_samples];
     let mut out = vec![HapSample::default(); n_samples];
     let ln2 = std::f64::consts::LN_2;
-    for lr in reads {
-        let Some((bases, quals)) = lr.query_window_qual(call.win_lo, call.win_hi) else {
-            continue;
-        };
-        if bases.len() < 12 || lr.sample_idx >= n_samples {
+    for &(sample, lr_ref, lr_alt) in &call.read_ll {
+        if sample >= n_samples {
             continue;
         }
-        let lr_ref = read_vs_hap_loglik(&bases, &quals, &call.hap_ref);
-        let lr_alt = read_vs_hap_loglik(&bases, &quals, &call.hap_alt);
-        if !lr_ref.is_finite() || !lr_alt.is_finite() {
-            continue;
-        }
-        let s = &mut ll[lr.sample_idx];
+        let s = &mut ll[sample];
         s[0] += lr_ref;
         s[2] += lr_alt;
         let m = lr_ref.max(lr_alt);
         s[1] += m + ((lr_ref - m).exp() + (lr_alt - m).exp()).ln() - ln2;
         if lr_alt > lr_ref {
-            out[lr.sample_idx].n_alt += 1;
+            out[sample].n_alt += 1;
         } else {
-            out[lr.sample_idx].n_ref += 1;
+            out[sample].n_ref += 1;
         }
     }
     for (o, l) in out.iter_mut().zip(ll.iter()) {
