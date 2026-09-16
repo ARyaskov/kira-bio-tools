@@ -53,7 +53,52 @@ pub fn record_end0(meta: &BcfRecordMeta) -> u64 {
     meta.pos as u64 + (meta.rlen.max(1)) as u64
 }
 
+/// What to do with a FILTER/INFO/FORMAT tag the header does not declare.
+/// BCF stores tags by dictionary index, so an undeclared one cannot be
+/// written; htslib would leave a file its own reader rejects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Undefined {
+    /// Fail with the tag and record named (default).
+    Error,
+    /// Drop the tag, warning once per tag (`KIRA_BT_BCF_DROP_UNDEFINED=1`).
+    Drop,
+}
+
+impl Undefined {
+    pub fn from_env() -> Self {
+        match std::env::var("KIRA_BT_BCF_DROP_UNDEFINED") {
+            Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => Self::Drop,
+            _ => Self::Error,
+        }
+    }
+}
+
+static UNDEFINED_POLICY: std::sync::LazyLock<Undefined> = std::sync::LazyLock::new(Undefined::from_env);
+static WARNED_TAGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Apply the policy to an undeclared tag: `Ok(())` means skip it.
+fn undefined_tag(policy: Undefined, kind: &str, tag: &str, chrom: &str, pos1: i64) -> Result<()> {
+    match policy {
+        Undefined::Error => bail!(
+            "{kind} \"{tag}\" at {chrom}:{pos1} is not defined in the header; BCF output needs every FILTER/INFO/FORMAT tag declared. Add the header line (e.g. `kira-bt annotate -h lines.txt`) or set KIRA_BT_BCF_DROP_UNDEFINED=1 to drop such tags"
+        ),
+        Undefined::Drop => {
+            let key = format!("{kind}/{tag}");
+            let mut warned = WARNED_TAGS.lock().unwrap_or_else(|e| e.into_inner());
+            if !warned.contains(&key) {
+                eprintln!("Warning: {kind} \"{tag}\" is not defined in the header and is dropped from the BCF output (first seen at {chrom}:{pos1})");
+                warned.push(key);
+            }
+            Ok(())
+        }
+    }
+}
+
 pub fn encode_record<W: Write>(w: &mut W, line: &str, dict: &BcfHeaderDict) -> Result<()> {
+    encode_record_opts(w, line, dict, *UNDEFINED_POLICY)
+}
+
+pub fn encode_record_opts<W: Write>(w: &mut W, line: &str, dict: &BcfHeaderDict, undefined: Undefined) -> Result<()> {
     let cols: Vec<&str> = line.split('\t').collect();
     if cols.len() < 8 { bail!("VCF line has <8 fields"); }
     let chrom = cols[0];
@@ -67,27 +112,33 @@ pub fn encode_record<W: Write>(w: &mut W, line: &str, dict: &BcfHeaderDict) -> R
         Vec::new()
     } else { alt_str.split(',').collect() };
     let qual: f32 = if cols[5] == "." { f32::from_bits(FLOAT_MISSING_BITS) } else { cols[5].parse().context("QUAL parse")? };
+    let pos1 = pos as i64 + 1;
     let filter_str = cols[6];
-    let filters: Vec<u32> = if filter_str == "." || filter_str.is_empty() {
-        Vec::new()
-    } else {
-        filter_str.split(';').filter_map(|f| dict.filter_idx.get(f).copied()).collect()
-    };
+    let mut filters: Vec<u32> = Vec::new();
+    if filter_str != "." && !filter_str.is_empty() {
+        for f in filter_str.split(';') {
+            match dict.filter_idx.get(f) {
+                Some(&idx) => filters.push(idx),
+                None => undefined_tag(undefined, "FILTER", f, chrom, pos1)?,
+            }
+        }
+    }
     let info_str = cols[7];
 
     let mut info_entries: Vec<(u32, &str, Option<&str>)> = Vec::new();
     let mut info_end: Option<i64> = None;
     if info_str != "." && !info_str.is_empty() {
         for kv in info_str.split(';') {
-            if let Some((k, v)) = kv.split_once('=') {
-                if k == "END" {
-                    info_end = v.parse::<i64>().ok();
-                }
-                if let Some(idx) = dict.info_idx.get(k).copied() {
-                    info_entries.push((idx, k, Some(v)));
-                }
-            } else if let Some(idx) = dict.info_idx.get(kv).copied() {
-                info_entries.push((idx, kv, None));
+            let (k, v) = match kv.split_once('=') {
+                Some((k, v)) => (k, Some(v)),
+                None => (kv, None),
+            };
+            if k == "END" {
+                info_end = v.and_then(|v| v.parse::<i64>().ok());
+            }
+            match dict.info_idx.get(k) {
+                Some(&idx) => info_entries.push((idx, k, v)),
+                None => undefined_tag(undefined, "INFO", k, chrom, pos1)?,
             }
         }
     }
@@ -106,7 +157,8 @@ pub fn encode_record<W: Write>(w: &mut W, line: &str, dict: &BcfHeaderDict) -> R
         (cols[8], &cols[9..])
     } else { ("", &[][..]) };
     let fmt_keys: Vec<&str> = if format_str.is_empty() { Vec::new() } else { format_str.split(':').collect() };
-    let n_fmt = fmt_keys.len() as u32;
+    // Only declared keys are written; an undeclared one errors or is dropped below.
+    let n_fmt = fmt_keys.iter().filter(|k| dict.format_idx.contains_key(**k)).count() as u32;
     let n_sample = samples.len() as u32;
 
     let mut shared: Vec<u8> = Vec::with_capacity(128);
@@ -142,7 +194,10 @@ pub fn encode_record<W: Write>(w: &mut W, line: &str, dict: &BcfHeaderDict) -> R
         for (ki, key) in fmt_keys.iter().enumerate() {
             let key_idx = match dict.format_idx.get(*key) {
                 Some(i) => *i,
-                None => continue,
+                None => {
+                    undefined_tag(undefined, "FORMAT", key, chrom, pos1)?;
+                    continue;
+                }
             };
             let key_typ = dict.format_field(key_idx).map(|f| f.typ.as_str()).unwrap_or("String");
             let per_sample_vals: Vec<&str> = sample_parts

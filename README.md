@@ -29,6 +29,10 @@ Binary name: `kira-bt`
 - `KIRA_BT_TIMING=1` enables timing output.
 - `KIRA_BT_DEBUG=1` enables debug output.
 - `KIRA_BT_NO_PROGRESS=1` suppresses BAM-reading progress bars.
+- `KIRA_BT_BCF_DROP_UNDEFINED=1` drops FILTER/INFO/FORMAT tags the header does
+  not declare when writing BCF (warning once per tag) instead of failing; BCF
+  stores tags by header index, so an undeclared tag cannot be written and
+  htslib would produce a file its own reader rejects.
 - `KIRA_BT_BGZF_THREADS=<n>` sets the BGZF decompression worker count.
 - `KIRA_SOLID_DUMP_BAM=<path>` writes the `solid` pipeline's post-markdup BAM.
 - `KIRA_NM_WEIGHT` / `KIRA_INDEL_REALIGN` supply the default for `mpileup`'s

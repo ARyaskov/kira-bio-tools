@@ -118,3 +118,22 @@
         }
         assert_eq!(n, 5);
     }
+
+    /// A tag the header does not declare cannot be stored: the encoder names
+    /// it, or drops it when asked to.
+    #[test]
+    fn undeclared_tags_are_rejected_or_dropped() {
+        let dict = dict_full();
+        let line = "1\t100\t.\tA\tG\t50\tq10\tDP=3;XX=1\tGT:ZZ\t0/1:5\t1/1:6";
+        let mut buf = Vec::new();
+        let err = encode_record_opts(&mut buf, line, &dict, Undefined::Error).unwrap_err().to_string();
+        assert!(err.contains("FILTER \"q10\" at 1:100"), "{err}");
+        let line = "1\t100\t.\tA\tG\t50\tPASS\tDP=3;XX=1\tGT:ZZ\t0/1:5\t1/1:6";
+        let err = encode_record_opts(&mut buf, line, &dict, Undefined::Error).unwrap_err().to_string();
+        assert!(err.contains("INFO \"XX\""), "{err}");
+        buf.clear();
+        encode_record_opts(&mut buf, line, &dict, Undefined::Drop).unwrap();
+        let mut c = Cursor::new(buf);
+        let out = decode_record_to_vcf(&mut c, &dict).unwrap().unwrap();
+        assert_eq!(out, "1\t100\t.\tA\tG\t50\tPASS\tDP=3\tGT\t0/1\t1/1");
+    }
