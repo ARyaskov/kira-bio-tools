@@ -13,13 +13,13 @@ fn bench_bgzf_annotation(c: &mut Criterion) {
     let bgzf_db = temp_dir.path().join("db.vcf.gz");
 
     std::process::Command::new("bgzip")
-        .args(&["-c", plain_vcf])
+        .args(["-c", plain_vcf])
         .stdout(fs::File::create(&bgzf_vcf).unwrap())
         .status()
         .expect("bgzip failed");
 
     std::process::Command::new("bgzip")
-        .args(&["-c", plain_db])
+        .args(["-c", plain_db])
         .stdout(fs::File::create(&bgzf_db).unwrap())
         .status()
         .expect("bgzip failed");
@@ -35,7 +35,7 @@ fn bench_bgzf_annotation(c: &mut Criterion) {
             let output = temp_dir.path().join("output_plain.vcf");
             annotate_vcf_ani_v2(
                 black_box(&ani_path),
-                black_box(&plain_vcf.as_ref()),
+                black_box(plain_vcf.as_ref()),
                 black_box(&output),
                 black_box(&[]),
                 None,
@@ -75,7 +75,7 @@ fn bench_ani_index_building(c: &mut Criterion) {
     let bgzf_db = temp_dir.path().join("db.vcf.gz");
 
     std::process::Command::new("bgzip")
-        .args(&["-c", plain_db])
+        .args(["-c", plain_db])
         .stdout(fs::File::create(&bgzf_db).unwrap())
         .status()
         .expect("bgzip failed");
@@ -86,7 +86,7 @@ fn bench_ani_index_building(c: &mut Criterion) {
     group.bench_function(BenchmarkId::new("plain", "vcf"), |b| {
         b.iter(|| {
             let output = temp_dir.path().join("ani_plain.ani");
-            build_ani_index_auto_v2(black_box(&plain_db.as_ref()), black_box(&output)).unwrap();
+            build_ani_index_auto_v2(black_box(plain_db.as_ref()), black_box(&output)).unwrap();
         });
     });
 
