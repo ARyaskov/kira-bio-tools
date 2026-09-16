@@ -88,12 +88,24 @@ fn prepare_bams(
                     if args.recal {
                         // Empirical qualities learned at non-candidate sites, before BAQ.
                         let t_rc = std::time::Instant::now();
+                        let known = args.recal_known.as_ref().map(|p| {
+                            crate::bam::pos_filter::KnownSites::load(p, &ref_names).unwrap_or_else(
+                                |e| {
+                                    eprintln!("mpileup: --recal-known: {e:#}");
+                                    std::process::exit(2)
+                                },
+                            )
+                        });
+                        if let (Some(k), true) = (&known, timing) {
+                            eprintln!("[KIRA_BT] recal: {} known sites masked", k.len());
+                        }
                         let arc = std::sync::Arc::new(std::mem::take(&mut r.records_buf));
                         let table = crate::bam::pos_filter::RecalTable::build(
                             std::slice::from_ref(&arc),
                             fa,
                             &ref_names,
                             &pre.pos_filter,
+                            known.as_ref(),
                         );
                         r.records_buf =
                             std::sync::Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone());

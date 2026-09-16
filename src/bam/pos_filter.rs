@@ -298,6 +298,88 @@ const RECAL_CYCLES: usize = 8;
 /// Cells with fewer observations keep the reported quality.
 const RECAL_MIN_OBS: u32 = 200;
 
+/// Known variant sites excluded from `--recal` learning on top of the
+/// pre-scan candidates (`--recal-known`): a `.ani` annotation index, whose
+/// position index answers "is there a record here" without decoding, or the
+/// positions of any VCF/BCF.
+pub enum KnownSites {
+    Ani {
+        index: crate::annotate::structs::ani::AniIndex,
+        /// Annotation contig id per BAM reference id.
+        chr_ids: Vec<Option<u32>>,
+    },
+    Set(crate::fx::FxHashSet<u64>),
+}
+
+impl KnownSites {
+    pub fn load(path: &std::path::Path, ref_names: &[String]) -> anyhow::Result<Self> {
+        use anyhow::Context as _;
+        let is_ani = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("ani"));
+        if is_ani {
+            let index = crate::annotate::structs::ani::AniIndex::open(path)
+                .with_context(|| format!("open known sites {}", path.display()))?;
+            let chr_ids = ref_names
+                .iter()
+                .map(|n| {
+                    index
+                        .contig_id(n)
+                        .or_else(|| crate::util::chr_name_to_id(n).map(u32::from))
+                })
+                .collect();
+            return Ok(Self::Ani { index, chr_ids });
+        }
+        let ids: FxHashMap<&str, usize> = ref_names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.as_str(), i))
+            .collect();
+        let mut reader = crate::vcf::UnifiedVcfReader::open(path)
+            .with_context(|| format!("open known sites {}", path.display()))?;
+        let _ = reader.header()?;
+        let mut set = crate::fx::FxHashSet::default();
+        while let Some(line) = reader.read_line()? {
+            if line.is_empty() || line.as_bytes()[0] == b'#' {
+                continue;
+            }
+            let mut it = line.split('\t');
+            let (Some(chrom), Some(pos)) = (it.next(), it.next()) else {
+                continue;
+            };
+            let (Some(&id), Ok(pos1)) = (ids.get(chrom), pos.parse::<u32>()) else {
+                continue;
+            };
+            set.insert(((id as u64) << 32) | pos1.saturating_sub(1) as u64);
+        }
+        Ok(Self::Set(set))
+    }
+
+    /// Whether `pos0` on BAM reference `ref_id` is a known site.
+    #[inline]
+    pub fn contains(&self, ref_id: usize, pos0: u32) -> bool {
+        match self {
+            Self::Ani { index, chr_ids } => match chr_ids.get(ref_id).copied().flatten() {
+                Some(c) => index.has_site(c, pos0 + 1),
+                None => false,
+            },
+            Self::Set(set) => set.contains(&(((ref_id as u64) << 32) | pos0 as u64)),
+        }
+    }
+
+    /// Number of known sites (records of the index or positions of the file).
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Ani { index, .. } => index.entries.len(),
+            Self::Set(set) => set.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Empirical base-quality table (`mpileup --recal`): (reported Q, reference
 /// trinucleotide, strand, cycle bin) → observed bases and mismatches,
 /// collected at sites the pre-scan did not flag as candidate variants. A
@@ -383,12 +465,14 @@ impl RecalTable {
         }
     }
 
-    /// Collect counts from every read, skipping positions in `candidates`.
+    /// Collect counts from every read, skipping positions in `candidates`
+    /// and, when given, the `known` variant sites.
     pub fn build(
         records_per_sample: &[std::sync::Arc<Vec<LiveRead>>],
         fasta: &(impl FastaLike + Sync),
         ref_names: &[String],
         candidates: &InterestingMap,
+        known: Option<&KnownSites>,
     ) -> Self {
         let chunk = 4096;
         let partials: Vec<RecalTable> = records_per_sample
@@ -417,7 +501,10 @@ impl RecalTable {
                             return;
                         }
                         let Some(ctx) = tri_ctx(rs, ri) else { return };
-                        if candidates.contains(lr.ref_id, lr.ref_start + ri as u32) {
+                        let pos0 = lr.ref_start + ri as u32;
+                        if candidates.contains(lr.ref_id, pos0)
+                            || known.is_some_and(|k| k.contains(lr.ref_id, pos0))
+                        {
                             return;
                         }
                         let qb = seq[qi].to_ascii_uppercase();

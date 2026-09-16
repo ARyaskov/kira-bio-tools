@@ -416,7 +416,9 @@ Commands: `query`, `cnv`.
   `--assemble` (local assembly in active regions with haplotype PLs from the
   same pair-HMM kernel) and `--recal` (empirical base-quality recalibration
   by reported Q × trinucleotide × strand × cycle, learned at non-variant
-  sites; needs `-f`, not available with `--stream`).
+  sites; `--recal-known <sites.ani|vcf>` also masks known variant sites, a
+  `.ani` index being queried through its position index without decoding a
+  record; needs `-f`, not available with `--stream`).
   `--nm-weight` and `--indel-realign` also read `KIRA_NM_WEIGHT` and
   `KIRA_INDEL_REALIGN` when the flag is absent, so scripts written against
   the pre-0.7 environment-variable interface keep working; an explicit flag

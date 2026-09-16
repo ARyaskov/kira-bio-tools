@@ -485,6 +485,16 @@ impl AniIndex {
         }
     }
 
+    /// Whether any record sits at exactly `chr_id:pos` (1-based).
+    pub fn has_site(&self, chr_id: u32, pos: u32) -> bool {
+        self.lookup_pos_index(chr_id, pos).is_some_and(|list| {
+            list.iter().any(|&i| {
+                let e = &self.entries[i as usize];
+                e.chr_id == chr_id && e.pos == pos
+            })
+        })
+    }
+
     pub fn lookup_pos_index(&self, chr_id: u32, pos: u32) -> Option<&[u32]> {
         let pos_index = self.pos_index.as_ref()?;
         let contig_idx = self.pos_contig_lut.get(chr_id)?;

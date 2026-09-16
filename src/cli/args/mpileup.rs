@@ -123,6 +123,13 @@ pub struct MpileupArgs {
     #[arg(long = "recal")]
     pub recal: bool,
 
+    /// Known variant sites excluded from `--recal` learning on top of the
+    /// pre-scan candidates: a `.ani` annotation index (e.g. dbSNP built with
+    /// `annotate-index`) or any VCF/BCF. Makes the recalibration a proper
+    /// known-sites BQSR.
+    #[arg(long = "recal-known", requires = "recal")]
+    pub recal_known: Option<std::path::PathBuf>,
+
     #[arg(short = 'X', long = "config")]
     pub config: Option<String>,
 
