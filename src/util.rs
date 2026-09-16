@@ -135,25 +135,81 @@ impl Drop for Timer {
     }
 }
 
-/// C `%g` with six significant digits, as htslib prints floats.
+/// htslib's `kputd`: `%g` with six significant digits, as bcftools prints
+/// every float (QUAL, Float INFO and FORMAT values).
 pub fn fmt_g(v: f64) -> String {
+    let mut s = String::with_capacity(16);
+    push_g(&mut s, v);
+    s
+}
+
+/// [`fmt_g`] appended to `out`.
+pub fn push_g(out: &mut String, v: f64) {
     if v == 0.0 {
-        return "0".to_string();
+        out.push_str(if v.is_sign_negative() { "-0" } else { "0" });
+        return;
     }
-    if !v.is_finite() {
-        return if v.is_nan() { "nan".into() } else if v > 0.0 { "inf".into() } else { "-inf".into() };
+    if v.is_nan() {
+        out.push_str("nan");
+        return;
     }
-    let trim = |s: &str| -> String {
-        if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s.to_string() }
-    };
-    let exp = v.abs().log10().floor() as i32;
-    if exp < -4 || exp >= 6 {
-        let s = format!("{:.5e}", v);
-        let (mant, e) = s.split_once('e').unwrap_or((s.as_str(), "0"));
-        let e: i32 = e.parse().unwrap_or(0);
-        format!("{}e{}{:02}", trim(mant), if e < 0 { '-' } else { '+' }, e.abs())
+    let d = if v < 0.0 {
+        out.push('-');
+        -v
     } else {
-        trim(&format!("{:.*}", (5 - exp).max(0) as usize, v))
+        v
+    };
+    if d.is_infinite() {
+        out.push_str("inf");
+        return;
+    }
+    if !(0.0001..=999999.0).contains(&d) {
+        push_percent_g(out, d);
+        return;
+    }
+    // Six significant digits: rint(d * 10^k), k by magnitude, as kputd does.
+    const LIMIT: [f64; 9] = [0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0];
+    const SCALE: [f64; 10] = [1e9, 1e8, 1e7, 1e6, 1e5, 1e4, 1e3, 1e2, 1e1, 1.0];
+    let idx = LIMIT.iter().position(|&l| d < l).unwrap_or(9);
+    let k = 9 - idx;
+    let i = (d * SCALE[idx]).round_ties_even() as u64;
+    let mut buf = itoa::Buffer::new();
+    let digits = buf.format(i);
+    if k == 0 {
+        out.push_str(digits);
+        return;
+    }
+    let (int_part, frac) = if digits.len() > k { digits.split_at(digits.len() - k) } else { ("", digits) };
+    out.push_str(if int_part.is_empty() { "0" } else { int_part });
+    let frac = frac.trim_end_matches('0');
+    if frac.is_empty() {
+        return;
+    }
+    out.push('.');
+    for _ in digits.len()..k {
+        out.push('0');
+    }
+    out.push_str(frac);
+}
+
+/// C `%g` for a positive finite value outside kputd's fixed range.
+fn push_percent_g(out: &mut String, d: f64) {
+    let sci = format!("{:.5e}", d);
+    let (mant, exp) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    if (-4..6).contains(&exp) {
+        let s = format!("{:.*}", (5 - exp) as usize, d);
+        out.push_str(if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.') } else { &s });
+    } else {
+        out.push_str(if mant.contains('.') { mant.trim_end_matches('0').trim_end_matches('.') } else { mant });
+        out.push('e');
+        out.push(if exp < 0 { '-' } else { '+' });
+        let e = exp.unsigned_abs();
+        if e < 10 {
+            out.push('0');
+        }
+        let mut b = itoa::Buffer::new();
+        out.push_str(b.format(e));
     }
 }
 

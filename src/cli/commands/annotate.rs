@@ -374,13 +374,14 @@ fn apply_postproc_stream_with_args(
         writer.write_all(h.as_bytes())?;
         writer.write_all(b"\n")?;
     }
+    let mut canon = crate::vcf::FloatCanon::from_headers(&out_headers);
 
     if let Some(line) = first_record {
-        write_processed_line(&mut writer, &line, &pp)?;
+        write_processed_line(&mut writer, &line, &pp, &mut canon)?;
     }
     for line in iter {
         let line = line?;
-        write_processed_line(&mut writer, &line, &pp)?;
+        write_processed_line(&mut writer, &line, &pp, &mut canon)?;
     }
     writer.flush()?;
     Ok(())
@@ -390,13 +391,16 @@ fn write_processed_line<W: Write>(
     writer: &mut W,
     line: &str,
     pp: &annotate::postproc::PostProcessor,
+    canon: &mut crate::vcf::FloatCanon,
 ) -> Result<()> {
     use annotate::postproc::{LineAction, process_record_line};
-    match process_record_line(line, pp, false) {
-        LineAction::Keep => { writer.write_all(line.as_bytes())?; writer.write_all(b"\n")?; }
-        LineAction::Replace(s) => { writer.write_all(s.as_bytes())?; writer.write_all(b"\n")?; }
-        LineAction::Drop => {}
-    }
+    let out = match process_record_line(line, pp, false) {
+        LineAction::Keep => canon.canon_line(line).map_or(std::borrow::Cow::Borrowed(line), std::borrow::Cow::Owned),
+        LineAction::Replace(s) => std::borrow::Cow::Owned(canon.canon_line(&s).unwrap_or(s)),
+        LineAction::Drop => return Ok(()),
+    };
+    writer.write_all(out.as_bytes())?;
+    writer.write_all(b"\n")?;
     Ok(())
 }
 

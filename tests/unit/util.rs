@@ -26,3 +26,23 @@
         assert_eq!(k.chr(), 70_000);
         assert_eq!(k.position(), 123);
     }
+
+    /// `fmt_g` against htslib's `kputd` (libhts 1.19) on `fixtures/kputd.tsv`:
+    /// input text, then what bcftools prints for it after the float round trip.
+    #[test]
+    fn fmt_g_matches_htslib_kputd() {
+        let mut n = 0;
+        for line in include_str!("fixtures/kputd.tsv").lines() {
+            let line = line.trim_end_matches('\r');
+            let Some((input, want)) = line.split_once('\t') else { continue };
+            let Ok(d) = input.parse::<f64>() else { panic!("unparsable oracle input {input}") };
+            assert_eq!(fmt_g(d as f32 as f64), want, "{input}");
+            n += 1;
+        }
+        assert!(n > 1000, "{n} oracle rows");
+        assert_eq!(fmt_g(f64::NAN), "nan");
+        assert_eq!(fmt_g(f64::NEG_INFINITY), "-inf");
+        assert_eq!(fmt_g(-0.0), "-0");
+        assert_eq!(fmt_g(1e100), "1e+100");
+        assert_eq!(fmt_g(0.5e-6), "5e-07");
+    }

@@ -223,6 +223,7 @@ pub fn writer_thread_annotated(
     timing: bool,
     log_tag: &'static str,
 ) -> Result<()> {
+    let mut canon = crate::vcf::FloatCanon::from_headers(&headers);
     let start = Instant::now();
     let mut lines_written = 0usize;
     let mut bytes_written = 0usize;
@@ -237,7 +238,9 @@ pub fn writer_thread_annotated(
 
         while let Ok(batch) = rx.recv() {
             for idx in 0..batch.input.len() {
-                let line = annotated_line(&batch, idx);
+                let raw = annotated_line(&batch, idx);
+                let canon_l = canon.canon_line(raw);
+                let line: &str = canon_l.as_deref().unwrap_or(raw);
                 bytes_written += line.len() + 1;
                 lines_written += 1;
             }
@@ -253,7 +256,9 @@ pub fn writer_thread_annotated(
 
         while let Ok(batch) = rx.recv() {
             for idx in 0..batch.input.len() {
-                let line = annotated_line(&batch, idx);
+                let raw = annotated_line(&batch, idx);
+                let canon_l = canon.canon_line(raw);
+                let line: &str = canon_l.as_deref().unwrap_or(raw);
                 writeln!(writer, "{}", line)?;
                 bytes_written += line.len() + 1;
                 lines_written += 1;
@@ -272,7 +277,9 @@ pub fn writer_thread_annotated(
 
         while let Ok(batch) = rx.recv() {
             for idx in 0..batch.input.len() {
-                let line = annotated_line(&batch, idx);
+                let raw = annotated_line(&batch, idx);
+                let canon_l = canon.canon_line(raw);
+                let line: &str = canon_l.as_deref().unwrap_or(raw);
                 writer.write_all(line.as_bytes())?;
                 writer.write_all(b"\n")?;
                 bytes_written += line.len() + 1;
@@ -292,7 +299,9 @@ pub fn writer_thread_annotated(
 
         while let Ok(batch) = rx.recv() {
             for idx in 0..batch.input.len() {
-                let line = annotated_line(&batch, idx);
+                let raw = annotated_line(&batch, idx);
+                let canon_l = canon.canon_line(raw);
+                let line: &str = canon_l.as_deref().unwrap_or(raw);
                 writeln!(writer, "{}", line)?;
                 bytes_written += line.len() + 1;
                 lines_written += 1;
@@ -335,6 +344,7 @@ pub fn writer_thread(
     timing: bool,
     log_tag: &'static str,
 ) -> Result<()> {
+    let mut canon = crate::vcf::FloatCanon::from_headers(&headers);
     let start = Instant::now();
     let mut lines_written = 0usize;
     let mut bytes_written = 0usize;
@@ -348,7 +358,9 @@ pub fn writer_thread(
         }
 
         while let Ok(batch) = rx.recv() {
-            for line in batch {
+            for raw in batch {
+                let canon_l = canon.canon_line(&raw);
+                let line: &str = canon_l.as_deref().unwrap_or(&raw);
                 bytes_written += line.len() + 1;
                 lines_written += 1;
             }
@@ -363,7 +375,9 @@ pub fn writer_thread(
         }
 
         while let Ok(batch) = rx.recv() {
-            for line in batch {
+            for raw in batch {
+                let canon_l = canon.canon_line(&raw);
+                let line: &str = canon_l.as_deref().unwrap_or(&raw);
                 writeln!(writer, "{}", line)?;
                 bytes_written += line.len() + 1;
                 lines_written += 1;
@@ -381,7 +395,9 @@ pub fn writer_thread(
         }
 
         while let Ok(batch) = rx.recv() {
-            for line in batch {
+            for raw in batch {
+                let canon_l = canon.canon_line(&raw);
+                let line: &str = canon_l.as_deref().unwrap_or(&raw);
                 writer.write_all(line.as_bytes())?;
                 writer.write_all(b"\n")?;
                 bytes_written += line.len() + 1;
@@ -400,7 +416,9 @@ pub fn writer_thread(
         }
 
         while let Ok(batch) = rx.recv() {
-            for line in batch {
+            for raw in batch {
+                let canon_l = canon.canon_line(&raw);
+                let line: &str = canon_l.as_deref().unwrap_or(&raw);
                 writeln!(writer, "{}", line)?;
                 bytes_written += line.len() + 1;
                 lines_written += 1;

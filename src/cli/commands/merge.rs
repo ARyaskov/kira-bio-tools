@@ -630,31 +630,8 @@ fn normalize_gt(gt: &str) -> String {
     out
 }
 
-/// C `%g` with six significant digits (htslib float output).
-fn fmt_g(v: f64) -> String {
-    if v == 0.0 { return "0".into(); }
-    if v.is_nan() { return "nan".into(); }
-    if v.is_infinite() { return if v > 0.0 { "inf".into() } else { "-inf".into() }; }
-    let sci = format!("{:.5e}", v);
-    let (mant, exp) = sci.split_once('e').unwrap();
-    let exp: i32 = exp.parse().unwrap_or(0);
-    if !(-4..6).contains(&exp) {
-        let m = mant.trim_end_matches('0').trim_end_matches('.');
-        return format!("{}e{}{:02}", m, if exp < 0 { '-' } else { '+' }, exp.abs());
-    }
-    let decimals = (5 - exp).max(0) as usize;
-    let s = format!("{:.*}", decimals, v);
-    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s }
-}
-
 fn fmt_float_list(v: &str) -> String {
-    v.split(',')
-        .map(|x| match x.parse::<f64>() {
-            Ok(f) if x != "." => fmt_g(f),
-            _ => x.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(",")
+    crate::vcf::canonical_floats(v).into_owned()
 }
 
 /// Merge the records of one site. `readers` carries the per-file sample maps
@@ -705,7 +682,7 @@ fn merge_group(group: &[(usize, Record)], readers: &[Source], ctx: &MergeCtx<'_>
         .iter()
         .filter_map(|(_, r)| r.qual.parse::<f64>().ok())
         .fold(None, |m: Option<f64>, q| Some(m.map_or(q, |v| v.max(q))))
-        .map(fmt_g)
+        .map(|q| crate::util::fmt_g(q as f32 as f64))
         .unwrap_or_else(|| ".".to_string());
     let merged_filter = merge_filters(group.iter().map(|(_, r)| r.filter.as_str()), ctx.filter_logic);
 
@@ -1027,7 +1004,7 @@ fn normalize_num(v: f64) -> String {
     if v.fract() == 0.0 && v.abs() < 1e15 {
         format!("{}", v as i64)
     } else {
-        format!("{:.6}", v).trim_end_matches('0').trim_end_matches('.').to_string()
+        crate::util::fmt_g(v as f32 as f64)
     }
 }
 

@@ -86,6 +86,13 @@ Streaming: every reader accepts `-` (or no path where the input is optional)
 for stdin and detects plain, gzip, BGZF, VCF and BCF by content; `-O z`, `-O b`
 and `-O u` write to stdout when no `-o` is given.
 
+Floats: output floats are rendered as htslib renders them (`kputd`, i.e.
+`%g` with six significant digits, after the value is narrowed to `float`), so
+`1e-1` prints as `0.1`, `60.00` as `60` and `1e6` as `1e+06`. Text sinks apply
+this to QUAL and to Float-typed INFO/FORMAT values only, leaving every other
+column byte-for-byte as read; BCF decoding, `query` and `merge` use the same
+formatter.
+
 **3. Free-form bcftools argv.** These take the whole bcftools command line as
 positional arguments, with no native options of their own:
 

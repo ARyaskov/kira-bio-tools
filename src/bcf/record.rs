@@ -483,10 +483,9 @@ fn decode_format_cell<R: Read>(r: &mut R, key: &str, n_per: usize, typ: u8) -> R
     Ok(if vs.is_empty() { ".".into() } else { vs.join(",") })
 }
 
-/// htslib prints floats with `%g`; integers-valued floats print without a
-/// fraction.
+/// htslib prints floats with `kputd` (`%g`, six significant digits).
 pub fn format_float(f: f32) -> String {
-    if f.fract() == 0.0 && f.abs() < 1e10 { format!("{}", f as i64) } else { format!("{}", f) }
+    crate::util::fmt_g(f as f64)
 }
 
 #[cfg(test)]

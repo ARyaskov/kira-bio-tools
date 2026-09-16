@@ -494,6 +494,8 @@ struct QueryFormatContext {
     samples: Vec<String>,
     selected: Vec<usize>,
     parts: Vec<QPart>,
+    /// bcftools re-renders floats it prints; so do we.
+    canon: crate::vcf::FloatCanon,
 }
 
 impl QueryFormatContext {
@@ -508,6 +510,7 @@ impl QueryFormatContext {
             samples: samples.to_vec(),
             selected,
             parts: parse_qparts(&format)?,
+            canon: crate::vcf::FloatCanon::from_headers(header),
         })
     }
 
@@ -608,7 +611,8 @@ impl QueryFormatContext {
         sample_mask: Option<&[bool]>,
     ) -> Result<String> {
         if tok == "LINE" {
-            return Ok(record_line(rec));
+            let line = record_line(rec);
+            return Ok(self.canon.canon_line(&line).unwrap_or(line));
         }
         if tok == "CHROM" {
             return Ok(rec.chrom.clone());
@@ -626,13 +630,13 @@ impl QueryFormatContext {
             return Ok(rec.alt.clone());
         }
         if tok == "QUAL" {
-            return Ok(rec.qual.clone());
+            return Ok(crate::vcf::canonical_float(&rec.qual).into_owned());
         }
         if tok == "FILTER" {
             return Ok(rec.filter.clone());
         }
         if tok == "INFO" {
-            return Ok(rec.info.clone());
+            return Ok(self.canon.canon_info(&rec.info).into_owned());
         }
         if tok == "FORMAT" {
             if let Some(fmt) = &rec.format {
@@ -696,14 +700,14 @@ impl QueryFormatContext {
             return Ok(n.to_string());
         }
         if let Some(key) = tok.strip_prefix("INFO/") {
-            return Ok(info_value(&rec.info, key).unwrap_or(".").to_string());
+            return Ok(self.info_text(key, info_value(&rec.info, key).unwrap_or(".")));
         }
         if tok == "TYPE" {
             return Ok(classify_variant(&rec.ref_allele, &rec.alt));
         }
         if let Some(key) = tok.strip_prefix("FORMAT/").or_else(|| tok.strip_prefix("FMT/")) {
             if let Some(i) = sample {
-                if let Some(v) = sample_fmt(rec, i, key) { return Ok(v.to_string()); }
+                if let Some(v) = sample_fmt(rec, i, key) { return Ok(self.format_text(key, v)); }
             } else if let Some(fmt) = &rec.format {
                 let mut s = String::new();
                 let mut first = true;
@@ -711,7 +715,8 @@ impl QueryFormatContext {
                     if sample_mask.map(|m| m.get(si).copied().unwrap_or(false)).unwrap_or(true) {
                         if !first { s.push(','); }
                         first = false;
-                        s.push_str(sample_fmt_by_format(fmt, rec.samples.get(si).map(String::as_str), key).unwrap_or("."));
+                        let v = sample_fmt_by_format(fmt, rec.samples.get(si).map(String::as_str), key).unwrap_or(".");
+                        s.push_str(&self.format_text(key, v));
                     }
                 }
                 return Ok(s);
@@ -720,8 +725,8 @@ impl QueryFormatContext {
         }
         if let Some((k, idx)) = parse_indexed_info(tok) {
             let values = info_value(&rec.info, &k).unwrap_or(".");
-            let parts: Vec<&str> = values.split(',').collect();
-            return Ok(parts.get(idx).copied().unwrap_or(".").to_string());
+            let v = values.split(',').nth(idx).unwrap_or(".");
+            return Ok(self.info_text(&k, v));
         }
         if tok == "TGT" {
             let gt = sample.and_then(|i| sample_fmt(rec, i, "GT"));
@@ -729,13 +734,21 @@ impl QueryFormatContext {
         }
         if let Some(i) = sample {
             if let Some(v) = sample_fmt(rec, i, tok) {
-                return Ok(v.to_string());
+                return Ok(self.format_text(tok, v));
             }
         }
         if let Some(v) = info_value(&rec.info, tok) {
-            return Ok(v.to_string());
+            return Ok(self.info_text(tok, v));
         }
         Ok(".".to_string())
+    }
+
+    fn info_text(&self, key: &str, v: &str) -> String {
+        if self.canon.info_is_float(key) { crate::vcf::canonical_floats(v).into_owned() } else { v.to_string() }
+    }
+
+    fn format_text(&self, key: &str, v: &str) -> String {
+        if self.canon.format_is_float(key) { crate::vcf::canonical_floats(v).into_owned() } else { v.to_string() }
     }
 }
 
