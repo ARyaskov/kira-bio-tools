@@ -1,8 +1,11 @@
-use crate::bam::pileup::strand_bias_phred;
+use crate::bam::bcf_layout::{self, IndelSpec, LayoutCtx};
+use crate::bam::pileup::{EngineOpts, IndelEvent, SiteHook, strand_bias_phred};
+use noodles_sam::alignment::record::cigar::op::Kind;
 use crate::bam::pos_filter::InterestingMap;
+use crate::bam::samples::{SampleMap, SampleOpts};
 use crate::bam::{
     AnnotateSpec, BamReader, ErrorModel, FlagFilters, LiveRead, PileupSite, PresetConfig,
-    mpileup_engine_from_records, parse_samples_filter,
+    mpileup_engine_from_records_opts,
 };
 use crate::call::GvcfBlocker;
 use crate::cli::args::MpileupArgs;
@@ -14,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use fxhash::FxHashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Reference contigs are loaded on demand through the `.fai` index.
 pub(crate) type Fasta = crate::fasta::IndexedFasta;
@@ -54,7 +57,8 @@ fn prepare_bams(
         if flag_filters.is_active() {
             r.records_buf.retain(|lr| flag_filters.passes(lr.flags));
         }
-        if !baq_off {
+        // The bcftools layout realigns lazily per site (`mplp_realn`).
+        if !baq_off && !args.bcftools_layout {
             match fasta {
                 Some(fa) => {
                     let ref_names = r.ref_names.clone();
@@ -83,7 +87,7 @@ fn prepare_bams(
                         }
                     }
                     let t1 = std::time::Instant::now();
-                    crate::bam::reader::apply_hmm_baq_to_reads_masked(&mut r.records_buf, &ref_names, fa, Some(&pre.needs_baq), &args.nm_weight);
+                    crate::bam::reader::apply_hmm_baq_to_reads_masked(&mut r.records_buf, &ref_names, fa, Some(&pre.needs_baq), &args.nm_weight, args.redo_baq);
                     if timing { eprintln!("[KIRA_BT] BAQ: {:.1}s", t1.elapsed().as_secs_f64()); }
                     combined = Some(match combined.take() {
                         None => pre.pos_filter,
@@ -106,22 +110,29 @@ pub fn cmd_mpileup(args: MpileupArgs) -> Result<()> {
 
     let preset = args.config.as_deref().map(PresetConfig::parse).transpose()?;
     let min_mq = preset.as_ref().and_then(|p| p.min_mq).unwrap_or(args.min_mq) as u8;
-    let min_bq = preset.as_ref().and_then(|p| p.min_bq).unwrap_or(args.min_bq) as u8;
+    let min_bq = resolve_min_bq(&args, preset.as_ref());
     let _max_depth = preset.as_ref().and_then(|p| p.max_depth).unwrap_or(args.max_depth);
     let _indel_size = preset.as_ref().and_then(|p| p.indel_size).unwrap_or(args.indel_size);
     let baq_off = preset.as_ref().and_then(|p| p.no_baq).unwrap_or(args.no_baq);
     let skip_indels = args.skip_indels;
     let annotate_spec = if args.annotate.is_empty() { None } else { Some(args.annotate.join(",")) };
-    let annotate = AnnotateSpec::parse(annotate_spec.as_deref())?;
-    let flag_filters = FlagFilters::from_full(args.ef, args.df, args.if_, args.nf,
-        args.rf.as_deref(), args.ff.as_deref())?
-        .with_skip_all(args.skip_all_set.as_deref(), args.skip_all_unset.as_deref())?;
+    let annotate = parse_annotate(&args, annotate_spec.as_deref())?;
+    if args.bcftools_layout {
+        if args.variants_only {
+            bail!("mpileup: --bcftools-layout writes genotype likelihoods only; -v/--variants-only needs the kira layout");
+        }
+        if args.gvcf.is_some() {
+            bail!("mpileup: --gvcf is not available with --bcftools-layout");
+        }
+        if args.assemble {
+            bail!("mpileup: --assemble is not available with --bcftools-layout");
+        }
+    }
+    let flag_filters = flag_filters(&args)?;
     let gap_frac = preset.as_ref().and_then(|p| p.gap_frac).unwrap_or(args.gap_frac);
     let min_ireads = args.min_ireads;
-    let sample_filter = parse_samples_filter(args.samples.as_deref(), args.samples_file.as_deref())?;
-    if args.read_groups.is_some() {
-        eprintln!("[mpileup] warning: -G/--read-groups is accepted but read-group selection is not applied");
-    }
+    let sopts = SampleOpts::parse(args.samples.as_deref(), args.samples_file.as_deref(), args.read_groups.as_deref(), args.ignore_rg)?;
+    let (smap, bam_ids) = build_sample_map(&args.inputs, args.fasta_ref.as_deref(), &sopts)?;
     if args.recal && args.stream {
         bail!("mpileup: --recal needs two passes over the reads and cannot be combined with --stream");
     }
@@ -139,27 +150,292 @@ pub fn cmd_mpileup(args: MpileupArgs) -> Result<()> {
 
     let timing = std::env::var("KIRA_BT_TIMING").is_ok();
     if args.stream {
-        run_streaming(&args, &flag_filters, baq_off, fasta, &annotate, min_mq, min_bq, skip_indels, min_ireads, gap_frac, &sample_filter, regions.as_ref(), timing, &mut out)?;
+        run_streaming(&args, &flag_filters, baq_off, fasta, &annotate, min_mq, min_bq, skip_indels, min_ireads, gap_frac, &smap, &bam_ids, regions.as_ref(), timing, &mut out)?;
+        out.flush()?;
+        return Ok(());
+    }
+    if args.bcftools_layout && (args.regions.is_some() || args.regions_file.is_some()) {
+        // bcftools walks `-r` regions one at a time, each with its own
+        // pileup, so overlapping regions repeat their records.
+        let targets = collect_targets(&args)?;
+        let mut header_written = false;
+        for (c, b, e) in ordered_regions(&args)? {
+            let mut bams: Vec<BamReader> = Vec::with_capacity(args.inputs.len());
+            for (p, id) in args.inputs.iter().zip(&bam_ids) {
+                let Some(id) = id else { continue };
+                bams.push(open_input(p, Some(&[(c.clone(), b, e)]), args.fasta_ref.as_deref(), &smap, *id)?);
+            }
+            let combined_filter = prepare_bams(&mut bams, &args, &flag_filters, baq_off, fasta.as_ref(), timing);
+            let mut one = RegionSet::default();
+            one.add(&c, b, e);
+            one.finalize();
+            run_prepared(bams, &args, combined_filter, fasta.as_ref(), &annotate, min_mq, min_bq, skip_indels, min_ireads, gap_frac, &smap.names, Some(&one), targets.as_ref(), !header_written, timing, &mut out)?;
+            header_written = true;
+        }
         out.flush()?;
         return Ok(());
     }
     let region_list: Option<Vec<(String, u32, u32)>> =
         regions.as_ref().map(|rs| rs.iter().map(|(c, b, e)| (c.to_string(), b, e)).collect());
     let mut bams: Vec<BamReader> = Vec::with_capacity(args.inputs.len());
-    for p in &args.inputs {
+    for (p, id) in args.inputs.iter().zip(&bam_ids) {
+        let Some(id) = id else { continue };
         let t0 = std::time::Instant::now();
-        let r = match &region_list {
-            Some(regs) => BamReader::open_with_regions_and_reference(p, regs, args.fasta_ref.as_deref())?,
-            None => BamReader::open_with_reference(p, args.fasta_ref.as_deref())?,
-        };
+        let r = open_input(p, region_list.as_deref(), args.fasta_ref.as_deref(), &smap, *id)?;
         if timing { eprintln!("[KIRA_BT] BAM load: {:.1}s, {} records", t0.elapsed().as_secs_f64(), r.records_buf.len()); }
         bams.push(r);
     }
     let combined_filter = prepare_bams(&mut bams, &args, &flag_filters, baq_off, fasta.as_ref(), timing);
 
-    run_prepared(bams, &args, combined_filter, fasta.as_ref(), &annotate, min_mq, min_bq, skip_indels, min_ireads, gap_frac, &sample_filter, regions.as_ref(), timing, &mut out)?;
+    run_prepared(bams, &args, combined_filter, fasta.as_ref(), &annotate, min_mq, min_bq, skip_indels, min_ireads, gap_frac, &smap.names, regions.as_ref(), None, true, timing, &mut out)?;
     out.flush()?;
     Ok(())
+}
+
+/// `-Q`: the preset, the flag, then the layout's default (bcftools 1.19
+/// skips only quality 0; kira keeps its historical 13).
+fn resolve_min_bq(args: &MpileupArgs, preset: Option<&PresetConfig>) -> u8 {
+    preset
+        .and_then(|p| p.min_bq)
+        .or(args.min_bq)
+        .unwrap_or(if args.bcftools_layout { 1 } else { 13 })
+        .min(255) as u8
+}
+
+/// Read-level flag filters. The bcftools layout uses bcftools' rules alone:
+/// `--ff` is the only exclusion (its default drops unmapped, secondary,
+/// QC-fail and duplicate reads, not supplementary ones) and `--rf` skips
+/// reads with every listed bit unset.
+fn flag_filters(args: &MpileupArgs) -> Result<FlagFilters> {
+    if args.bcftools_layout {
+        let mut f = FlagFilters::from_full(args.ef, args.df, args.if_, args.nf, None, args.ff.as_deref())?
+            .with_skip_all(args.skip_all_set.as_deref(), args.skip_all_unset.as_deref())?;
+        if let Some(rf) = &args.rf {
+            f.skip_all_unset |= crate::bam::mpileup_opts::parse_sam_flags(rf)?;
+        }
+        return Ok(f);
+    }
+    FlagFilters::from_full(args.ef, args.df, args.if_, args.nf, args.rf.as_deref(), args.ff.as_deref())?
+        .with_skip_all(args.skip_all_set.as_deref(), args.skip_all_unset.as_deref())
+}
+
+/// Samples from the input headers under `-s/-S/-G` (bcftools' `bam_smpl`);
+/// per input, its id in the map or `None` when bcftools would drop the file.
+fn build_sample_map(inputs: &[PathBuf], reference: Option<&Path>, sopts: &SampleOpts) -> Result<(SampleMap, Vec<Option<usize>>)> {
+    let mut smap = SampleMap::default();
+    let mut ids = Vec::with_capacity(inputs.len());
+    for p in inputs {
+        let h = BamReader::read_header_only(p, reference).with_context(|| format!("open {}", p.display()))?;
+        let id = smap.add_bam(&h, &p.to_string_lossy(), sopts);
+        if id.is_none() {
+            eprintln!("[mpileup] warning: no selected read group in {}, skipping the file", p.display());
+        }
+        ids.push(id);
+    }
+    if smap.names.is_empty() {
+        bail!("mpileup: failed to find a file header with usable read groups");
+    }
+    Ok((smap, ids))
+}
+
+/// Load one input with every read tagged by its sample.
+fn open_input(p: &Path, regions: Option<&[(String, u32, u32)]>, reference: Option<&Path>, smap: &SampleMap, bam_id: usize) -> Result<BamReader> {
+    let resolve = |rg: Option<&[u8]>| smap.sample_id(bam_id, rg);
+    match regions {
+        Some(r) => BamReader::open_with_regions_resolved(p, r, reference, Some(&resolve)),
+        None => BamReader::open_with_reference_resolved(p, reference, Some(&resolve)),
+    }
+}
+
+/// One `BamReader` per sample, reads merged across inputs in position order.
+fn regroup_by_sample(bams: Vec<BamReader>, n: usize) -> Vec<BamReader> {
+    let header = bams[0].header.clone();
+    let ref_names = bams[0].ref_names.clone();
+    let mut per: Vec<Vec<LiveRead>> = (0..n).map(|_| Vec::new()).collect();
+    let single_source = bams.len() == 1;
+    for b in bams {
+        for lr in b.records_buf {
+            if lr.sample_idx < n {
+                per[lr.sample_idx].push(lr);
+            }
+        }
+    }
+    per.into_iter()
+        .map(|mut v| {
+            if !single_source {
+                v.sort_by_key(|lr| (lr.ref_id, lr.ref_start));
+            }
+            BamReader::from_parts(v, header.clone(), Vec::new(), ref_names.clone())
+        })
+        .collect()
+}
+
+/// `-a` under the requested layout: kira's tag set, or bcftools' defaults
+/// and tag names with `--bcftools-layout`.
+fn parse_annotate(args: &MpileupArgs, spec: Option<&str>) -> Result<AnnotateSpec> {
+    if args.bcftools_layout { AnnotateSpec::parse_bcftools(spec) } else { AnnotateSpec::parse(spec) }
+}
+
+/// Read and base filters of the pileup pass. The bcftools layout applies
+/// bcftools' defaults (`--delta-BQ 30`, `--max-BQ 60`, orphan pairs dropped
+/// unless `-A`); the kira layout applies the two quality knobs only when
+/// given explicitly.
+fn engine_opts(args: &MpileupArgs, min_mq: u8, min_bq: u8, skip_indels: bool) -> EngineOpts {
+    let mut o = EngineOpts::new(min_mq, min_bq, skip_indels, !args.ignore_overlaps);
+    let clamp = |v: u32| v.min(255) as u8;
+    if args.bcftools_layout {
+        o.max_bq = Some(clamp(args.max_bq.unwrap_or(60)));
+        o.delta_bq = Some(clamp(args.delta_bq.unwrap_or(30)));
+        o.skip_orphans = !args.count_orphans;
+        o.keep_n = true;
+        o.emit_covered = true;
+        o.max_depth = Some(args.max_depth);
+        o.builtin_flag_skip = false;
+    } else {
+        o.max_bq = args.max_bq.map(clamp);
+        o.delta_bq = args.delta_bq.map(clamp);
+    }
+    o
+}
+
+/// `-r/-R` regions in bcftools' iteration order: contigs by first
+/// appearance, regions by start within a contig, overlaps kept.
+fn ordered_regions(args: &MpileupArgs) -> Result<Vec<(String, u32, u32)>> {
+    let mut regs: Vec<(String, u32, u32)> = Vec::new();
+    if let Some(s) = &args.regions {
+        for tok in s.split(',') {
+            let t = tok.trim();
+            if t.is_empty() {
+                continue;
+            }
+            regs.push(crate::regions::parse_region_spec(t)?);
+        }
+    }
+    if let Some(f) = &args.regions_file {
+        regs.extend(crate::cli::commands::tabix::read_region_file(f)?);
+    }
+    let mut order: Vec<String> = Vec::new();
+    for (c, _, _) in &regs {
+        if !order.contains(c) {
+            order.push(c.clone());
+        }
+    }
+    regs.sort_by_key(|(c, _, _)| order.iter().position(|x| x == c).unwrap_or(usize::MAX));
+    Ok(regs)
+}
+
+/// bcftools' `mplp_realn` (1.19, `MPLP_REALN_PARTIAL`): at a site where some
+/// pileup read carries an indel, BAQ is applied once to the reads that have
+/// not been realigned yet, skipping reads whose indel sits far from both
+/// ends when the pileup is deep enough. Positions before the first
+/// qualifying site keep the reads' original qualities.
+fn bcftools_realn_hook<'a>(fasta: &'a Fasta, ref_names: &'a [String], kept: Vec<bool>, max_read_len: usize, redo: bool) -> Box<SiteHook<'a>> {
+    Box::new(move |live: &mut [LiveRead], _ref_id: usize, pos: u32| {
+        let (mut nt, mut has_indel, mut has_clip) = (0i64, 0i64, 0i64);
+        let (mut min_indel, mut max_indel) = (i64::MAX, i64::MIN);
+        for lr in live.iter_mut() {
+            if !kept.get(lr.sample_idx).copied().unwrap_or(false) {
+                continue;
+            }
+            nt += 1;
+            lr.seek(pos);
+            let indel = match lr.indel_after(pos) {
+                Some(IndelEvent::Ins(s)) => s.len() as i64,
+                Some(IndelEvent::Del(l)) => -(l as i64),
+                None => 0,
+            };
+            let cigar_indel = lr.cigar_pairs.iter().any(|(k, _)| matches!(k, Kind::Insertion | Kind::Deletion | Kind::Skip));
+            if cigar_indel || indel != 0 {
+                has_indel += 1;
+            }
+            if lr.has_softclip {
+                has_clip += 1;
+            }
+            max_indel = max_indel.max(indel);
+            min_indel = min_indel.min(indel);
+        }
+        if has_indel == 0
+            || ((has_clip as f64) < 0.2 * nt as f64 && max_indel == min_indel && ((has_indel as f64) < 0.1 * nt as f64 || has_indel == 1))
+        {
+            return;
+        }
+        let realn_dist = 40 + 10 * i64::from(nt < 40) + 10 * i64::from(nt < 20);
+        for lr in live.iter_mut() {
+            if !kept.get(lr.sample_idx).copied().unwrap_or(false) || lr.realigned {
+                continue;
+            }
+            lr.realigned = true;
+            let l_qseq = lr.seq().len();
+            if l_qseq > max_read_len {
+                continue;
+            }
+            let cig = &lr.cigar_pairs;
+            if nt > 15 && cig.len() > 1 {
+                let long = l_qseq > 500;
+                let is_match = |k: Kind| matches!(k, Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch);
+                let (mut lm, mut rm, mut nm) = (0i64, 0i64, 0usize);
+                for &(k, l) in cig.iter() {
+                    if long && matches!(k, Kind::HardClip | Kind::SoftClip) {
+                        continue;
+                    }
+                    if is_match(k) {
+                        lm += l as i64;
+                        nm += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if nm != cig.len() {
+                    for &(k, l) in cig.iter().rev() {
+                        if long && matches!(k, Kind::HardClip | Kind::SoftClip) {
+                            continue;
+                        }
+                        if is_match(k) {
+                            rm += l as i64;
+                        } else {
+                            break;
+                        }
+                    }
+                    if lm >= realn_dist * 4 && rm >= realn_dist * 4 {
+                        continue;
+                    }
+                    if lm >= realn_dist && rm >= realn_dist && (has_clip as f64) < (0.15 + 0.05 * f64::from(nt > 20)) * nt as f64 {
+                        continue;
+                    }
+                }
+            }
+            if l_qseq > 500 {
+                let rl: i64 = cig.iter().filter(|(k, _)| matches!(k, Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch | Kind::Deletion | Kind::Skip)).map(|(_, l)| *l as i64).sum();
+                if (rl - l_qseq as i64).abs() * l_qseq as i64 >= 500_000 {
+                    continue;
+                }
+            }
+            crate::bam::reader::baq_read(lr, ref_names, fasta, redo);
+        }
+    })
+}
+
+/// `-t/-T` targets, applied as a position filter (never as an iterator).
+fn collect_targets(args: &MpileupArgs) -> Result<Option<RegionSet>> {
+    let mut set = RegionSet::default();
+    let mut any = false;
+    if let Some(s) = &args.targets {
+        for (c, b, e) in RegionSet::from_cli(s)?.iter() {
+            set.add(c, b, e);
+        }
+        any = true;
+    }
+    if let Some(f) = &args.targets_file {
+        for (c, b, e) in RegionSet::from_file(f)?.iter() {
+            set.add(c, b, e);
+        }
+        any = true;
+    }
+    if !any {
+        return Ok(None);
+    }
+    set.finalize();
+    Ok(Some(set))
 }
 
 /// `-r/-R/-t/-T`: comma lists and region files (BED or `chr:beg-end`),
@@ -202,16 +478,32 @@ fn run_streaming<W: Write>(
     skip_indels: bool,
     min_ireads: u32,
     gap_frac: f64,
-    sample_filter: &Option<Vec<String>>,
+    smap: &SampleMap,
+    bam_ids: &[Option<usize>],
     regions: Option<&RegionSet>,
     timing: bool,
     out: &mut W,
 ) -> Result<()> {
-    use crate::bam::{ReadHook, StreamingBam, mpileup_engine_streaming};
+    use crate::bam::{ReadHook, StreamingBam};
     let fasta = fasta.map(std::sync::Arc::new);
     let workers = (crate::threads::bam_workers() / args.inputs.len().max(1)).max(1);
-    let mut streams = Vec::with_capacity(args.inputs.len());
-    for (i, p) in args.inputs.iter().enumerate() {
+    let bcftools_layout = args.bcftools_layout;
+    let redo_baq = args.redo_baq;
+    // One decoder per input feeds one engine source, so each input must map
+    // to exactly its own sample, in input order.
+    let smap_arc = std::sync::Arc::new(smap.clone());
+    let mut stream_inputs: Vec<(&PathBuf, usize)> = Vec::new();
+    for (p, id) in args.inputs.iter().zip(bam_ids) {
+        let Some(id) = id else { continue };
+        let ss = smap.file_samples(*id);
+        if ss.len() != 1 || ss[0] != stream_inputs.len() {
+            bail!("mpileup --stream: each input must carry exactly one sample of its own; {} does not (use the default mode)", p.display());
+        }
+        stream_inputs.push((p, *id));
+    }
+    let mut streams = Vec::with_capacity(stream_inputs.len());
+    for (i, (p, bam_id)) in stream_inputs.iter().enumerate() {
+        let bam_id = *bam_id;
         let flags = flag_filters.clone();
         let fa = fasta.clone();
         let nm_weight = args.nm_weight.clone();
@@ -220,7 +512,7 @@ fn run_streaming<W: Write>(
             if flags.is_active() && !flags.passes(lr.flags) {
                 return false;
             }
-            if baq_off {
+            if baq_off || bcftools_layout {
                 return true;
             }
             // Without a reference there is no BAQ, as in bcftools.
@@ -229,30 +521,28 @@ fn run_streaming<W: Write>(
                     crate::bam::baq::init_nm_profile(&nm_weight, lr.seq().len());
                     nm_ready = true;
                 }
-                crate::bam::reader::baq_read(lr, ref_names, fa);
+                crate::bam::reader::baq_read(lr, ref_names, fa, redo_baq);
             }
             true
         });
-        let s = StreamingBam::open_with(p, i, workers, Some(hook)).with_context(|| format!("open {}", p.display()))?;
+        let sm = std::sync::Arc::clone(&smap_arc);
+        let resolver: std::sync::Arc<dyn Fn(Option<&[u8]>) -> Option<usize> + Send + Sync> =
+            std::sync::Arc::new(move |rg| sm.sample_id(bam_id, rg));
+        let _ = i;
+        let s = StreamingBam::open_with_resolver(p, resolver, workers, Some(hook)).with_context(|| format!("open {}", p.display()))?;
         streams.push(s);
     }
 
-    let mut samples: Vec<String> = Vec::with_capacity(streams.len());
-    let mut sample_keep: Vec<bool> = Vec::with_capacity(streams.len());
-    for (i, s) in streams.iter().enumerate() {
-        let name = s.samples.first().cloned().unwrap_or_else(|| {
-            args.inputs
-                .get(i)
-                .and_then(|p| p.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
-                .unwrap_or_else(|| format!("sample{i}"))
-        });
-        sample_keep.push(sample_filter.as_ref().is_none_or(|list| list.iter().any(|n| n == &name)));
-        samples.push(name);
-    }
-    let any_filter = sample_filter.is_some();
+    let samples: Vec<String> = smap.names.clone();
+    let sample_keep: Vec<bool> = vec![true; samples.len()];
+    let any_filter = false;
     let ref_names = streams[0].ref_names.clone();
     let ref_lengths = streams[0].ref_lengths.clone();
-    write_vcf_header(out, annotate, &ref_names, &ref_lengths, &samples, &sample_keep, any_filter)?;
+    if args.bcftools_layout {
+        write_bcftools_header(out, annotate, &ref_names, &ref_lengths, &samples, &sample_keep, any_filter, args.fasta_ref.as_deref())?;
+    } else {
+        write_vcf_header(out, annotate, &ref_names, &ref_lengths, &samples, &sample_keep, any_filter)?;
+    }
 
     let em = ErrorModel::new();
     let mut gvcf_blocker: Option<GvcfBlocker> = args
@@ -260,6 +550,7 @@ fn run_streaming<W: Write>(
         .as_ref()
         .map(|s| GvcfBlocker::new(s.split(',').filter_map(|t| t.parse::<u32>().ok()).collect()));
     let caller = site_caller(args, &sample_keep, any_filter);
+    let eo = engine_opts(args, min_mq, min_bq, skip_indels);
     let ctx = EmitCtx {
         args,
         em: &em,
@@ -276,12 +567,18 @@ fn run_streaming<W: Write>(
         realign: realign_level(args),
         assemble: args.assemble,
         regions,
+        targets: None,
+        engine: eo,
     };
 
     if timing { eprintln!("[KIRA_BT] engine: streaming, {} decoder thread(s)", streams.len()); }
     let mut err: Option<anyhow::Error> = None;
     let mut buf: Vec<u8> = Vec::with_capacity(256);
-    mpileup_engine_streaming(streams, min_mq, min_bq, skip_indels, !args.ignore_overlaps, &mut |site, reads| {
+    let mut hook: Option<Box<SiteHook<'_>>> = match (args.bcftools_layout && !baq_off, fasta.as_deref()) {
+        (true, Some(fa)) => Some(bcftools_realn_hook(fa, &ref_names, sample_keep.clone(), args.max_read_len, args.redo_baq)),
+        _ => None,
+    };
+    crate::bam::mpileup_engine_streaming_opts(streams, &eo, hook.as_deref_mut(), &mut |site, reads| {
         if err.is_none() {
             if let Err(e) = write_site(site, reads, &ctx, &mut gvcf_blocker, &mut buf, out) {
                 err = Some(e);
@@ -330,22 +627,27 @@ pub fn run_mpileup_from_bams<W: Write>(
     }
     let preset = args.config.as_deref().map(PresetConfig::parse).transpose()?;
     let min_mq = preset.as_ref().and_then(|p| p.min_mq).unwrap_or(args.min_mq) as u8;
-    let min_bq = preset.as_ref().and_then(|p| p.min_bq).unwrap_or(args.min_bq) as u8;
+    let min_bq = resolve_min_bq(args, preset.as_ref());
     let baq_off = preset.as_ref().and_then(|p| p.no_baq).unwrap_or(args.no_baq);
     let skip_indels = args.skip_indels;
     let annotate_spec = if args.annotate.is_empty() { None } else { Some(args.annotate.join(",")) };
-    let annotate = AnnotateSpec::parse(annotate_spec.as_deref())?;
-    let flag_filters = FlagFilters::from_full(
-        args.ef, args.df, args.if_, args.nf, args.rf.as_deref(), args.ff.as_deref(),
-    )?;
+    let annotate = parse_annotate(args, annotate_spec.as_deref())?;
+    let flag_filters = flag_filters(args)?;
     let gap_frac = preset.as_ref().and_then(|p| p.gap_frac).unwrap_or(args.gap_frac);
     let min_ireads = args.min_ireads;
-    let sample_filter = parse_samples_filter(args.samples.as_deref(), args.samples_file.as_deref())?;
     let fasta = args.fasta_ref.as_ref().map(load_fasta).transpose()?;
     let timing = std::env::var("KIRA_BT_TIMING").is_ok();
 
+    // In-memory inputs: one sample per reader, named from its read groups.
+    let mut samples: Vec<String> = Vec::with_capacity(bams.len());
+    for (i, b) in bams.iter_mut().enumerate() {
+        for lr in b.records_buf.iter_mut() {
+            lr.sample_idx = i;
+        }
+        samples.push(b.samples.first().cloned().unwrap_or_else(|| format!("sample{i}")));
+    }
     let combined_filter = prepare_bams(&mut bams, args, &flag_filters, baq_off, fasta.as_ref(), timing);
-    run_prepared(bams, args, combined_filter, fasta.as_ref(), &annotate, min_mq, min_bq, skip_indels, min_ireads, gap_frac, &sample_filter, None, timing, out)?;
+    run_prepared(bams, args, combined_filter, fasta.as_ref(), &annotate, min_mq, min_bq, skip_indels, min_ireads, gap_frac, &samples, None, None, true, timing, out)?;
     out.flush()?;
     Ok(())
 }
@@ -362,30 +664,31 @@ fn run_prepared<W: Write>(
     skip_indels: bool,
     min_ireads: u32,
     gap_frac: f64,
-    sample_filter: &Option<Vec<String>>,
+    sample_names: &[String],
     regions: Option<&RegionSet>,
+    targets: Option<&RegionSet>,
+    write_header: bool,
     timing: bool,
     out: &mut W,
 ) -> Result<()> {
-    let mut samples: Vec<String> = Vec::with_capacity(bams.len());
-    let mut sample_keep: Vec<bool> = Vec::with_capacity(bams.len());
-    for (i, b) in bams.iter().enumerate() {
-        let s = b.samples.first().cloned().unwrap_or_else(|| {
-            args.inputs
-                .get(i)
-                .and_then(|p| p.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
-                .unwrap_or_else(|| format!("sample{i}"))
-        });
-        let keep = sample_filter.as_ref().is_none_or(|list| list.iter().any(|n| n == &s));
-        sample_keep.push(keep);
-        samples.push(s);
+    if bams.is_empty() {
+        bail!("mpileup: no input left after sample selection");
     }
-    let any_filter = sample_filter.is_some();
+    let samples: Vec<String> = sample_names.to_vec();
+    let sample_keep: Vec<bool> = vec![true; samples.len()];
+    let any_filter = false;
+    let bams = regroup_by_sample(bams, samples.len());
 
     let ref_names: Vec<String> = bams[0].ref_names.clone();
     let ref_lengths: Vec<u64> = bams[0].ref_lengths.clone();
 
-    write_vcf_header(out, annotate, &ref_names, &ref_lengths, &samples, &sample_keep, any_filter)?;
+    if write_header {
+        if args.bcftools_layout {
+            write_bcftools_header(out, annotate, &ref_names, &ref_lengths, &samples, &sample_keep, any_filter, args.fasta_ref.as_deref())?;
+        } else {
+            write_vcf_header(out, annotate, &ref_names, &ref_lengths, &samples, &sample_keep, any_filter)?;
+        }
+    }
 
     let em = ErrorModel::new();
     let gvcf_opts: Option<Vec<u32>> = args.gvcf.as_ref().map(|s| {
@@ -394,7 +697,9 @@ fn run_prepared<W: Write>(
     let mut gvcf_blocker: Option<GvcfBlocker> = gvcf_opts.map(GvcfBlocker::new);
 
     let n_chunks = args.threads.max(1);
-    let parallel_eligible = n_chunks > 1 && gvcf_blocker.is_none();
+    // Lazy per-site BAQ makes the bcftools layout order-dependent, so it
+    // always runs sequentially.
+    let parallel_eligible = n_chunks > 1 && gvcf_blocker.is_none() && !args.bcftools_layout;
     // The skip-list drops reference-only sites; that is only valid when such
     // sites are never emitted. It is then applied on every path so the output
     // does not depend on the thread count.
@@ -417,6 +722,8 @@ fn run_prepared<W: Write>(
         realign: realign_level(args),
         assemble: args.assemble,
         regions,
+        targets,
+        engine: engine_opts(args, min_mq, min_bq, skip_indels),
     };
 
     let t_engine = std::time::Instant::now();
@@ -425,7 +732,12 @@ fn run_prepared<W: Write>(
         run_parallel(bams, n_chunks, &ctx, min_mq, min_bq, skip_indels, pos_filter, out)?;
     } else {
         if timing { eprintln!("[KIRA_BT] engine: sequential"); }
-        run_sequential(bams, &ctx, min_mq, min_bq, skip_indels, pos_filter.as_ref(), &mut gvcf_blocker, out)?;
+        let baq_off = args.config.as_deref().map(PresetConfig::parse).transpose()?.and_then(|p| p.no_baq).unwrap_or(args.no_baq);
+        let mut hook: Option<Box<SiteHook<'_>>> = match (args.bcftools_layout && !baq_off, fasta) {
+            (true, Some(fa)) => Some(bcftools_realn_hook(fa, &ref_names, sample_keep.clone(), args.max_read_len, args.redo_baq)),
+            _ => None,
+        };
+        run_sequential(bams, &ctx, min_mq, min_bq, skip_indels, pos_filter.as_ref(), hook.as_deref_mut(), &mut gvcf_blocker, out)?;
         if let Some(mut g) = gvcf_blocker { g.flush(out)?; }
     }
     if timing { eprintln!("[KIRA_BT] engine done in {:.1}s", t_engine.elapsed().as_secs_f64()); }
@@ -478,6 +790,38 @@ fn write_vcf_header<W: Write>(
     Ok(())
 }
 
+/// bcftools `mpileup` header: reference, contigs, then the tag lines in
+/// bcftools' order.
+#[allow(clippy::too_many_arguments)]
+fn write_bcftools_header<W: Write>(
+    out: &mut W,
+    annotate: &AnnotateSpec,
+    ref_names: &[String],
+    ref_lengths: &[u64],
+    samples: &[String],
+    sample_keep: &[bool],
+    any_filter: bool,
+    fasta: Option<&Path>,
+) -> Result<()> {
+    writeln!(out, "##fileformat=VCFv4.2")?;
+    writeln!(out, "##FILTER=<ID=PASS,Description=\"All filters passed\">")?;
+    if let Some(f) = fasta {
+        writeln!(out, "##reference=file://{}", f.display())?;
+    }
+    for (i, rn) in ref_names.iter().enumerate() {
+        writeln!(out, "##contig=<ID={},length={}>", rn, ref_lengths.get(i).copied().unwrap_or(0))?;
+    }
+    for l in bcf_layout::header_lines(annotate) {
+        writeln!(out, "{l}")?;
+    }
+    write!(out, "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT")?;
+    for (i, s) in samples.iter().enumerate() {
+        if !any_filter || sample_keep[i] { write!(out, "\t{}", s)?; }
+    }
+    writeln!(out)?;
+    Ok(())
+}
+
 struct EmitCtx<'a> {
     args: &'a MpileupArgs,
     /// Dependent-error genotype likelihoods (htslib errmod).
@@ -500,6 +844,10 @@ struct EmitCtx<'a> {
     assemble: bool,
     /// Requested regions: only sites inside them are emitted.
     regions: Option<&'a RegionSet>,
+    /// `-t/-T` targets (bcftools layout), a second position filter.
+    targets: Option<&'a RegionSet>,
+    /// The pileup pass' filters, for the bcftools layout's quality rules.
+    engine: EngineOpts,
 }
 
 fn realign_level(args: &MpileupArgs) -> u8 {
@@ -519,10 +867,17 @@ fn site_caller(args: &MpileupArgs, sample_keep: &[bool], any_filter: bool) -> Ca
 
 impl EmitCtx<'_> {
     fn in_regions(&self, chr: &str, pos1: u64) -> bool {
-        match self.regions {
-            None => true,
-            Some(rs) => rs.contains(chr, pos1.min(u32::MAX as u64) as u32),
-        }
+        let p = pos1.min(u32::MAX as u64) as u32;
+        self.regions.is_none_or(|rs| rs.contains(chr, p)) && self.targets.is_none_or(|ts| ts.contains(chr, p))
+    }
+
+    /// Samples in output order (`-s/-S` applied).
+    fn kept_samples(&self, n: usize) -> Vec<usize> {
+        (0..n).filter(|&si| !self.any_filter || self.sample_keep.get(si).copied().unwrap_or(false)).collect()
+    }
+
+    fn layout(&self) -> LayoutCtx<'_> {
+        LayoutCtx { tags: self.annotate, em: self.em, delta_bq: self.engine.delta_bq, max_bq: self.engine.max_bq }
     }
 }
 
@@ -534,6 +889,7 @@ fn run_sequential<W: Write>(
     min_bq: u8,
     skip_indels: bool,
     pos_filter: Option<&InterestingMap>,
+    hook: Option<&mut SiteHook<'_>>,
     gvcf_blocker: &mut Option<GvcfBlocker>,
     out: &mut W,
 ) -> Result<()> {
@@ -548,7 +904,8 @@ fn run_sequential<W: Write>(
         .collect();
     let mut err: Option<anyhow::Error> = None;
     let mut buf: Vec<u8> = Vec::with_capacity(256);
-    mpileup_engine_from_records(records_per_sample, min_mq, min_bq, skip_indels, !ctx.args.ignore_overlaps, pos_filter, &mut |site, overlapping| {
+    let eo = engine_opts(ctx.args, min_mq, min_bq, skip_indels);
+    mpileup_engine_from_records_opts(records_per_sample, &eo, pos_filter, hook, &mut |site, overlapping| {
         if err.is_none() {
             if let Err(e) = write_site(site, overlapping, ctx, gvcf_blocker, &mut buf, out) {
                 err = Some(e);
@@ -643,13 +1000,11 @@ fn run_parallel<W: Write>(
                         .collect()
                 })
                 .collect();
-            let _ = mpileup_engine_from_records(
+            let _ = mpileup_engine_from_records_opts(
                 per_sample,
-                min_mq,
-                min_bq,
-                skip_indels,
-                !ctx.args.ignore_overlaps,
+                &engine_opts(ctx.args, min_mq, min_bq, skip_indels),
                 pos_filter.as_ref(),
+                None,
                 &mut |site, overlapping| {
                     if site.ref_id != chunk.ref_id { return; }
                     if site.pos < chunk.start || site.pos >= chunk.end { return; }
@@ -807,6 +1162,10 @@ fn emit_site(
     let chr = ctx.ref_names.get(site.ref_id).map(|s| s.as_str()).unwrap_or(".");
     let pos1 = site.pos as u64 + 1;
     if !ctx.in_regions(chr, pos1) { return; }
+    if args.bcftools_layout {
+        emit_site_bcftools(site, overlapping_reads, ctx, chr, pos1, out);
+        return;
+    }
     let ref_base = ctx.fasta.and_then(|fa| fa.base(chr, pos1 as u32)).unwrap_or(b'N');
     if ref_base == b'N' || ref_base == b'n' { return; }
     let ref_idx = match ref_base { b'A' | b'a' => 0, b'C' | b'c' => 1, b'G' | b'g' => 2, b'T' | b't' => 3, _ => return };
@@ -948,6 +1307,28 @@ fn emit_site(
     }
 }
 
+/// bcftools layout: one SNP record per covered site (reference `N` when the
+/// base is unknown), then kira's indel candidates as biallelic INDEL records.
+fn emit_site_bcftools(site: &PileupSite, reads: &[LiveRead], ctx: &EmitCtx, chr: &str, pos1: u64, out: &mut Vec<u8>) {
+    let kept = ctx.kept_samples(site.per_sample.len());
+    if !reads.iter().any(|r| kept.contains(&r.sample_idx)) {
+        return;
+    }
+    let ref_base = ctx.fasta.and_then(|fa| fa.base(chr, pos1 as u32)).unwrap_or(b'N');
+    let lctx = ctx.layout();
+    bcf_layout::render_snp(site, reads, &kept, ref_base, chr, pos1, &lctx, out);
+    if ctx.skip_indels || matches!(ref_base, b'N' | b'n') {
+        return;
+    }
+    let agg = site.aggregated();
+    let total: u32 = agg.base_counts.iter().sum();
+    if total == 0 {
+        return;
+    }
+    let mean_mq = (agg.mq_sum as f64) / (total as f64);
+    emit_indels(site, &agg, chr, pos1, ref_base, total, mean_mq, ctx, out, reads);
+}
+
 /// `a/b` over the kept-allele indices; `./.` for a missing genotype.
 fn gt_string(alleles_kept: &[u32], gt: Option<(u32, u32)>) -> String {
     let Some(gt) = gt else { return "./.".to_string() };
@@ -1086,6 +1467,12 @@ fn emit_indels(
         }
         let ref_str = (ref_base as char).to_string();
         let alt_str = format!("{}{}", ref_base as char, seq);
+        if args.bcftools_layout {
+            let iq = if ctx.hp_indel { hp_indel_qual(ctx, chr, pos1, &ref_str, &alt_str) } else { 30 };
+            let spec = IndelSpec { ref_str: &ref_str, alt_str: &alt_str, is_ins: true, ins_seq: seq.as_bytes(), del_len: 0, indel_qual: iq };
+            bcf_layout::render_indel(site, overlapping_reads, &ctx.kept_samples(site.per_sample.len()), chr, pos1, &spec, &ctx.layout(), out);
+            continue;
+        }
         emit_one_indel(site, agg, chr, pos1, &ref_str, &alt_str, *c, *f, total, mean_mq, ctx, out, annotate);
     }
     for (l, c, f) in &agg.del_alleles {
@@ -1109,6 +1496,12 @@ fn emit_indels(
         ref_str.push(ref_base as char);
         for &b in deleted { ref_str.push(b as char); }
         let alt_str = (ref_base as char).to_string();
+        if args.bcftools_layout {
+            let iq = if ctx.hp_indel { hp_indel_qual(ctx, chr, pos1, &ref_str, &alt_str) } else { 30 };
+            let spec = IndelSpec { ref_str: &ref_str, alt_str: &alt_str, is_ins: false, ins_seq: &[], del_len: *l, indel_qual: iq };
+            bcf_layout::render_indel(site, overlapping_reads, &ctx.kept_samples(site.per_sample.len()), chr, pos1, &spec, &ctx.layout(), out);
+            continue;
+        }
         emit_one_indel(site, agg, chr, pos1, &ref_str, &alt_str, *c, *f, total, mean_mq, ctx, out, annotate);
     }
 }

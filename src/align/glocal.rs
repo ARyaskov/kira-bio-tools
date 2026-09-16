@@ -50,10 +50,12 @@ pub fn encode_nt(b: u8) -> u8 {
     }
 }
 
+/// `g_qual2prob` is a `float` table in probaln.c; the single-precision
+/// rounding of the error probabilities is kept so posteriors agree.
 static QUAL2PROB: std::sync::LazyLock<[f64; 256]> = std::sync::LazyLock::new(|| {
     let mut t = [0.0; 256];
     for (i, v) in t.iter_mut().enumerate() {
-        *v = 10f64.powf(-(i as f64) / 10.0);
+        *v = (10f64.powf(-(i as f64) / 10.0)) as f32 as f64;
     }
     t
 });

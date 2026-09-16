@@ -10,4 +10,4 @@
 ##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths (high-quality bases)">
 ##contig=<ID=11,length=150>
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	sample
-11	20	.	T	.	209.59	.	DP=43;MQ=58.6	GT:DP:AD:PL	0/0:43:43:0
+11	20	.	T	.	212.59	.	DP=43;MQ=58.6	GT:DP:AD:PL	0/0:43:43:0

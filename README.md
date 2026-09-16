@@ -336,7 +336,8 @@ Commands: `query`, `cnv`.
   `-m/--min-ireads`, `-I/--skip-indels`, `-B/--no-BAQ`, `-E/--redo-BAQ`,
   `-x/--ignore-overlaps`, `-X/--config`, `-F/--gap-frac`, `--indel-size`,
   `--threads`, `--stream`, flag filters (`--ef`, `--df`, `--if`, `--nf`,
-  `--rf`, `--ff`), and selectors.
+  `--rf`, `--ff`), selectors, `--bcftools-layout`, `-G/--read-groups`,
+  `--ignore-RG`, `--max-read-len`, `-E/--redo-BAQ`.
   Fused calling shortcuts: `-v/--variants-only`, `--prior`, `--min-alt-reads`,
   `--min-af`, `--min-qual`.
 
@@ -359,6 +360,27 @@ Commands: `query`, `cnv`.
   `KIRA_INDEL_REALIGN` when the flag is absent, so scripts written against
   the pre-0.7 environment-variable interface keep working; an explicit flag
   always wins.
+
+  `--bcftools-layout` writes records exactly the way `bcftools mpileup`
+  does, so `bcftools call`, `kira-bt call` and the usual hard-filter recipes
+  read them unchanged: alleles ordered by quality sum with the unseen `<*>`,
+  PL only (no GT), `INFO/DP` as raw depth, `I16`, `QS`, `MQ0F` and the bias
+  statistics (`VDB`, `SGB`, `RPBZ`, `MQBZ`, `BQBZ`, `MQSBZ`, `SCBZ`, `NMBZ`,
+  `FS`) in bcftools' tag order, `-a` with bcftools' tag names and defaults
+  (`-a DP,AD,INFO/AD,...`), bcftools' read and base filters (`-Q 1`,
+  `--delta-BQ 30`, `--max-BQ 60`, `--ff UNMAP,SECONDARY,QCFAIL,DUP` as the
+  only flag exclusion, orphan pairs dropped unless `-A`, `-d` per-file depth
+  cap, `--max-read-len` for BAQ), lazy BAQ applied per site only where a
+  pileup read carries an indel (bcftools 1.19's partial realignment), stored
+  `BQ` tags honoured unless `-E`, and `-r` regions walked one at a time in
+  the order given. Sample selection follows bcftools in both layouts:
+  `-s ^A,B` excludes, `-S FILE` rows may rename (`OLD NEW`), `-G FILE` lists
+  read groups (`ID [FILE] [SAMPLE]`, `^FILE` to exclude) and `--ignore-RG`
+  names one sample per file. The indel records keep kira's candidate model
+  behind bcftools' layout, and `-g`, `-v` and `--assemble` need the kira
+  layout. On the bcftools test suite the SNP records match bcftools 1.19
+  byte for byte on 18 of 28 cases; the rest differ in a few base-quality sums
+  where BAQ posteriors disagree by one or two phred at read ends.
 
 - `call`  
   SNP/indel calling from genotype likelihoods.  

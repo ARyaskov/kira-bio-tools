@@ -30,6 +30,13 @@ pub struct SampleSiteCounts {
     /// genotype-likelihood model. `base_counts`/`base_quals` stay raw (for
     /// AD/QS); only this carries the `min(BQ, MAPQ)` cap.
     pub obs: Vec<(u8, u8)>,
+    /// Every base observation that passed the quality filter, ACGT and N
+    /// alike, as `(index into the live-read slice handed to `emit`, query
+    /// index)`; the bcftools layout rebuilds its annotations from these.
+    pub obs_src: Vec<(u32, u32)>,
+    /// Reads with a base at this position before any quality filter
+    /// (bcftools' raw depth, INFO/DP).
+    pub raw_depth: u32,
     /// Insertions after this position: (sequence, count, forward count).
     pub ins_alleles: Vec<(String, u32, u32)>,
     /// Deletions after this position: (length, count, forward count).
@@ -51,6 +58,8 @@ impl SampleSiteCounts {
         self.mq_sum = 0;
         self.n_softclip = 0;
         self.obs.clear();
+        self.obs_src.clear();
+        self.raw_depth = 0;
         self.ins_alleles.clear();
         self.del_alleles.clear();
     }
@@ -127,6 +136,13 @@ pub struct LiveRead {
     pub qname_hash: u64,
     /// 0-based start of a mapped mate on the same contig, else `u32::MAX`.
     pub mate_pos: u32,
+    /// BAQ has been applied (bcftools realigns a read once, lazily).
+    pub realigned: bool,
+    /// `NM` tag (edit distance), -1 when absent.
+    pub nm: i32,
+    /// Stored `BQ` tag (BAQ offsets from `samtools calmd`), applied instead
+    /// of recomputing BAQ unless `-E`.
+    pub bq_tag: Option<Box<[u8]>>,
     cur_op: u32,
     cur_r: u32,
     cur_q: u32,
@@ -148,6 +164,16 @@ impl LiveRead {
         self
     }
 
+    pub fn with_nm(mut self, nm: i32) -> Self {
+        self.nm = nm;
+        self
+    }
+
+    pub fn with_bq_tag(mut self, bq: Option<Vec<u8>>) -> Self {
+        self.bq_tag = bq.map(Vec::into_boxed_slice);
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn from_parts(data: Vec<u8>, len: usize, cigar: CigarOps, ref_start: u32, ref_id: usize, mapq: u8, sample_idx: usize, flags: u16, qname_hash: u64, mate_pos: u32) -> Self {
         let has_softclip = cigar.iter().any(|(k, _)| *k == Kind::SoftClip);
@@ -165,6 +191,9 @@ impl LiveRead {
             has_softclip,
             qname_hash,
             mate_pos,
+            realigned: false,
+            nm: -1,
+            bq_tag: None,
             cur_op: 0,
             cur_r: ref_start,
             cur_q: 0,
@@ -227,7 +256,7 @@ impl LiveRead {
 
     /// Move the cursor to the op covering `ref_pos`; positions only increase.
     #[inline]
-    fn seek(&mut self, ref_pos: u32) {
+    pub fn seek(&mut self, ref_pos: u32) {
         while let Some(&(kind, len)) = self.cigar_pairs.get(self.cur_op as usize) {
             match kind {
                 Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch => {
@@ -246,10 +275,10 @@ impl LiveRead {
         }
     }
 
-    /// Base and quality at `ref_pos` after [`seek`]; `None` inside a
-    /// deletion/skip or past the read.
+    /// Base, quality and query index at `ref_pos` after [`seek`]; `None`
+    /// inside a deletion/skip or past the read.
     #[inline]
-    fn base_at_cursor(&self, ref_pos: u32) -> Option<(u8, u8)> {
+    fn base_at_cursor(&self, ref_pos: u32) -> Option<(u8, u8, usize)> {
         let &(kind, len) = self.cigar_pairs.get(self.cur_op as usize)?;
         if !is_aligned(kind) || ref_pos < self.cur_r || ref_pos >= self.cur_r + len {
             return None;
@@ -258,7 +287,13 @@ impl LiveRead {
         if qi >= self.len as usize {
             return None;
         }
-        Some((self.data[qi], self.data[self.len as usize + qi]))
+        Some((self.data[qi], self.data[self.len as usize + qi], qi))
+    }
+
+    /// The indel that follows `ref_pos` in this read once the engine has
+    /// positioned the cursor there (valid inside an `emit` callback).
+    pub fn indel_after(&self, ref_pos: u32) -> Option<IndelEvent<'_>> {
+        self.indel_after_cursor(ref_pos)
     }
 
     /// The indel that follows `ref_pos` when it is the last aligned base
@@ -429,32 +464,134 @@ fn push_quals(data: &mut Vec<u8>, quals: impl Iterator<Item = u8>, n: usize) {
     }
 }
 
-enum IndelEvent<'a> {
+pub enum IndelEvent<'a> {
     Ins(&'a [u8]),
     Del(u32),
 }
 
-/// Record one read's observation at `cur_pos` into `site`.
+/// Filters and quality adjustments of one pileup pass.
+#[derive(Clone, Copy, Debug)]
+pub struct EngineOpts {
+    pub min_mq: u8,
+    pub min_bq: u8,
+    pub skip_indels: bool,
+    /// Merge overlapping mates so a fragment counts once.
+    pub overlaps: bool,
+    /// `--max-BQ`: cap on the (neighbour-adjusted) base quality.
+    pub max_bq: Option<u8>,
+    /// `--delta-BQ`: a base quality may exceed either neighbour's by at most
+    /// this much (`bcf_call_glfgen`).
+    pub delta_bq: Option<u8>,
+    /// Drop paired reads that are not in a proper pair (bcftools' default;
+    /// `-A` keeps them).
+    pub skip_orphans: bool,
+    /// Record N bases in `obs_src` (bcftools counts them as non-reference).
+    pub keep_n: bool,
+    /// Emit every site a read spans, even when no base passes the filters
+    /// (bcftools writes such records with PL 0).
+    pub emit_covered: bool,
+    /// htslib's per-file pileup cap (`-d`): a read starting at the current
+    /// position is dropped when the file already holds more reads than this,
+    /// except the first read at that start.
+    pub max_depth: Option<u32>,
+    /// Apply kira's built-in flag filter (unmapped, secondary, supplementary,
+    /// duplicate, QC-fail); bcftools relies on `--ff` alone.
+    pub builtin_flag_skip: bool,
+}
+
+impl EngineOpts {
+    pub fn new(min_mq: u8, min_bq: u8, skip_indels: bool, overlaps: bool) -> Self {
+        Self {
+            min_mq,
+            min_bq,
+            skip_indels,
+            overlaps,
+            max_bq: None,
+            delta_bq: None,
+            skip_orphans: false,
+            keep_n: false,
+            emit_covered: false,
+            max_depth: None,
+            builtin_flag_skip: true,
+        }
+    }
+}
+
+/// htslib's read-name hash (`__ac_X31_hash_string` then `__ac_Wang_hash`);
+/// its lowest bit decides which overlapping mate keeps the pooled quality.
+pub fn khash_qname_hash(name: &[u8]) -> u64 {
+    let mut h: u32 = 0;
+    for (i, &c) in name.iter().enumerate() {
+        if c == 0 {
+            break;
+        }
+        h = if i == 0 { c as u32 } else { (h << 5).wrapping_sub(h).wrapping_add(c as u32) };
+    }
+    let mut key = h;
+    key = key.wrapping_add(!(key << 15));
+    key ^= key >> 10;
+    key = key.wrapping_add(key << 3);
+    key ^= key >> 6;
+    key = key.wrapping_add(!(key << 11));
+    key ^= key >> 16;
+    key as u64
+}
+
+/// Base quality at `qi` after the `--delta-BQ` neighbour rule and the
+/// `--max-BQ` cap (`bcf_call_glfgen`).
 #[inline]
-fn observe(lr: &mut LiveRead, cur_pos: u32, min_bq: u8, skip_indels: bool, site: &mut PileupSite) {
+pub fn adjusted_baseq(qual: &[u8], qi: usize, delta: Option<u8>, max: Option<u8>) -> u8 {
+    let mut q = qual[qi];
+    if let Some(d) = delta {
+        if qi > 0 {
+            q = q.min(qual[qi - 1].saturating_add(d));
+        }
+        if qi + 1 < qual.len() {
+            q = q.min(qual[qi + 1].saturating_add(d));
+        }
+    }
+    if let Some(m) = max {
+        q = q.min(m);
+    }
+    q
+}
+
+/// Record one read's observation at `cur_pos` into `site`. `read_idx` is
+/// the read's index in the live slice `emit` receives.
+#[inline]
+fn observe(lr: &mut LiveRead, read_idx: u32, cur_pos: u32, opts: &EngineOpts, site: &mut PileupSite) {
     lr.seek(cur_pos);
-    if let Some((b, q)) = lr.base_at_cursor(cur_pos) {
-        if q >= min_bq {
-            if let Some(i) = base_to_idx(b) {
-                let s = &mut site.per_sample[lr.sample_idx];
-                s.base_counts[i] += 1;
-                s.base_quals[i] += q as u32;
-                if !lr.is_reverse() { s.fwd_counts[i] += 1; }
-                if lr.has_softclip { s.n_softclip += 1; }
-                s.mq_sum += lr.mapq as u64;
-                // Base index in the low nibble, strand in bit 4 (see
-                // `errmod::pack_base`); quality capped by MAPQ and `capQ` (60).
-                s.obs.push(((i as u8) | ((lr.is_reverse() as u8) << 4), q.min(lr.mapq.min(60))));
-                s.depth += 1;
+    if let Some((b, q_raw, qi)) = lr.base_at_cursor(cur_pos) {
+        let s = &mut site.per_sample[lr.sample_idx];
+        s.raw_depth += 1;
+        let q = if opts.delta_bq.is_some() || opts.max_bq.is_some() {
+            adjusted_baseq(lr.qual(), qi, opts.delta_bq, opts.max_bq)
+        } else {
+            q_raw
+        };
+        if q >= opts.min_bq {
+            match base_to_idx(b) {
+                Some(i) => {
+                    s.base_counts[i] += 1;
+                    s.base_quals[i] += q as u32;
+                    if !lr.is_reverse() { s.fwd_counts[i] += 1; }
+                    if lr.has_softclip { s.n_softclip += 1; }
+                    s.mq_sum += lr.mapq as u64;
+                    // Base index in the low nibble, strand in bit 4 (see
+                    // `errmod::pack_base`); quality capped by MAPQ and `capQ` (60).
+                    s.obs.push(((i as u8) | ((lr.is_reverse() as u8) << 4), q.min(lr.mapq.min(60))));
+                    s.obs_src.push((read_idx, qi as u32));
+                    s.depth += 1;
+                }
+                None => {
+                    if opts.keep_n {
+                        s.obs_src.push((read_idx, qi as u32));
+                    }
+                }
             }
         }
     }
-    if skip_indels {
+    if opts.skip_indels {
         return;
     }
     let f = u32::from(!lr.is_reverse());
@@ -483,13 +620,22 @@ fn observe(lr: &mut LiveRead, cur_pos: u32, min_bq: u8, skip_indels: bool, site:
 /// A sorted per-sample stream of reads.
 pub trait ReadSource {
     /// Next read passing the flag and MAPQ filters, tagged with `sample_idx`.
-    fn next_read(&mut self, min_mq: u8, sample_idx: usize) -> Option<LiveRead>;
+    fn next_read(&mut self, opts: &EngineOpts, sample_idx: usize) -> Option<LiveRead>;
+}
+
+/// Read-level filters (`mplp_func`): flags, MAPQ and the orphan rule.
+#[inline]
+fn read_passes(lr: &LiveRead, opts: &EngineOpts) -> bool {
+    if (opts.builtin_flag_skip && lr.skip_by_flags()) || lr.mapq < opts.min_mq {
+        return false;
+    }
+    !(opts.skip_orphans && lr.flags & 0x1 != 0 && lr.flags & 0x2 == 0)
 }
 
 impl ReadSource for std::vec::IntoIter<LiveRead> {
-    fn next_read(&mut self, min_mq: u8, sample_idx: usize) -> Option<LiveRead> {
+    fn next_read(&mut self, opts: &EngineOpts, sample_idx: usize) -> Option<LiveRead> {
         for mut lr in self.by_ref() {
-            if lr.skip_by_flags() || lr.mapq < min_mq { continue; }
+            if !read_passes(&lr, opts) { continue; }
             lr.sample_idx = sample_idx;
             return Some(lr);
         }
@@ -498,9 +644,9 @@ impl ReadSource for std::vec::IntoIter<LiveRead> {
 }
 
 impl ReadSource for crossbeam_channel::IntoIter<LiveRead> {
-    fn next_read(&mut self, min_mq: u8, sample_idx: usize) -> Option<LiveRead> {
+    fn next_read(&mut self, opts: &EngineOpts, sample_idx: usize) -> Option<LiveRead> {
         for mut lr in self.by_ref() {
-            if lr.skip_by_flags() || lr.mapq < min_mq { continue; }
+            if !read_passes(&lr, opts) { continue; }
             lr.sample_idx = sample_idx;
             return Some(lr);
         }
@@ -508,26 +654,29 @@ impl ReadSource for crossbeam_channel::IntoIter<LiveRead> {
     }
 }
 
+/// Per-site hook over the live reads (contig id, 0-based position), run
+/// before the bases are observed: bcftools' lazy BAQ lives here.
+pub type SiteHook<'a> = dyn FnMut(&mut [LiveRead], usize, u32) + 'a;
+
 /// Position-by-position walk over `sources` (one per sample). `emit` sees
 /// every site with depth and the reads overlapping it. `pos_filter` skips
-/// to the next listed position; `overlaps` enables mate-overlap merging.
-#[allow(clippy::too_many_arguments)]
+/// to the next listed position.
 pub fn run_engine<S: ReadSource, F>(
     mut sources: Vec<S>,
-    min_mq: u8,
-    min_bq: u8,
-    skip_indels: bool,
-    overlaps: bool,
+    opts: &EngineOpts,
     pos_filter: Option<&InterestingMap>,
+    mut hook: Option<&mut SiteHook<'_>>,
     emit: &mut F,
 ) -> Result<()>
 where
     F: FnMut(&PileupSite, &[LiveRead]),
 {
+    let overlaps = opts.overlaps;
     let n_samples = sources.len();
-    let mut next: Vec<Option<LiveRead>> = sources.iter_mut().enumerate().map(|(i, s)| s.next_read(min_mq, i)).collect();
+    let mut next: Vec<Option<LiveRead>> = sources.iter_mut().enumerate().map(|(i, s)| s.next_read(opts, i)).collect();
     let mut live: VecDeque<LiveRead> = VecDeque::new();
     let mut site = PileupSite::default();
+    let mut pool: Vec<u32> = Vec::new();
     let mut cur_ref: i32 = -1;
     let mut cur_pos: u32 = 0;
 
@@ -548,7 +697,7 @@ where
             cur_ref = rid;
             cur_pos = p;
             push_live(&mut live, next[idx].take().unwrap(), overlaps);
-            next[idx] = sources[idx].next_read(min_mq, idx);
+            next[idx] = sources[idx].next_read(opts, idx);
             continue;
         }
 
@@ -567,23 +716,56 @@ where
             }
         }
 
-        for i in 0..n_samples {
-            while let Some(lr) = &next[i] {
-                if lr.ref_id as i32 == cur_ref && lr.ref_start <= cur_pos {
-                    push_live(&mut live, next[i].take().unwrap(), overlaps);
-                    next[i] = sources[i].next_read(min_mq, i);
-                } else {
-                    break;
+        if let Some(max) = opts.max_depth {
+            // Pool sizes before this position's reads arrive (htslib frees a
+            // read only when the position after its end is emitted).
+            pool.clear();
+            pool.resize(n_samples, 1);
+            for lr in live.iter() {
+                pool[lr.sample_idx] += 1;
+            }
+            for i in 0..n_samples {
+                let mut first_at_pos = true;
+                while let Some(lr) = &next[i] {
+                    if lr.ref_id as i32 == cur_ref && lr.ref_start <= cur_pos {
+                        let r = next[i].take().unwrap();
+                        next[i] = sources[i].next_read(opts, i);
+                        let starts_here = r.ref_start == cur_pos;
+                        let drop = starts_here && !first_at_pos && pool[i] > max;
+                        if starts_here {
+                            first_at_pos = false;
+                        }
+                        if !drop {
+                            pool[i] += 1;
+                            push_live(&mut live, r, overlaps);
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+        } else {
+            for i in 0..n_samples {
+                while let Some(lr) = &next[i] {
+                    if lr.ref_id as i32 == cur_ref && lr.ref_start <= cur_pos {
+                        push_live(&mut live, next[i].take().unwrap(), overlaps);
+                        next[i] = sources[i].next_read(opts, i);
+                    } else {
+                        break;
+                    }
                 }
             }
         }
 
         live.retain(|lr| lr.ref_end() > cur_pos);
         site.reset(cur_ref as usize, cur_pos, n_samples);
-        for lr in live.iter_mut() {
-            observe(lr, cur_pos, min_bq, skip_indels, &mut site);
+        if let Some(h) = hook.as_mut() {
+            h(live.make_contiguous(), cur_ref as usize, cur_pos);
         }
-        if site.total_depth() > 0 {
+        for (i, lr) in live.iter_mut().enumerate() {
+            observe(lr, i as u32, cur_pos, opts, &mut site);
+        }
+        if site.total_depth() > 0 || (opts.emit_covered && !live.is_empty()) {
             // Every live read starts at or before `cur_pos` and ends after it.
             emit(&site, live.make_contiguous());
         }
@@ -605,6 +787,19 @@ pub fn mpileup_engine_streaming<F>(streams: Vec<crate::bam::StreamingBam>, min_m
 where
     F: FnMut(&PileupSite, &[LiveRead]),
 {
+    mpileup_engine_streaming_opts(streams, &EngineOpts::new(min_mq, min_bq, skip_indels, overlaps), None, emit)
+}
+
+/// [`mpileup_engine_streaming`] with the full option set.
+pub fn mpileup_engine_streaming_opts<F>(
+    streams: Vec<crate::bam::StreamingBam>,
+    opts: &EngineOpts,
+    hook: Option<&mut SiteHook<'_>>,
+    emit: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&PileupSite, &[LiveRead]),
+{
     let mut handles = Vec::with_capacity(streams.len());
     let sources: Vec<crossbeam_channel::IntoIter<LiveRead>> = streams
         .into_iter()
@@ -613,7 +808,7 @@ where
             s.rx.into_iter()
         })
         .collect();
-    run_engine(sources, min_mq, min_bq, skip_indels, overlaps, None, emit)?;
+    run_engine(sources, opts, None, hook, emit)?;
     for h in handles.into_iter().flatten() {
         h.join().map_err(|_| anyhow::anyhow!("BAM decoder thread panicked"))??;
     }
@@ -643,8 +838,22 @@ pub fn mpileup_engine_from_records<F>(
 where
     F: FnMut(&PileupSite, &[LiveRead]),
 {
+    mpileup_engine_from_records_opts(records_per_sample, &EngineOpts::new(min_mq, min_bq, skip_indels, overlaps), pos_filter, None, emit)
+}
+
+/// [`mpileup_engine_from_records`] with the full option set.
+pub fn mpileup_engine_from_records_opts<F>(
+    records_per_sample: Vec<Vec<LiveRead>>,
+    opts: &EngineOpts,
+    pos_filter: Option<&InterestingMap>,
+    hook: Option<&mut SiteHook<'_>>,
+    emit: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&PileupSite, &[LiveRead]),
+{
     let sources: Vec<std::vec::IntoIter<LiveRead>> = records_per_sample.into_iter().map(|v| v.into_iter()).collect();
-    run_engine(sources, min_mq, min_bq, skip_indels, overlaps, pos_filter, emit)
+    run_engine(sources, opts, pos_filter, hook, emit)
 }
 
 /// Mate start for overlap detection: paired, mate mapped on the same contig.
@@ -657,7 +866,39 @@ fn mate_pos_of(flags: u16, ref_id: usize, mate_ref: Option<usize>, mate_start: O
     }
 }
 
+/// Sample of a read from its `RG` tag (`None` drops the read).
+pub type SampleResolver<'a> = dyn Fn(Option<&[u8]>) -> Option<usize> + 'a;
+
 pub fn build_live_from_bam(rec: &bam::Record, sample_idx: usize) -> Option<LiveRead> {
+    build_live_from_bam_with(rec, &|_| Some(sample_idx))
+}
+
+/// Integer aux tag of a BAM record.
+fn bam_aux_int(rec: &bam::Record, tag: &[u8; 2]) -> Option<i64> {
+    use noodles_sam::alignment::record::data::field::Tag;
+    let t = Tag::from(*tag);
+    match rec.data().get(&t)? {
+        Ok(v) => v.as_int(),
+        Err(_) => None,
+    }
+}
+
+/// String aux tag of a BAM record.
+fn bam_aux_str(rec: &bam::Record, tag: &[u8; 2]) -> Option<Vec<u8>> {
+    use noodles_sam::alignment::record::data::field::{Tag, Value};
+    let t = Tag::from(*tag);
+    match rec.data().get(&t)? {
+        Ok(Value::String(s)) => Some(s.to_vec()),
+        _ => None,
+    }
+}
+
+/// [`build_live_from_bam`] with the sample chosen from the read group.
+pub fn build_live_from_bam_with(rec: &bam::Record, resolve: &SampleResolver<'_>) -> Option<LiveRead> {
+    let rg = bam_aux_str(rec, b"RG");
+    let sample_idx = resolve(rg.as_deref())?;
+    let nm = bam_aux_int(rec, b"NM").map(|v| v.clamp(-1, i32::MAX as i64) as i32).unwrap_or(-1);
+    let bq = bam_aux_str(rec, b"BQ");
     let start = usize::from(rec.alignment_start().transpose().ok().flatten()?) as u32 - 1;
     let ref_id = rec.reference_sequence_id().transpose().ok().flatten()?;
     // MAPQ 255 (unavailable) counts as 20, like `bcf_call_glfgen`.
@@ -673,15 +914,32 @@ pub fn build_live_from_bam(rec: &bam::Record, sample_idx: usize) -> Option<LiveR
         let op = op.ok()?;
         cigar.push((op.kind(), op.len() as u32));
     }
-    let qname_hash = rec.name().map(|n| fxhash::hash64(n.as_ref() as &[u8])).unwrap_or(0);
+    let qname_hash = rec.name().map(|n| khash_qname_hash(n.as_ref() as &[u8])).unwrap_or(0);
     let mate_ref = rec.mate_reference_sequence_id().transpose().ok().flatten();
     let mate_start = rec.mate_alignment_start().transpose().ok().flatten().map(usize::from);
     let mate_pos = mate_pos_of(flags, ref_id, mate_ref, mate_start);
-    Some(LiveRead::from_parts(data, n, cigar, start, ref_id, mapq, sample_idx, flags, qname_hash, mate_pos))
+    Some(LiveRead::from_parts(data, n, cigar, start, ref_id, mapq, sample_idx, flags, qname_hash, mate_pos).with_nm(nm).with_bq_tag(bq))
 }
 
 pub fn build_live_from_cram(rb: &noodles_sam::alignment::RecordBuf, sample_idx: usize) -> Option<LiveRead> {
+    build_live_from_cram_with(rb, &|_| Some(sample_idx))
+}
+
+/// [`build_live_from_cram`] with the sample chosen from the read group.
+pub fn build_live_from_cram_with(rb: &noodles_sam::alignment::RecordBuf, resolve: &SampleResolver<'_>) -> Option<LiveRead> {
     use noodles_sam::alignment::record::cigar::Op;
+    use noodles_sam::alignment::record::data::field::Tag;
+    use noodles_sam::alignment::record_buf::data::field::Value;
+    let rg: Option<Vec<u8>> = match rb.data().get(&Tag::READ_GROUP) {
+        Some(Value::String(s)) => Some(s.to_vec()),
+        _ => None,
+    };
+    let sample_idx = resolve(rg.as_deref())?;
+    let nm = rb.data().get(&Tag::EDIT_DISTANCE).and_then(|v| v.as_int()).map(|v| v.clamp(-1, i32::MAX as i64) as i32).unwrap_or(-1);
+    let bq: Option<Vec<u8>> = match rb.data().get(&Tag::from(*b"BQ")) {
+        Some(Value::String(s)) => Some(s.to_vec()),
+        _ => None,
+    };
     let start = usize::from(rb.alignment_start()?) as u32 - 1;
     let ref_id = rb.reference_sequence_id()?;
     let mapq: u8 = rb.mapping_quality().map(u8::from).unwrap_or(20);
@@ -691,9 +949,9 @@ pub fn build_live_from_cram(rb: &noodles_sam::alignment::RecordBuf, sample_idx: 
     let cigar_ops: &[Op] = rb.cigar().as_ref();
     if cigar_ops.is_empty() { return None; }
     let cigar: CigarOps = cigar_ops.iter().map(|op| (op.kind(), op.len() as u32)).collect();
-    let qname_hash = rb.name().map(|n| fxhash::hash64(n.as_ref() as &[u8])).unwrap_or(0);
+    let qname_hash = rb.name().map(|n| khash_qname_hash(n.as_ref() as &[u8])).unwrap_or(0);
     let mate_pos = mate_pos_of(flags, ref_id, rb.mate_reference_sequence_id(), rb.mate_alignment_start().map(usize::from));
-    Some(LiveRead::new(seq, qual, cigar, start, ref_id, mapq, sample_idx, flags).with_mate(qname_hash, mate_pos))
+    Some(LiveRead::new(seq, qual, cigar, start, ref_id, mapq, sample_idx, flags).with_mate(qname_hash, mate_pos).with_nm(nm).with_bq_tag(bq))
 }
 
 #[inline]

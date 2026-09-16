@@ -22,9 +22,114 @@ pub struct AnnotateSpec {
     /// FORMAT/DP4: ref-fwd, ref-rev, alt-fwd, alt-rev.
     pub fmt_dp4: bool,
     pub info_dp4: bool,
+    /// Deprecated bcftools DPR tags, kept distinct for the bcftools layout.
+    pub fmt_dpr: bool,
+    pub info_dpr: bool,
+    /// bcftools' INFO statistics (`--bcftools-layout` only).
+    pub info_vdb: bool,
+    pub info_rpbz: bool,
+    pub info_mqbz: bool,
+    pub info_bqbz: bool,
+    pub info_mqsbz: bool,
+    pub info_scbz: bool,
+    pub info_sgb: bool,
+    pub info_mq0f: bool,
+    pub info_idv: bool,
+    pub info_imf: bool,
+    pub info_fs: bool,
+    /// Mismatch-count annotations from the `NM` tag.
+    pub info_nm: bool,
+    pub info_nmbz: bool,
+    pub fmt_nmbz: bool,
 }
 
 impl AnnotateSpec {
+    /// bcftools 1.19 defaults: PL plus the INFO bias statistics.
+    pub fn bcftools_defaults() -> Self {
+        Self {
+            fmt_pl: true,
+            info_vdb: true,
+            info_rpbz: true,
+            info_mqbz: true,
+            info_bqbz: true,
+            info_mqsbz: true,
+            info_scbz: true,
+            info_sgb: true,
+            info_mq0f: true,
+            info_idv: true,
+            info_imf: true,
+            ..Default::default()
+        }
+    }
+
+    /// bcftools' own `-a` semantics: tags add to (or with `-` remove from)
+    /// the default set; FORMAT tags may be bare or `FMT/`/`FORMAT/`-prefixed,
+    /// INFO tags must carry `INFO/`; unknown tags are an error.
+    pub fn parse_bcftools(spec: Option<&str>) -> Result<Self> {
+        let mut s = Self::bcftools_defaults();
+        let Some(spec) = spec else { return Ok(s) };
+        for tok in spec.split(',') {
+            let t = tok.trim();
+            if t.is_empty() {
+                continue;
+            }
+            let (on, name) = match t.strip_prefix('-') {
+                Some(n) => (false, n),
+                None => (true, t),
+            };
+            let upper = name.to_ascii_uppercase();
+            let flag: &mut bool = if let Some(info) = upper.strip_prefix("INFO/") {
+                match info {
+                    "DPR" => &mut s.info_dpr,
+                    "AD" => &mut s.info_ad,
+                    "ADF" => &mut s.info_adf,
+                    "ADR" => &mut s.info_adr,
+                    "BQBZ" => &mut s.info_bqbz,
+                    "FS" => &mut s.info_fs,
+                    "IDV" => &mut s.info_idv,
+                    "IMF" => &mut s.info_imf,
+                    "MQ0F" => &mut s.info_mq0f,
+                    "MQBZ" => &mut s.info_mqbz,
+                    "RPBZ" => &mut s.info_rpbz,
+                    "SCBZ" => &mut s.info_scbz,
+                    "SCR" => &mut s.info_scr,
+                    "SGB" => &mut s.info_sgb,
+                    "VDB" => &mut s.info_vdb,
+                    "NM" => &mut s.info_nm,
+                    "NMBZ" => &mut s.info_nmbz,
+                    "MIN_PL_SUM" => {
+                        eprintln!("[mpileup] warning: annotation {t:?} is not supported and is ignored");
+                        continue;
+                    }
+                    _ => bail!("Could not parse tag \"{name}\" in \"{spec}\""),
+                }
+            } else {
+                let f = upper.strip_prefix("FORMAT/").or_else(|| upper.strip_prefix("FMT/")).unwrap_or(&upper);
+                match f {
+                    "AD" => &mut s.fmt_ad,
+                    "ADF" => &mut s.fmt_adf,
+                    "ADR" => &mut s.fmt_adr,
+                    "DP" => &mut s.fmt_dp,
+                    "DP4" => &mut s.fmt_dp4,
+                    "DPR" => &mut s.fmt_dpr,
+                    "DV" => &mut s.fmt_dv,
+                    "QS" => &mut s.fmt_qs,
+                    "SP" => &mut s.fmt_sp,
+                    "SCR" => &mut s.fmt_scr,
+                    "NMBZ" => &mut s.fmt_nmbz,
+                    "PL" => &mut s.fmt_pl,
+                    "GQ" => {
+                        eprintln!("[mpileup] warning: FORMAT/GQ is a kira extension and is not written in the bcftools layout");
+                        continue;
+                    }
+                    _ => bail!("Could not parse tag \"{name}\" in \"{spec}\""),
+                }
+            };
+            *flag = on;
+        }
+        Ok(s)
+    }
+
     /// bcftools syntax: comma list of tags, `FORMAT/`/`FMT/`/`INFO/` prefixes,
     /// a leading `-` removes a tag; unknown tags are reported and ignored.
     pub fn parse(spec: Option<&str>) -> Result<Self> {

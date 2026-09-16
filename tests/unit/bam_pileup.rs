@@ -26,9 +26,10 @@
         let mut clipped = mk(0, 0, vec![(Kind::SoftClip, 2), (Kind::Match, 6)]);
         let mut site = PileupSite::default();
         site.reset(0, 1, 1);
-        observe(&mut fwd, 1, 13, true, &mut site);
-        observe(&mut rev, 1, 13, true, &mut site);
-        observe(&mut clipped, 1, 13, true, &mut site);
+        let o = EngineOpts::new(0, 13, true, false);
+        observe(&mut fwd, 0, 1, &o, &mut site);
+        observe(&mut rev, 1, 1, &o, &mut site);
+        observe(&mut clipped, 2, 1, &o, &mut site);
         let s = &site.per_sample[0];
         // fwd/rev read base at pos 1 is 'C' (index 1); clipped read: query index 3 = 'T'.
         assert_eq!(s.base_counts[1], 2);
@@ -61,7 +62,7 @@
         let mut got = Vec::new();
         for p in 0..9u32 {
             site.reset(0, p, 1);
-            observe(&mut lr, p, 0, false, &mut site);
+            observe(&mut lr, 0, p, &EngineOpts::new(0, 0, false, false), &mut site);
             let s = &site.per_sample[0];
             let base = (0..4).find(|&i| s.base_counts[i] == 1).map(|i| b"ACGT"[i] as char);
             got.push((base, s.ins_alleles.first().map(|a| a.0.clone()), s.del_alleles.first().map(|d| d.0)));

@@ -74,50 +74,80 @@ pub fn apply_baq_hmm(seq: &[u8], qual: &mut [u8], cigar: &[(Kind, u32)], ref_win
         return false;
     }
     let s: Vec<u8> = seq.iter().map(|&b| encode_nt(b)).collect();
-    let conf = GlocalParams { d: 0.001, e: 0.1, bw: bw as usize };
+    // `sam_prob_realn`: Illumina parameters, PacBio-CCS-like ones past 1 kb.
+    let d = if l_qseq > 1000 { 1e-7 } else { 0.001 };
+    let conf = GlocalParams { d, e: 0.1, bw: bw as usize };
     let Some(res) = glocal(&r, &s, Some(qual), &conf, true) else { return false };
 
-    // Extended BAQ: within a match run, a base's BAQ is the smaller of the
-    // running maxima from the left and from the right.
-    let mut bq = vec![0u8; l_qseq];
+    // Extended BAQ (`BAQ_EXTEND`): over a run of adjacent M/=/X ops a base's
+    // BAQ is the smaller of the running maxima from the left and from the
+    // right; clipped and inserted bases keep their quality.
+    let mut bq: Vec<u8> = qual.to_vec();
     let mut left = vec![0u8; l_qseq];
     let mut rght = vec![0u8; l_qseq];
     let (mut x, mut y) = (read_pos as i64, 0usize);
-    for &(op, l) in cigar {
-        let l = l as usize;
-        match op {
-            Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch => {
-                if l == 0 {
-                    continue;
-                }
-                for i in y..y + l {
-                    let st = res.state[i];
-                    let col = x - xb + (i - y) as i64;
-                    bq[i] = if (st & 3) != 0 || (st >> 2) as i64 != col { 0 } else { res.q[i] };
-                }
-                left[y] = bq[y];
-                for i in y + 1..y + l {
-                    left[i] = bq[i].max(left[i - 1]);
-                }
-                rght[y + l - 1] = bq[y + l - 1];
-                for i in (y..y + l - 1).rev() {
-                    rght[i] = bq[i].max(rght[i + 1]);
-                }
-                for i in y..y + l {
-                    bq[i] = left[i].min(rght[i]);
-                }
-                x += l as i64;
-                y += l;
+    let mut pending = 0usize;
+    let is_m = |k: Kind| matches!(k, Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch);
+    for (k, &(op, l)) in cigar.iter().enumerate() {
+        let mut l = l as usize;
+        if is_m(op) {
+            if cigar.get(k + 1).is_some_and(|(next, _)| is_m(*next)) {
+                pending += l;
+                continue;
             }
-            Kind::SoftClip | Kind::Insertion => y += l,
-            Kind::Deletion => x += l as i64,
-            _ => {}
+            l += pending;
+            pending = 0;
+        }
+        if l == 0 {
+            continue;
+        }
+        if is_m(op) {
+            let l = l.min(l_qseq - y);
+            if l == 0 {
+                continue;
+            }
+            for i in y..y + l {
+                let st = res.state[i];
+                let col = x - xb + (i - y) as i64;
+                bq[i] = if (st & 3) != 0 || (st >> 2) as i64 != col { 0 } else { res.q[i] };
+            }
+            left[y] = bq[y];
+            for i in y + 1..y + l {
+                left[i] = bq[i].max(left[i - 1]);
+            }
+            rght[y + l - 1] = bq[y + l - 1];
+            for i in (y..y + l - 1).rev() {
+                rght[i] = bq[i].max(rght[i + 1]);
+            }
+            for i in y..y + l {
+                bq[i] = left[i].min(rght[i]);
+            }
+            x += l as i64;
+            y += l;
+        } else if matches!(op, Kind::SoftClip | Kind::Insertion) {
+            y += l.min(l_qseq - y);
+        } else if op == Kind::Deletion {
+            x += l as i64;
         }
     }
     for (q, &b) in qual.iter_mut().zip(bq.iter()) {
         if *q > b {
             *q = b;
         }
+    }
+    true
+}
+
+/// Apply a stored `BQ` tag the way `sam_prob_realn` does without
+/// `BAQ_REDO`: each byte holds `64 + (qual - baq)`. Returns false (nothing
+/// applied) when the tag does not match the read length.
+pub fn apply_bq_tag(qual: &mut [u8], bq: &[u8]) -> bool {
+    if bq.len() != qual.len() {
+        return false;
+    }
+    for (q, &b) in qual.iter_mut().zip(bq) {
+        let v = *q as i32 - (b as i32 - 64);
+        *q = v.clamp(0, 255) as u8;
     }
     true
 }

@@ -1,7 +1,8 @@
 //! Streaming reader: one decoder thread per BAM pushes `LiveRead`s into a
 //! bounded channel; the pileup engine pulls, so no BAM is ever fully in RAM.
 
-use crate::bam::pileup::{LiveRead, build_live_from_bam};
+use crate::bam::pileup::{LiveRead, build_live_from_bam_with};
+use std::sync::Arc;
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, bounded};
 use noodles_bam as bam;
@@ -34,7 +35,17 @@ impl StreamingBam {
     }
 
     /// `workers` BGZF decompression threads feed the decoder.
-    pub fn open_with<P: AsRef<Path>>(p: P, sample_idx: usize, workers: usize, mut hook: Option<ReadHook>) -> Result<Self> {
+    pub fn open_with<P: AsRef<Path>>(p: P, sample_idx: usize, workers: usize, hook: Option<ReadHook>) -> Result<Self> {
+        Self::open_with_resolver(p, Arc::new(move |_| Some(sample_idx)), workers, hook)
+    }
+
+    /// [`open_with`] with the sample of each read chosen from its read group.
+    pub fn open_with_resolver<P: AsRef<Path>>(
+        p: P,
+        resolver: Arc<dyn Fn(Option<&[u8]>) -> Option<usize> + Send + Sync>,
+        workers: usize,
+        mut hook: Option<ReadHook>,
+    ) -> Result<Self> {
         let path = p.as_ref().to_path_buf();
         let f = File::open(&path).with_context(|| format!("open BAM {:?}", path))?;
         let bgzf = noodles_bgzf::io::MultithreadedReader::with_worker_count(NonZeroUsize::new(workers.max(1)).unwrap(), f);
@@ -55,7 +66,7 @@ impl StreamingBam {
             .spawn(move || -> Result<()> {
                 for r in reader.records() {
                     let rec = r.with_context(|| format!("read BAM record from {}", path.display()))?;
-                    let Some(mut lr) = build_live_from_bam(&rec, sample_idx) else { continue };
+                    let Some(mut lr) = build_live_from_bam_with(&rec, &|rg| resolver(rg)) else { continue };
                     if let Some(h) = hook.as_mut() {
                         if !h(&mut lr, &names) {
                             continue;

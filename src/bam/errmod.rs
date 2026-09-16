@@ -19,7 +19,7 @@ struct Coef {
     lhet: Vec<f64>,
 }
 
-fn lgamma(x: f64) -> f64 {
+pub(crate) fn lgamma(x: f64) -> f64 {
     // Lanczos approximation (g = 7), accurate to ~1e-13 for x > 0.
     const G: f64 = 7.0;
     const C: [f64; 9] = [

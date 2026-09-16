@@ -1,4 +1,4 @@
-use crate::bam::pileup::{LiveRead, build_live_from_bam, build_live_from_cram};
+use crate::bam::pileup::{LiveRead, SampleResolver, build_live_from_bam_with, build_live_from_cram_with};
 use anyhow::{Context, Result, bail};
 use noodles_bam as bam;
 use noodles_cram as cram;
@@ -47,7 +47,7 @@ pub fn apply_hmm_baq_to_reads(
     ref_names: &[String],
     fasta: &(impl FastaLike + Sync),
 ) {
-    apply_hmm_baq_to_reads_masked(reads, ref_names, fasta, None, "off");
+    apply_hmm_baq_to_reads_masked(reads, ref_names, fasta, None, "off", false);
 }
 
 /// Same as `apply_hmm_baq_to_reads`, but skips reads where `needs_baq[i] == false`.
@@ -60,6 +60,7 @@ pub fn apply_hmm_baq_to_reads_masked(
     fasta: &(impl FastaLike + Sync),
     needs_baq: Option<&[bool]>,
     nm_weight: &str,
+    redo: bool,
 ) {
     use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
     use rayon::prelude::*;
@@ -113,7 +114,7 @@ pub fn apply_hmm_baq_to_reads_masked(
                         continue;
                     }
                 }
-                baq_read(lr, ref_names, fasta);
+                baq_read(lr, ref_names, fasta, redo);
             }
             counter.fetch_add(batch.len() as u64, Ordering::Relaxed);
         });
@@ -124,9 +125,18 @@ pub fn apply_hmm_baq_to_reads_masked(
 }
 
 /// BAQ and NM down-weighting for one read; a no-op when its contig is not in
-/// the reference. The reference window reaches a read length past both
-/// ends of the alignment, as `sam_prob_realn` may look that far.
-pub fn baq_read(lr: &mut LiveRead, ref_names: &[String], fasta: &impl FastaLike) {
+/// the reference. A stored `BQ` tag is applied instead of recomputing unless
+/// `redo` (`-E`). The reference window reaches a read length past both ends
+/// of the alignment, as `sam_prob_realn` may look that far.
+pub fn baq_read(lr: &mut LiveRead, ref_names: &[String], fasta: &impl FastaLike, redo: bool) {
+    if let Some(tag) = lr.bq_tag.take() {
+        if !redo {
+            let (_, qual) = lr.seq_qual_mut();
+            if crate::bam::baq::apply_bq_tag(qual, &tag) {
+                return;
+            }
+        }
+    }
     let Some(chr) = ref_names.get(lr.ref_id) else { return };
     let span = ref_span(&lr.cigar_pairs);
     let ref_start = lr.ref_start;
@@ -177,13 +187,44 @@ impl BamReader {
         Self::open_with_reference(p, None)
     }
 
+    /// Header only, for sample selection before any read is loaded.
+    pub fn read_header_only(path: &Path, reference: Option<&Path>) -> Result<sam::Header> {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        if ext == "cram" {
+            let repo = match reference {
+                Some(r) => fasta_repository(r)?,
+                None => fasta::Repository::default(),
+            };
+            let mut r = cram::io::reader::Builder::default()
+                .set_reference_sequence_repository(repo)
+                .build_from_path(path)
+                .with_context(|| format!("open CRAM {:?}", path))?;
+            return r.read_header().context("read CRAM header");
+        }
+        if ext == "sam" {
+            let f = File::open(path).with_context(|| format!("open SAM {:?}", path))?;
+            let mut r = sam::io::Reader::new(std::io::BufReader::new(f));
+            return r.read_header().context("read SAM header");
+        }
+        let f = File::open(path).with_context(|| format!("open BAM {:?}", path))?;
+        let mut r = bam::io::Reader::new(f);
+        r.read_header().context("read BAM header")
+    }
+
     /// Open a BAM or CRAM. CRAM decoding needs the reference the file was
     /// encoded against (`--fasta-ref`) unless it embeds its sequences.
     pub fn open_with_reference<P: AsRef<Path>>(p: P, reference: Option<&Path>) -> Result<Self> {
+        Self::open_with_reference_resolved(p, reference, None)
+    }
+
+    /// [`open_with_reference`] with the sample of each read chosen by
+    /// `resolver` (sample 0 for every read without one).
+    pub fn open_with_reference_resolved<P: AsRef<Path>>(p: P, reference: Option<&Path>, resolver: Option<&SampleResolver<'_>>) -> Result<Self> {
         let path = p.as_ref();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-        if ext == "cram" { return Self::open_cram(path, reference, None); }
-        if ext == "sam" { return Self::open_sam(path, None); }
+        if ext == "cram" { return Self::open_cram(path, reference, None, resolver); }
+        if ext == "sam" { return Self::open_sam(path, None, resolver); }
+        let resolve: &SampleResolver<'_> = resolver.unwrap_or(&|_| Some(0));
         let f = File::open(path).with_context(|| format!("open BAM {:?}", path))?;
         // MultithreadedReader scales BGZF decompression across cores (~3-5× vs single-threaded).
         let bgzf_r = noodles_bgzf::io::MultithreadedReader::with_worker_count(
@@ -195,7 +236,7 @@ impl BamReader {
         let mut records_buf: Vec<LiveRead> = Vec::with_capacity(64 * 1024);
         for r in inner.records() {
             let rec = r.context("read BAM record")?;
-            if let Some(lr) = build_live_from_bam(&rec, 0) { records_buf.push(lr); }
+            if let Some(lr) = build_live_from_bam_with(&rec, resolve) { records_buf.push(lr); }
         }
         Ok(Self::build(records_buf, header, path))
     }
@@ -212,14 +253,25 @@ impl BamReader {
 
     /// Reads overlapping any of the (sorted, non-overlapping) regions, in position order.
     pub fn open_with_regions_and_reference<P: AsRef<Path>>(p: P, regions: &[(String, u32, u32)], reference: Option<&Path>) -> Result<Self> {
+        Self::open_with_regions_resolved(p, regions, reference, None)
+    }
+
+    /// [`open_with_regions_and_reference`] with a sample resolver.
+    pub fn open_with_regions_resolved<P: AsRef<Path>>(
+        p: P,
+        regions: &[(String, u32, u32)],
+        reference: Option<&Path>,
+        resolver: Option<&SampleResolver<'_>>,
+    ) -> Result<Self> {
         let path = p.as_ref();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
         if ext == "cram" {
-            return Self::open_cram(path, reference, Some(regions));
+            return Self::open_cram(path, reference, Some(regions), resolver);
         }
         if ext == "sam" {
-            return Self::open_sam(path, Some(regions));
+            return Self::open_sam(path, Some(regions), resolver);
         }
+        let resolve: &SampleResolver<'_> = resolver.unwrap_or(&|_| Some(0));
         let mut ir = bam::io::indexed_reader::Builder::default()
             .build_from_path(path).with_context(|| format!("open indexed BAM {:?}", path))?;
         let header = ir.read_header().context("read header")?;
@@ -229,14 +281,15 @@ impl BamReader {
             let query = ir.query(&header, &reg).with_context(|| format!("query region {chrom}:{beg}-{end}"))?;
             for r in query.records() {
                 let rec = r.context("read indexed BAM record")?;
-                if let Some(lr) = build_live_from_bam(&rec, 0) { records_buf.push(lr); }
+                if let Some(lr) = build_live_from_bam_with(&rec, resolve) { records_buf.push(lr); }
             }
         }
         records_buf.sort_by_key(|lr| (lr.ref_id, lr.ref_start));
         Ok(Self::build(records_buf, header, path))
     }
 
-    fn open_cram(path: &Path, reference: Option<&Path>, regions: Option<&[(String, u32, u32)]>) -> Result<Self> {
+    fn open_cram(path: &Path, reference: Option<&Path>, regions: Option<&[(String, u32, u32)]>, resolver: Option<&SampleResolver<'_>>) -> Result<Self> {
+        let resolve: &SampleResolver<'_> = resolver.unwrap_or(&|_| Some(0));
         let repo = match reference {
             Some(r) => fasta_repository(r)?,
             None => fasta::Repository::default(),
@@ -254,7 +307,7 @@ impl BamReader {
                     let query = ir.query(&header, &reg).with_context(|| format!("query CRAM region {chrom}:{beg}-{end}"))?;
                     for r in query {
                         let rb = r.context("read CRAM record")?;
-                        if let Some(lr) = build_live_from_cram(&rb, 0) { records_buf.push(lr); }
+                        if let Some(lr) = build_live_from_cram_with(&rb, resolve) { records_buf.push(lr); }
                     }
                 }
                 records_buf.sort_by_key(|lr| (lr.ref_id, lr.ref_start));
@@ -274,7 +327,7 @@ impl BamReader {
                         ),
                         Err(e) => return Err(e).context("read CRAM record"),
                     };
-                    if let Some(lr) = build_live_from_cram(&rb, 0) { records_buf.push(lr); }
+                    if let Some(lr) = build_live_from_cram_with(&rb, resolve) { records_buf.push(lr); }
                 }
                 header
             }
@@ -283,7 +336,8 @@ impl BamReader {
     }
 
     /// Plain SAM: no index, so regions are applied to the decoded records.
-    fn open_sam(path: &Path, regions: Option<&[(String, u32, u32)]>) -> Result<Self> {
+    fn open_sam(path: &Path, regions: Option<&[(String, u32, u32)]>, resolver: Option<&SampleResolver<'_>>) -> Result<Self> {
+        let resolve: &SampleResolver<'_> = resolver.unwrap_or(&|_| Some(0));
         let f = File::open(path).with_context(|| format!("open SAM {:?}", path))?;
         let mut reader = sam::io::Reader::new(std::io::BufReader::with_capacity(1 << 20, f));
         let header = reader.read_header().context("read SAM header")?;
@@ -292,7 +346,7 @@ impl BamReader {
         for r in reader.records() {
             let rec = r.context("read SAM record")?;
             let rb = sam::alignment::RecordBuf::try_from_alignment_record(&header, &rec).context("decode SAM record")?;
-            let Some(lr) = build_live_from_cram(&rb, 0) else { continue };
+            let Some(lr) = build_live_from_cram_with(&rb, resolve) else { continue };
             if let Some(regs) = regions {
                 let chrom = names.get(lr.ref_id).map(String::as_str).unwrap_or("");
                 let keep = regs.iter().any(|(c, b, e)| c == chrom && lr.ref_start < *e && lr.ref_end_cached >= *b);

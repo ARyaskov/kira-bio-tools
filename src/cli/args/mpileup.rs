@@ -41,8 +41,10 @@ pub struct MpileupArgs {
     #[arg(short = 'q', long = "min-MQ", default_value_t = 0)]
     pub min_mq: u32,
 
-    #[arg(short = 'Q', long = "min-BQ", default_value_t = 13)]
-    pub min_bq: u32,
+    /// Skip bases below this quality: 13 in the kira layout, 1 (bcftools 1.19's
+    /// default) with `--bcftools-layout`.
+    #[arg(short = 'Q', long = "min-BQ")]
+    pub min_bq: Option<u32>,
 
     #[arg(short = 'm', long = "min-ireads", default_value_t = 1)]
     pub min_ireads: u32,
@@ -69,6 +71,15 @@ pub struct MpileupArgs {
     /// Minimum site QUAL to emit in variants-only mode (matches bcftools-call default).
     #[arg(long = "min-qual", default_value_t = 10)]
     pub min_qual: u8,
+
+    /// Write records the way `bcftools mpileup` does: alleles ordered by
+    /// quality sum with the unseen `<*>`, PL only (no GT), I16/QS/MQ0F and
+    /// the bias statistics in INFO, bcftools' tag order and `-a` defaults, and
+    /// its read/base filters (`--delta-BQ 30`, `--max-BQ 60`, orphan pairs
+    /// skipped unless `-A`). The indel model stays kira's; only the layout is
+    /// bcftools'.
+    #[arg(long = "bcftools-layout")]
+    pub bcftools_layout: bool,
 
     #[arg(short = 'B', long = "no-BAQ")]
     pub no_baq: bool,
@@ -172,8 +183,14 @@ pub struct MpileupArgs {
     #[arg(long = "ambig-reads")]
     pub ambig_reads: Option<String>,
 
+    /// Read-group rows `ID [FILE] [SAMPLE]` to select (or with a leading `^`
+    /// exclude), optionally renaming the sample.
     #[arg(short = 'G', long = "read-groups")]
     pub read_groups: Option<PathBuf>,
+
+    /// One sample per file, named after the file; read groups are ignored.
+    #[arg(long = "ignore-RG")]
+    pub ignore_rg: bool,
 
     #[arg(short = 'p', long = "per-sample-mF")]
     pub per_sample_mf: bool,
@@ -210,6 +227,10 @@ pub struct MpileupArgs {
 
     #[arg(long = "indel-size", default_value_t = 110)]
     pub indel_size: u32,
+
+    /// Longest read BAQ is applied to (bcftools `-M`; the bcftools layout only).
+    #[arg(long = "max-read-len", default_value_t = 500)]
+    pub max_read_len: usize,
 
     #[arg(long = "threads", default_value_t = 0)]
     pub threads: usize,

@@ -8,16 +8,16 @@
 ##FORMAT=<ID=PL,Number=G,Type=Integer,Description="List of Phred-scaled genotype likelihoods">
 ##contig=<ID=chr19,length=147>
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	sample
-chr19	69	.	G	C	155.45	.	DP=58;MQ=48.3	GT:PL	0/1:189,0,255
+chr19	69	.	G	C	159.45	.	DP=58;MQ=48.3	GT:PL	0/1:193,0,255
 chr19	70	.	G	.	284.59	.	DP=59;MQ=48.5	GT:PL	0/0:0
 chr19	71	.	T	.	284.59	.	DP=57;MQ=48.8	GT:PL	0/0:0
-chr19	72	.	G	A	141.38	.	DP=60;MQ=48.7	GT:PL	0/1:175,0,255
+chr19	72	.	G	A	144.38	.	DP=60;MQ=48.7	GT:PL	0/1:178,0,255
 chr19	73	.	G	.	284.59	.	DP=59;MQ=49.2	GT:PL	0/0:0
 chr19	74	.	T	.	284.59	.	DP=56;MQ=49.3	GT:PL	0/0:0
 chr19	75	.	G	.	284.59	.	DP=59;MQ=49.2	GT:PL	0/0:0
-chr19	76	.	A	C	151.43	.	DP=60;MQ=48.7	GT:PL	0/1:185,0,255
+chr19	76	.	A	C	156.43	.	DP=60;MQ=48.7	GT:PL	0/1:190,0,255
 chr19	77	.	G	.	284.59	.	DP=60;MQ=48.7	GT:PL	0/0:0
-chr19	78	.	G	C	145.36	.	DP=58;MQ=48.3	GT:PL	0/1:179,0,255
+chr19	78	.	G	C	146.36	.	DP=58;MQ=48.3	GT:PL	0/1:180,0,255
 chr19	79	.	G	.	284.59	.	DP=58;MQ=48.3	GT:PL	0/0:0
 chr19	80	.	G	.	284.59	.	DP=56;MQ=47.9	GT:PL	0/0:0
 chr19	81	.	C	.	284.59	.	DP=56;MQ=47.9	GT:PL	0/0:0

@@ -4,8 +4,11 @@ pub mod pileup;
 pub use reader::BamReader;
 pub use pileup::{
     CigarOps, LiveRead, PileupSite, SampleSiteCounts,
-    mpileup_engine, mpileup_engine_from_records, mpileup_engine_multi, mpileup_engine_streaming,
+    mpileup_engine, mpileup_engine_from_records, mpileup_engine_from_records_opts, mpileup_engine_multi, mpileup_engine_streaming,
+    mpileup_engine_streaming_opts,
 };
+pub mod bcf_layout;
+pub mod samples;
 pub mod errmod;
 pub mod baq;
 pub mod fastmath;
