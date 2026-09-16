@@ -91,21 +91,34 @@ fn cal_coef(depcorr: f64, eps: f64) -> Coef {
 
 static COEF: OnceLock<Coef> = OnceLock::new();
 
-/// `drand48` (48-bit LCG), seeded like `srand48(0)`, for the deep-site subsample.
-struct Drand48(u64);
+/// `hts_drand48` (48-bit LCG) for the deep-site subsample. Callers own the
+/// state: `bcftools mpileup` draws from one stream seeded by `--seed`, the
+/// parallel kira layout seeds one per site so the output does not depend
+/// on the thread count.
+#[derive(Clone, Debug)]
+pub struct Drand48(u64);
 
 impl Drand48 {
-    fn new(seed: u32) -> Self {
+    /// `hts_srand48(seed)`.
+    pub fn new(seed: u32) -> Self {
         Self(((seed as u64) << 16) | 0x330E)
     }
-    fn next(&mut self) -> f64 {
+
+    /// A stream keyed by the run seed and the site, independent of the
+    /// order in which sites are processed.
+    pub fn for_site(seed: u64, ref_id: usize, pos: u32, sample: usize) -> Self {
+        let mut z = seed ^ ((ref_id as u64) << 48) ^ ((pos as u64) << 16) ^ (sample as u64);
+        z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        Self(z & ((1u64 << 48) - 1))
+    }
+
+    pub fn next(&mut self) -> f64 {
         self.0 = (self.0.wrapping_mul(0x5DEE_CE66D).wrapping_add(0xB)) & ((1u64 << 48) - 1);
         self.0 as f64 / (1u64 << 48) as f64
     }
-}
-
-thread_local! {
-    static RNG: std::cell::RefCell<Drand48> = std::cell::RefCell::new(Drand48::new(0));
 }
 
 /// Pack one observation: quality (clamped to 4..=63 like `bcf_call_glfgen`),
@@ -134,22 +147,20 @@ impl ErrorModel {
 
     /// `errmod_cal`: phred-scaled genotype likelihoods `q[i * m + j]` over
     /// `m` base codes. `bases` is reordered (sorted, subsampled when deep).
-    pub fn cal(&self, bases: &mut Vec<u16>, m: usize) -> Vec<f32> {
+    pub fn cal(&self, bases: &mut Vec<u16>, m: usize, rng: &mut Drand48) -> Vec<f32> {
         let mut q = vec![0.0f32; m * m];
         if bases.is_empty() || m == 0 || m > 16 {
             return q;
         }
         let mut n = bases.len();
         if n > MAX_BASES {
-            RNG.with(|r| {
-                let mut r = r.borrow_mut();
-                let mut i = n;
-                while i > 1 {
-                    let j = (r.next() * i as f64) as usize;
-                    bases.swap(j, i - 1);
-                    i -= 1;
-                }
-            });
+            // `ks_shuffle`: `n - 1` draws, the first 255 bases are kept.
+            let mut i = n;
+            while i > 1 {
+                let j = (rng.next() * i as f64) as usize;
+                bases.swap(j, i - 1);
+                i -= 1;
+            }
             n = MAX_BASES;
         }
         bases[..n].sort_unstable();
@@ -216,10 +227,10 @@ impl ErrorModel {
     /// PLs for the genotypes over `alleles` (base codes in output allele
     /// order, VCF genotype order), min-normalised and capped at 255 like
     /// `bcf_call_combine`.
-    pub fn pls(&self, bases: &mut Vec<u16>, alleles: &[u8]) -> Vec<u32> {
+    pub fn pls(&self, bases: &mut Vec<u16>, alleles: &[u8], rng: &mut Drand48) -> Vec<u32> {
         let m = 1 + alleles.iter().copied().max().unwrap_or(0) as usize;
         let m = m.max(alleles.len()).min(16);
-        let q = self.cal(bases, m);
+        let q = self.cal(bases, m, rng);
         let n = alleles.len();
         let mut raw: Vec<f32> = Vec::with_capacity(n * (n + 1) / 2);
         for j in 0..n {

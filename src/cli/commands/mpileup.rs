@@ -10,7 +10,7 @@ use crate::bam::{
 use crate::call::GvcfBlocker;
 use crate::cli::args::MpileupArgs;
 use crate::regions::RegionSet;
-use crate::bam::errmod::pack_base;
+use crate::bam::errmod::{Drand48, pack_base};
 use crate::call::haplotype::haplotype_pls;
 use crate::call::mcall::{CallResult, CallSite, Caller, CallerOpts, PL_MISSING};
 use anyhow::{Context, Result, bail};
@@ -554,6 +554,8 @@ fn run_streaming<W: Write>(
     let ctx = EmitCtx {
         args,
         em: &em,
+        seed: args.seed,
+        rng: std::sync::Mutex::new(Drand48::new(args.seed as u32)),
         caller: &caller,
         annotate,
         fasta: fasta.as_deref(),
@@ -709,6 +711,8 @@ fn run_prepared<W: Write>(
     let ctx = EmitCtx {
         args,
         em: &em,
+        seed: args.seed,
+        rng: std::sync::Mutex::new(Drand48::new(args.seed as u32)),
         caller: &caller,
         annotate,
         fasta,
@@ -826,6 +830,10 @@ struct EmitCtx<'a> {
     args: &'a MpileupArgs,
     /// Dependent-error genotype likelihoods (htslib errmod).
     em: &'a ErrorModel,
+    /// `--seed`: the bcftools layout draws from one `hts_drand48` stream,
+    /// the kira layout seeds one per site (see [`Drand48::for_site`]).
+    seed: u64,
+    rng: std::sync::Mutex<Drand48>,
     /// Multiallelic caller (bcftools `call -m`) applied to every site.
     caller: &'a Caller,
     annotate: &'a AnnotateSpec,
@@ -877,7 +885,7 @@ impl EmitCtx<'_> {
     }
 
     fn layout(&self) -> LayoutCtx<'_> {
-        LayoutCtx { tags: self.annotate, em: self.em, delta_bq: self.engine.delta_bq, max_bq: self.engine.max_bq }
+        LayoutCtx { tags: self.annotate, em: self.em, rng: &self.rng, delta_bq: self.engine.delta_bq, max_bq: self.engine.max_bq }
     }
 }
 
@@ -1229,7 +1237,7 @@ fn emit_site(
                 qs[k] += qsum[c as usize] as f64 / qtotal as f64;
             }
         }
-        let pl = ctx.em.pls(&mut bases, &codes);
+        let pl = ctx.em.pls(&mut bases, &codes, &mut Drand48::for_site(ctx.seed, site.ref_id, site.pos, si));
         pls_all.extend(pl.iter().map(|&v| v as i32));
     }
     if let Some(u) = unseen {
@@ -1556,7 +1564,7 @@ fn emit_one_indel(
         bases.clear();
         bases.extend((0..ref_c).map(|i| pack_base(30, i >= ref_f, 0)));
         bases.extend((0..indel_c).map(|i| pack_base(indel_qual, i >= indel_f, 1)));
-        let pl = ctx.em.pls(&mut bases, &[0, 1]);
+        let pl = ctx.em.pls(&mut bases, &[0, 1], &mut Drand48::for_site(ctx.seed, site.ref_id, site.pos, si));
         pls_all.extend(pl.iter().map(|&v| v as i32));
         per_counts.push((ref_c, indel_c, ref_f, indel_f));
         let (qr, qa) = (ref_c as f64 * 30.0, indel_c as f64 * indel_qual as f64);

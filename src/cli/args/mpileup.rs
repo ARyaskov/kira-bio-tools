@@ -204,8 +204,9 @@ pub struct MpileupArgs {
     #[arg(short = 'e', long = "ext-prob", default_value_t = 20)]
     pub ext_prob: u32,
 
-    #[arg(long = "seed")]
-    pub seed: Option<u64>,
+    /// Random number seed used for sampling deep regions
+    #[arg(long = "seed", default_value_t = 0)]
+    pub seed: u64,
 
     #[arg(long = "indels-2.0")]
     pub indels_20: bool,

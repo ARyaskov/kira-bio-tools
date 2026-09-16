@@ -337,7 +337,10 @@ Commands: `query`, `cnv`.
   `-x/--ignore-overlaps`, `-X/--config`, `-F/--gap-frac`, `--indel-size`,
   `--threads`, `--stream`, flag filters (`--ef`, `--df`, `--if`, `--nf`,
   `--rf`, `--ff`), selectors, `--bcftools-layout`, `-G/--read-groups`,
-  `--ignore-RG`, `--max-read-len`, `-E/--redo-BAQ`.
+  `--ignore-RG`, `--max-read-len`, `-E/--redo-BAQ`, `--seed` (deep-site
+  subsampling: one `hts_drand48` stream like bcftools in the bcftools layout,
+  a per-site stream in the kira layout so results do not depend on
+  `--threads`).
   Fused calling shortcuts: `-v/--variants-only`, `--prior`, `--min-alt-reads`,
   `--min-af`, `--min-qual`.
 

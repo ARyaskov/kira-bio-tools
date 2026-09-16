@@ -10,7 +10,7 @@ use std::io::Write;
 
 use noodles_sam::alignment::record::cigar::op::Kind;
 
-use crate::bam::errmod::{ErrorModel, lgamma};
+use crate::bam::errmod::{Drand48, ErrorModel, lgamma};
 use crate::bam::mpileup_opts::AnnotateSpec;
 use crate::bam::pileup::{IndelEvent, LiveRead, PileupSite, adjusted_baseq};
 use crate::util::fmt_g;
@@ -26,6 +26,8 @@ const N_NM: usize = 32;
 pub struct LayoutCtx<'a> {
     pub tags: &'a AnnotateSpec,
     pub em: &'a ErrorModel,
+    /// The run's `hts_drand48` stream (`--seed`), shared by every site.
+    pub rng: &'a std::sync::Mutex<Drand48>,
     pub delta_bq: Option<u8>,
     pub max_bq: Option<u8>,
 }
@@ -881,7 +883,7 @@ pub fn render_snp(
             let is_diff = !(ref4 < 4 && b == ref4);
             add_observation(&mut call, &mut bias, &mut bases, lr, qi, b, q, is_diff);
         }
-        call.p = ctx.em.cal(&mut bases, MAX_ALLELES);
+        call.p = ctx.em.cal(&mut bases, MAX_ALLELES, &mut ctx.rng.lock().unwrap());
         calls.push(call);
     }
     let comb = combine(&calls, Some(ref4));
@@ -935,7 +937,7 @@ pub fn render_indel(
             }
             add_observation(&mut call, &mut bias, &mut bases, lr, qi, b, q, carries);
         }
-        call.p = ctx.em.cal(&mut bases, MAX_ALLELES);
+        call.p = ctx.em.cal(&mut bases, MAX_ALLELES, &mut ctx.rng.lock().unwrap());
         if support > idv {
             idv = support;
         }
