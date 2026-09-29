@@ -90,7 +90,7 @@ fn make_fixture(dir: &std::path::Path) -> (std::path::PathBuf, Vec<std::path::Pa
     }
 
     // Chimeric pairs: each R1 joins two distant loci, so the aligner splits it
-    // and emits a supplementary record. kira-ls-aligner 0.4.6 hard-clips those
+    // and emits a supplementary record. kira-ls-aligner hard-clips those
     // by default, and the bridge has to do the same or SEQ and CIGAR drift.
     for i in 0..40usize {
         let a = 1_000 + i * 977;
@@ -139,7 +139,8 @@ fn build_aligner(ref_path: &std::path::Path) -> Aligner {
         read_group: None,
         paired: true,
         interleaved: false,
-        insert_size: "0,1000,350,50".to_string(),
+        insert_size: None,
+        insert_window: "0,1000,350,50".to_string(),
         n_read_files: 2,
     };
     build_short_pe_aligner(&params).unwrap().0

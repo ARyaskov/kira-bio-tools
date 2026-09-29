@@ -40,7 +40,8 @@ pub fn cmd_solid(args: SolidArgs) -> Result<()> {
         read_group: read_group.clone(),
         paired,
         interleaved: false,
-        insert_size: args.aligner_insert_size.clone(),
+        insert_size: None,
+        insert_window: args.aligner_insert_size.clone(),
         n_read_files: n_files,
     };
     let (aligner, idx_path) = build_short_pe_aligner(&params)?;

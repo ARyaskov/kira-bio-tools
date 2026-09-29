@@ -49,7 +49,12 @@ url = "2.5.7"
 form_urlencoded = "1.2.2"
 
 kira-bam = "0.4.0"
-kira-ls-aligner = "0.4.6"
+kira-ls-aligner = "0.5.0"
+
+# Until kira-ls-aligner 0.5.0 is on crates.io, build against the sibling
+# checkout. Remove this section once it is published.
+[patch.crates-io]
+kira-ls-aligner = { path = "../kira-ls-aligner" }
 
 [dev-dependencies]
 # Only to prove crate::fx computes the same hashes that key existing .ani files.

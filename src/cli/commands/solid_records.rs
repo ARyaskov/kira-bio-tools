@@ -11,9 +11,13 @@
 //! `RG` are emitted by the text path but read by nothing here, and `MD` is a
 //! per-record `String` — skipping them is most of this module's memory win.
 //!
-//! Indel left-normalization is not repeated here: kira-ls-aligner 0.4.6 applies
-//! it inside the pipeline, before pairing, so the scored batches already carry
+//! Indel left-normalization is not repeated here: kira-ls-aligner applies it
+//! inside the pipeline, before pairing, so the scored batches already carry
 //! canonical CIGARs.
+//!
+//! An unmapped read whose mate mapped takes the mate's reference and position
+//! (SAM spec 2.4 recommended practice, what the emitter writes since
+//! kira-ls-aligner 0.5.0), so the coordinate sort keeps it next to its mate.
 
 use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::record::cigar::Op;
@@ -246,10 +250,15 @@ fn unmapped_record(read: &ReadRecord, mate: Option<&MateInfo>) -> RecordBuf {
         ));
     if let Some(m) = mate
         && let Some(mate_ref) = m.mate_ref_id
+        && !m.mate_is_unmapped
     {
-        builder = builder.set_mate_reference_sequence_id(mate_ref as usize);
+        builder = builder
+            .set_reference_sequence_id(mate_ref as usize)
+            .set_mate_reference_sequence_id(mate_ref as usize);
         if let Some(mpos) = noodles_core::Position::new(m.mate_pos as usize + 1) {
-            builder = builder.set_mate_alignment_start(mpos);
+            builder = builder
+                .set_alignment_start(mpos)
+                .set_mate_alignment_start(mpos);
         }
     }
     builder.build()

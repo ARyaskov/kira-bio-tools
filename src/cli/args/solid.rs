@@ -30,7 +30,7 @@ pub struct SolidArgs {
     #[arg(long = "aligner-rg", value_name = "RG")]
     pub aligner_rg: Option<String>,
 
-    /// Insert-size spec `MIN,MAX,MEAN,SD`.
+    /// Proper-pair window `MIN,MAX[,MEAN,SD]`; the run-time estimator refines it.
     #[arg(long = "aligner-insert-size", default_value = "0,1000,200,50")]
     pub aligner_insert_size: String,
 
