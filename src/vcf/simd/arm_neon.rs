@@ -10,6 +10,9 @@ use core::arch::aarch64::*;
 
 const MAX_TABS: usize = 138;
 
+/// # Safety
+/// NEON is a baseline feature of every aarch64 target, so the intrinsics are
+/// always available; the caller only has to be compiling for aarch64.
 #[target_feature(enable = "neon")]
 pub unsafe fn parse_vcf_line_simd(line: &[u8]) -> Option<VcfFieldsFull<'_>> {
     if line.len() < 20 {
@@ -17,7 +20,7 @@ pub unsafe fn parse_vcf_line_simd(line: &[u8]) -> Option<VcfFieldsFull<'_>> {
     }
 
     let mut tabs = [0usize; MAX_TABS];
-    let found = find_tabs_neon(line, &mut tabs);
+    let found = unsafe { find_tabs_neon(line, &mut tabs) };
 
     if found < 7 {
         return None;
@@ -80,6 +83,9 @@ pub unsafe fn parse_vcf_line_simd(line: &[u8]) -> Option<VcfFieldsFull<'_>> {
     })
 }
 
+/// # Safety
+/// NEON is a baseline feature of every aarch64 target, so the intrinsics are
+/// always available; the caller only has to be compiling for aarch64.
 #[target_feature(enable = "neon")]
 pub unsafe fn parse_vcf_fields_neon(line: &[u8]) -> Option<VcfFields<'_>> {
     if line.len() < 20 {
@@ -87,14 +93,13 @@ pub unsafe fn parse_vcf_fields_neon(line: &[u8]) -> Option<VcfFields<'_>> {
     }
 
     let mut tabs = [0usize; 8];
-    let n = find_tabs_neon(line, &mut tabs);
+    let n = unsafe { find_tabs_neon(line, &mut tabs) };
 
     if n < 7 {
         return None;
     }
 
     let line_str = std::str::from_utf8(line).ok()?;
-    let line_len = line.len();
 
     let info_start = tabs[6] + 1;
     let info_end = if n >= 8 { tabs[7] } else { line_str.len() };
@@ -115,10 +120,13 @@ pub unsafe fn parse_vcf_fields_neon(line: &[u8]) -> Option<VcfFields<'_>> {
     })
 }
 
+/// # Safety
+/// NEON is a baseline feature of every aarch64 target, so the intrinsics are
+/// always available; the caller only has to be compiling for aarch64.
 #[target_feature(enable = "neon")]
 pub unsafe fn parse_chr_pos_neon(line: &[u8]) -> Option<(u8, u32)> {
     let mut tabs = [0usize; 2];
-    let n = find_tabs_neon(line, &mut tabs);
+    let n = unsafe { find_tabs_neon(line, &mut tabs) };
 
     if n < 1 {
         return None;
@@ -149,10 +157,8 @@ unsafe fn find_tabs_neon(buf: &[u8], out: &mut [usize]) -> usize {
     let tab = vdupq_n_u8(b'\t');
 
     while pos + 16 <= buf.len() && found < max_tabs {
-        let chunk = vld1q_u8(buf.as_ptr().add(pos));
-        let cmp = vceqq_u8(chunk, tab);
-
-        let mask_parts: [u8; 16] = std::mem::transmute(cmp);
+        let cmp = unsafe { vceqq_u8(vld1q_u8(buf.as_ptr().add(pos)), tab) };
+        let mask_parts: [u8; 16] = unsafe { std::mem::transmute(cmp) };
         for (i, &byte) in mask_parts.iter().enumerate() {
             if byte == 0xFF && found < max_tabs {
                 out[found] = pos + i;
@@ -174,16 +180,17 @@ unsafe fn find_tabs_neon(buf: &[u8], out: &mut [usize]) -> usize {
     found
 }
 
+/// # Safety
+/// NEON is a baseline feature of every aarch64 target, so the intrinsics are
+/// always available; the caller only has to be compiling for aarch64.
 #[target_feature(enable = "neon")]
 pub unsafe fn find_char_neon(buf: &[u8], ch: u8) -> Option<usize> {
     let target = vdupq_n_u8(ch);
     let mut pos = 0;
 
     while pos + 16 <= buf.len() {
-        let chunk = vld1q_u8(buf.as_ptr().add(pos));
-        let cmp = vceqq_u8(chunk, target);
-
-        let mask_parts: [u8; 16] = std::mem::transmute(cmp);
+        let cmp = unsafe { vceqq_u8(vld1q_u8(buf.as_ptr().add(pos)), target) };
+        let mask_parts: [u8; 16] = unsafe { std::mem::transmute(cmp) };
         for (i, &byte) in mask_parts.iter().enumerate() {
             if byte == 0xFF {
                 return Some(pos + i);

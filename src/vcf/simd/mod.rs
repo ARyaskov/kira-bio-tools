@@ -33,7 +33,7 @@ impl SimdVcfParser {
         #[cfg(target_arch = "aarch64")]
         {
             // SAFETY: NEON is a baseline feature of every aarch64 target.
-            return unsafe { arm_neon::parse_vcf_line_simd(line) };
+            unsafe { arm_neon::parse_vcf_line_simd(line) }
         }
 
         #[cfg(not(target_arch = "aarch64"))]
@@ -53,7 +53,7 @@ impl SimdVcfParser {
         #[cfg(target_arch = "aarch64")]
         {
             // SAFETY: NEON is a baseline feature of every aarch64 target.
-            return unsafe { arm_neon::parse_vcf_fields_neon(line) };
+            unsafe { arm_neon::parse_vcf_fields_neon(line) }
         }
 
         #[cfg(not(target_arch = "aarch64"))]
@@ -73,7 +73,7 @@ impl SimdVcfParser {
         #[cfg(target_arch = "aarch64")]
         {
             // SAFETY: NEON is a baseline feature of every aarch64 target.
-            return unsafe { arm_neon::parse_chr_pos_neon(line) };
+            unsafe { arm_neon::parse_chr_pos_neon(line) }
         }
 
         #[cfg(not(target_arch = "aarch64"))]

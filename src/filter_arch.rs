@@ -191,7 +191,7 @@ mod arch_avx2 {
         let bytes = s.as_bytes();
         let mut i = 0;
 
-        if bytes.get(0) == Some(&b'-') {
+        if bytes.first() == Some(&b'-') {
             neg = true;
             i += 1;
         }
@@ -199,7 +199,7 @@ mod arch_avx2 {
         let mut n: i64 = 0;
         while i < bytes.len() {
             let c = bytes[i];
-            if c < b'0' || c > b'9' {
+            if !c.is_ascii_digit() {
                 return None;
             }
             n = n * 10 + (c - b'0') as i64;
@@ -215,7 +215,7 @@ mod arch_avx2 {
         let bytes = s.as_bytes();
         let mut i = 0;
 
-        if bytes.get(0) == Some(&b'-') {
+        if bytes.first() == Some(&b'-') {
             neg = true;
             i += 1;
         }
@@ -251,7 +251,7 @@ mod arch_neon {
     pub struct NeonImpl;
 
     impl FilterArch for NeonImpl {
-        fn split_key_value(&self, s: &str) -> Option<(&str, &str)> {
+        fn split_key_value<'a>(&self, s: &'a str) -> Option<(&'a str, &'a str)> {
             // SAFETY: this module only exists when the build targets NEON
             // (`cfg(target_feature = "neon")`), so the intrinsics are available.
             unsafe { split_eq_neon(s) }
@@ -309,7 +309,7 @@ mod arch_neon {
         let bytes = s.as_bytes();
         let mut i = 0;
 
-        if bytes.get(0) == Some(&b'-') {
+        if bytes.first() == Some(&b'-') {
             neg = true;
             i += 1;
         }
@@ -317,7 +317,7 @@ mod arch_neon {
         let mut n = 0_i64;
         while i < bytes.len() {
             let c = bytes[i];
-            if c < b'0' || c > b'9' {
+            if !c.is_ascii_digit() {
                 return None;
             }
             n = n * 10 + (c - b'0') as i64;
@@ -333,7 +333,7 @@ mod arch_neon {
         let bytes = s.as_bytes();
         let mut i = 0;
 
-        if bytes.get(0) == Some(&b'-') {
+        if bytes.first() == Some(&b'-') {
             neg = true;
             i += 1;
         }
