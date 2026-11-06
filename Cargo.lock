@@ -1040,7 +1040,7 @@ dependencies = [
  "itoa",
  "kira-bam",
  "kira-ls-aligner",
- "kira_kv_engine",
+ "kira_kv_engine 0.6.3",
  "lazy_static",
  "libdeflater",
  "memchr",
@@ -1083,7 +1083,9 @@ dependencies = [
 
 [[package]]
 name = "kira-ls-aligner"
-version = "0.5.0"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9896d4c9c93e097780143294f2046ace8d11b25f42ba7b37f11473faa62d32bf"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -1094,7 +1096,7 @@ dependencies = [
  "kira-bam",
  "kira-fastq",
  "kira-simd",
- "kira_kv_engine",
+ "kira_kv_engine 0.7.0",
  "libc",
  "memmap2",
  "mimalloc",
@@ -1126,6 +1128,19 @@ dependencies = [
  "rayon",
  "rkyv",
  "serde",
+ "thiserror",
+ "wyhash",
+]
+
+[[package]]
+name = "kira_kv_engine"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caf2edbafc54946b80080158e1a22364760c75b78ecfd23d49feec9390874dc5"
+dependencies = [
+ "core_affinity",
+ "hashbrown 0.16.1",
+ "rayon",
  "thiserror",
  "wyhash",
 ]
