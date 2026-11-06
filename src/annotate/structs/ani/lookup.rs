@@ -211,15 +211,7 @@ impl AniIndex {
             );
         }
 
-        // kira_kv_engine 0.6.0: lookup_u64_fast skips the BackendDispatch enum
-        // match for PtrHash25-backed indexes (~5-10 ns / lookup faster than
-        // lookup_u64). Returns None only for non-PtrHash25 engines, which 0.6.0
-        // doesn't have yet — fall back to lookup_u64 to stay future-proof.
-        let idx = match self
-            .index
-            .lookup_u64_fast(h)
-            .unwrap_or_else(|| self.index.lookup_u64(h))
-        {
+        let idx = match self.index.lookup_u64(h) {
             Ok(v) => v,
             Err(_) => {
                 if debug {
@@ -308,15 +300,7 @@ impl AniIndex {
             );
         }
 
-        // kira_kv_engine 0.6.0: lookup_u64_fast skips the BackendDispatch enum
-        // match for PtrHash25-backed indexes (~5-10 ns / lookup faster than
-        // lookup_u64). Returns None only for non-PtrHash25 engines, which 0.6.0
-        // doesn't have yet — fall back to lookup_u64 to stay future-proof.
-        let idx = match self
-            .index
-            .lookup_u64_fast(h)
-            .unwrap_or_else(|| self.index.lookup_u64(h))
-        {
+        let idx = match self.index.lookup_u64(h) {
             Ok(v) => v,
             Err(_) => {
                 if debug {
@@ -638,15 +622,7 @@ impl AniIndex {
             );
         }
 
-        // kira_kv_engine 0.6.0: lookup_u64_fast skips the BackendDispatch enum
-        // match for PtrHash25-backed indexes (~5-10 ns / lookup faster than
-        // lookup_u64). Returns None only for non-PtrHash25 engines, which 0.6.0
-        // doesn't have yet — fall back to lookup_u64 to stay future-proof.
-        let idx = match self
-            .index
-            .lookup_u64_fast(h)
-            .unwrap_or_else(|| self.index.lookup_u64(h))
-        {
+        let idx = match self.index.lookup_u64(h) {
             Ok(v) => v,
             Err(_) => {
                 if debug {

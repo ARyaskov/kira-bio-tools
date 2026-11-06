@@ -1408,7 +1408,7 @@ fn load_index(mmap: &Mmap, header: &AniHeader) -> Result<Index> {
     if end > mmap.len() {
         return Err(anyhow!("ANI index out of range"));
     }
-    Index::deserialize(&mmap[start..end]).map_err(|e| anyhow!(e))
+    Index::from_bytes(&mmap[start..end]).map_err(|e| anyhow!(e))
 }
 
 fn load_entries(mmap: &Mmap, header: &AniHeader) -> Result<Vec<AniEntry>> {

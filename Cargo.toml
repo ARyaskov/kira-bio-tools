@@ -10,7 +10,7 @@ keywords = ["vcf", "bioinformatics", "genomics", "tabix", "bcf"]
 categories = ["science", "command-line-utilities"]
 
 [dependencies]
-kira_kv_engine = "0.6.3"
+kira_kv_engine = "0.8.1"
 thiserror = "2.0"
 memmap2 = "0.9"
 bytemuck = { version = "1.21", features = ["derive"] }

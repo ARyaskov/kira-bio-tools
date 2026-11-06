@@ -28,8 +28,7 @@ pub fn finalize_ani_index(
     let n = rows.len();
     let mph_start = std::time::Instant::now();
 
-    // kira_kv_engine 0.6.0: BackendKind::PtrHash25 is the sole MPH backend and is the
-    // IndexConfig::default(). For the ANI workload (≤ 8 B uniformly-distributed u64
+    // PtrHash25 is kira_kv_engine's only MPH backend. For the ANI workload (≤ 8 B uniformly-distributed u64
     // keys, build-once / lookup-many, ~10^7-10^8 keys) PtrHash25 is the optimal
     // algorithm: ~2.3 bits/key, deterministic O(1) lookups, AVX2-batched build.
     //
@@ -39,11 +38,10 @@ pub fn finalize_ani_index(
     // turn those into bogus indices — we'd still catch them via the chr/pos/ref/alt
     // re-verification, but at the cost of always doing a full entry load + cstring
     // decode. Keep `lean_mph=false` (the default).
-    let mut config = IndexConfig::default();
-    config.auto_detect_numeric = false;
-    // build_fast_profile=true is already in the default; explicit for clarity.
-    config.build_fast_profile = true;
-    config.enable_parallel_build = true;
+    let config = IndexConfig {
+        enable_parallel_build: true,
+        ..IndexConfig::default()
+    };
 
     if timing {
         print_mph_config(&config, n, &rows);
@@ -55,7 +53,7 @@ pub fn finalize_ani_index(
         verify_key_uniqueness(&keys_bytes, &rows);
     }
 
-    // kira_kv_engine 0.6.3 builds from a borrowed slice, so the key vector is
+    // kira_kv_engine builds from a borrowed slice, so the key vector is
     // no longer duplicated (0.8 GB on a 10^8-key build) just to be handed over.
     let index = IndexBuilder::new()
         .with_config(config)
@@ -145,13 +143,8 @@ pub fn finalize_ani_index(
         for (i, key_bytes) in keys_bytes.iter().take(5).enumerate() {
             let key = u64::from_le_bytes(*key_bytes);
             let contains = index.contains(key_bytes);
-            let lookup = index.get(key_bytes).ok();
-            // Prefer the dispatch-free fast path; fall back to lookup_u64 if the
-            // backend can't be specialized (won't happen in 0.6.0, but future-proof).
-            let lookup_u64 = index
-                .lookup_u64_fast(key)
-                .unwrap_or_else(|| index.lookup_u64(key))
-                .ok();
+            let lookup = index.lookup(key_bytes).ok();
+            let lookup_u64 = index.lookup_u64(key).ok();
             eprintln!(
                 "  [{}] key={:016x} len={} contains={} lookup={:?} lookup_u64={:?}",
                 i,
@@ -165,7 +158,7 @@ pub fn finalize_ani_index(
         verify_index_correctness(&index, &keys_bytes, &keys_ordered);
     }
 
-    let index_bytes = index.serialize()?;
+    let index_bytes = index.to_bytes()?;
     let pos_index_bytes = build_pos_index(&entries);
     let info_blob_bytes = build_info_blob(&entries, &mut pool)?;
     let mut contig_bytes = Vec::with_capacity(contigs.serialized_len());
@@ -245,8 +238,14 @@ fn scan_for_intervals(entries: &[AniEntry], pool: &mut StringPool) -> bool {
 
 fn print_mph_config(config: &IndexConfig, n: usize, rows: &[(u64, AniEntry)]) {
     eprintln!(
-        "[ani-build] MPHF config: backend={:?}, gamma={:.2}, max_rehash={}, lean={}, entries={}",
-        config.backend, config.mph_config.gamma, config.mph_config.max_rehash, config.lean_mph, n
+        "[ani-build] MPHF config: lambda={:.2}, alpha={:.2}, max_rehash={}, lean={}, bloom={}, fingerprint_bits={}, entries={}",
+        config.mph_config.lambda,
+        config.mph_config.alpha,
+        config.mph_config.max_rehash,
+        config.lean_mph,
+        config.bloom_filter,
+        config.fingerprint_bits.bits(),
+        n
     );
     eprintln!("[ani-build] First 5 keys for verification:");
     for (i, (k, e)) in rows.iter().enumerate().take(5) {
@@ -289,12 +288,7 @@ fn verify_index_correctness(index: &Index, keys_bytes: &[[u8; 8]], keys_ordered:
     for i in (0..keys_bytes.len()).step_by(step.max(1)).take(check_count) {
         let key_bytes = &keys_bytes[i];
         let key = u64::from_le_bytes(*key_bytes);
-        // Use lookup_u64_fast: skips enum dispatch on PtrHash25-backed engines
-        // (~5-10 ns/lookup faster than lookup_u64). Falls back to the byte path
-        // for non-PtrHash25 backends, which 0.6.0 doesn't have yet.
-        let lookup_result = index
-            .lookup_u64_fast(key)
-            .unwrap_or_else(|| index.get(key_bytes));
+        let lookup_result = index.lookup_u64(key);
         let idx = match lookup_result {
             Ok(v) => v,
             Err(err) => {

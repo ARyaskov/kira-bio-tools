@@ -9,7 +9,6 @@ use crate::vcf::header::ContigDict;
 
 pub struct KbiBuilder {
     entries: Vec<(u64, u64)>,
-    gamma: f64,
     max_rehash: u32,
     salt: u64,
     contigs: ContigDict,
@@ -19,7 +18,6 @@ impl KbiBuilder {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
-            gamma: 1.27,
             max_rehash: 16,
             salt: 0x0C0F_FEE0_0D15_EA5E,
             contigs: ContigDict::new(),
@@ -33,8 +31,13 @@ impl KbiBuilder {
         }
     }
 
-    pub fn gamma(mut self, gamma: f64) -> Self {
-        self.gamma = gamma;
+    /// Former MPH slot-space multiplier. Since kira_kv_engine 0.7 the hash
+    /// output range is always minimal (one slot per key), so this is ignored.
+    #[deprecated(
+        since = "0.8.1",
+        note = "no effect: the MPH output range is always minimal"
+    )]
+    pub fn gamma(self, _gamma: f64) -> Self {
         self
     }
 
@@ -96,10 +99,8 @@ impl KbiBuilder {
         let key_bytes: Vec<[u8; 8]> = keys.iter().map(|k| k.to_le_bytes()).collect();
 
         let mut config = IndexConfig::default();
-        config.mph_config.gamma = self.gamma;
         config.mph_config.max_rehash = self.max_rehash;
         config.mph_config.seed = self.salt;
-        config.auto_detect_numeric = true;
 
         let index = IndexBuilder::new()
             .with_config(config)

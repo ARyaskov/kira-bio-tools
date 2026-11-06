@@ -103,7 +103,7 @@ impl KbiIndex {
         let file = File::create(path)?;
         let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, file);
 
-        let index_bytes = self.index.serialize()?;
+        let index_bytes = self.index.to_bytes()?;
         let header = KbiHeader::new(self.keys.len(), index_bytes.len(), self.slot_to_idx.len());
 
         writer.write_all(bytemuck::bytes_of(&header))?;
@@ -150,7 +150,7 @@ impl KbiIndex {
         if index_end > mmap.len() {
             return Err(KbiError::InvalidFormat("Index out of range".into()));
         }
-        let index = Index::deserialize(&mmap[index_start..index_end])?;
+        let index = Index::from_bytes(&mmap[index_start..index_end])?;
 
         let keys_start = header.off_keys as usize;
         let keys_end = keys_start + n * mem::size_of::<u64>();
