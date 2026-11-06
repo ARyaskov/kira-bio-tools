@@ -270,7 +270,49 @@ pub struct AniInfoBlob {
     pub entry_offsets: Vec<u32>,
     pub entry_counts: Vec<u16>,
     pub pairs: Vec<AniInfoPair>,
-    pub values: Vec<u8>,
+    /// The INFO value bytes, read in place from the `.ani` mapping. This is
+    /// most of a large ANI (gigabytes for whole-genome sources), so it is
+    /// never copied to the heap.
+    pub values: MappedBytes,
+}
+
+/// A byte range of the `.ani` file mapping. Cheap to clone; dereferences to
+/// the bytes themselves.
+#[derive(Clone)]
+pub struct MappedBytes {
+    map: Arc<Mmap>,
+    start: usize,
+    end: usize,
+}
+
+impl MappedBytes {
+    /// `None` when `start..end` is not inside the mapping.
+    fn new(map: Arc<Mmap>, start: usize, end: usize) -> Option<Self> {
+        (start <= end && end <= map.len()).then_some(Self { map, start, end })
+    }
+}
+
+impl Deref for MappedBytes {
+    type Target = [u8];
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        &self.map[self.start..self.end]
+    }
+}
+
+impl AsRef<[u8]> for MappedBytes {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl std::fmt::Debug for MappedBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MappedBytes")
+            .field("len", &(self.end - self.start))
+            .finish()
+    }
 }
 
 #[repr(C)]
@@ -301,7 +343,7 @@ pub struct AniIndex {
     pub entries: Vec<AniEntry>,
     intervals: Vec<Vec<IntervalEntry>>,
     strings: StringSource,
-    mmap: Mmap,
+    mmap: Arc<Mmap>,
     pos_index: Option<AniPosIndex>,
     /// O(1) chr_id → index-into-`pos_index.contigs`. Dense `Vec` lookup table
     /// when there are ≤1024 contigs; `HashMap` otherwise.
@@ -355,7 +397,7 @@ impl AniIndex {
         let file = File::open(path)?;
         // SAFETY: read-only mapping of an index that is replaced atomically on
         // rebuild, never modified in place while mapped.
-        let mmap = unsafe { MmapOptions::new().map(&file)? };
+        let mmap = Arc::new(unsafe { MmapOptions::new().map(&file)? });
 
         if mmap.len() < mem::size_of::<AniHeaderV3>() {
             return Err(anyhow!("ANI file too small"));
@@ -1577,7 +1619,7 @@ fn load_pos_index(mmap: &Mmap, header: &AniHeader) -> Result<Option<AniPosIndex>
     }))
 }
 
-fn load_info_blob(mmap: &Mmap, header: &AniHeader) -> Result<Option<AniInfoBlob>> {
+fn load_info_blob(mmap: &Arc<Mmap>, header: &AniHeader) -> Result<Option<AniInfoBlob>> {
     if header.blob_len == 0 {
         return Ok(None);
     }
@@ -1630,7 +1672,8 @@ fn load_info_blob(mmap: &Mmap, header: &AniHeader) -> Result<Option<AniInfoBlob>
     let entry_offsets_bytes = &bytes[entry_offsets_start..entry_offsets_end];
     let entry_counts_bytes = &bytes[entry_counts_start..entry_counts_end];
     let pairs_bytes = &bytes[pairs_start..pairs_end];
-    let values = bytes[values_start..].to_vec();
+    let values = MappedBytes::new(Arc::clone(mmap), start + values_start, end)
+        .ok_or_else(|| anyhow!("ANI blob offsets invalid"))?;
 
     let dict_offsets: Vec<u32> = read_pod_slice(dict_offsets_bytes)?;
     let entry_offsets: Vec<u32> = read_pod_slice(entry_offsets_bytes)?;

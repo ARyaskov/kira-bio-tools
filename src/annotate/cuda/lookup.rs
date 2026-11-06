@@ -297,7 +297,7 @@ impl GpuAni {
                 pair_tag_ids: DeviceBuffer::from_slice(&cache.pair_tag_ids)?,
                 pair_value_off: DeviceBuffer::from_slice(&pair_value_off)?,
                 pair_value_len: DeviceBuffer::from_slice(&pair_value_len)?,
-                raw_values: DeviceBuffer::from_slice(&blob.values)?,
+                raw_values: DeviceBuffer::from_slice(&blob.values[..])?,
                 pair_offsets: DeviceBuffer::from_slice(&cache.pair_offsets)?,
                 pair_counts: DeviceBuffer::from_slice(&cache.pair_counts)?,
                 int_values: DeviceBuffer::from_slice(&cache.int_values)?,
