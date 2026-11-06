@@ -35,7 +35,7 @@ fn simulator_matches_cpu_index_on_built_keys() {
     }
 }
 
-/// kira_kv_engine 0.6.3 splits above ~32768 keys, so a real-sized index takes
+/// kira_kv_engine splits above ~32768 keys, so a real-sized index takes
 /// the partitioned path: part selector, per-part salt, bucket/slot offsets.
 #[test]
 fn simulator_matches_cpu_index_across_partitions() {

@@ -45,7 +45,7 @@ pub struct GpuAni {
 struct GpuMphState {
     prehash_seed: u64,
     mph_salt: u64,
-    /// Salt of the part selector (kira_kv_engine 0.6.3 partitioned MPH).
+    /// Salt of the part selector (partitioned MPH).
     part_salt: u64,
     num_buckets: u32,
     num_slots: u64,
@@ -55,13 +55,17 @@ struct GpuMphState {
     num_parts: u32,
     /// One u8 per bucket (flat layout).
     pilots: DeviceBuffer<u8>,
+    /// Tail redirection shared by all parts; `None` when the index has no tail.
+    remap: Option<DeviceBuffer<u32>>,
     /// Optional block-Bloom filter (8 × u64 per block).
     bloom_words: Option<DeviceBuffer<u64>>,
     bloom_blocks: u32,
-    /// Lane bit shift of the filter: 26 for filters built by 0.6.3, 27 for
+    /// Lane bit shift of the filter: 26 for filters built by 0.6.3 and later, 27 for
     /// ones loaded from a 0.6 file.
     bloom_bit_shift: u32,
-    /// Optional u16 per slot fingerprints. `None` when built with `lean_mph`.
+    /// Optional u16 per slot fingerprints. `None` when built with `lean_mph` or
+    /// with wider fingerprints; the host re-checks every hit against
+    /// `entry_keys` either way.
     fingerprints: Option<DeviceBuffer<u16>>,
 }
 
@@ -73,9 +77,11 @@ struct AniMphPart {
     slot_off: u64,
     salt: u64,
     bucket_off: u32,
+    num_keys: u32,
     num_slots: u32,
     num_buckets: u32,
     large_buckets: u32,
+    remap_off: u32,
 }
 
 // SAFETY: a plain `#[repr(C)]` integer struct with no padding, copied to the
@@ -185,9 +191,11 @@ impl GpuAni {
                         slot_off: p.slot_off,
                         salt: p.salt,
                         bucket_off: p.bucket_off,
+                        num_keys: p.num_keys,
                         num_slots: p.num_slots,
                         num_buckets: p.num_buckets,
                         large_buckets: p.large_buckets,
+                        remap_off: p.remap_off,
                     })
                     .collect();
                 Some(GpuMphState {
@@ -200,6 +208,11 @@ impl GpuAni {
                     num_parts: parts.len() as u32,
                     parts: DeviceBuffer::from_slice(&parts)?,
                     pilots: DeviceBuffer::from_slice(&exp.pilots)?,
+                    remap: if exp.remap.is_empty() {
+                        None
+                    } else {
+                        Some(DeviceBuffer::from_slice(&exp.remap)?)
+                    },
                     bloom_words: match &exp.bloom {
                         Some(b) => Some(DeviceBuffer::from_slice(&b.words)?),
                         None => None,
@@ -328,8 +341,8 @@ impl GpuAni {
                      building CPU index for fallback..."
                 );
                 let cpu_t = Instant::now();
-                let bytes = ani.index.serialize()?;
-                let idx = Index::deserialize(&bytes)?;
+                let bytes = ani.index.to_bytes()?;
+                let idx = Index::from_bytes(&bytes)?;
                 drop(bytes);
                 eprintln!(
                     "[gpu] init: CPU fallback index ready ({:.2}s)",
@@ -392,6 +405,11 @@ impl GpuAni {
         let blocks: u32 = ((n as u32) + threads_per_block - 1) / threads_per_block;
         let stream = &self.stream;
         let pilots_ptr = state.pilots.as_device_ptr();
+        let remap_ptr = state
+            .remap
+            .as_ref()
+            .map(|r| r.as_device_ptr().as_raw())
+            .unwrap_or(0);
         let bloom_ptr = state
             .bloom_words
             .as_ref()
@@ -416,6 +434,7 @@ impl GpuAni {
                 state.parts.as_device_ptr(),
                 state.num_parts,
                 pilots_ptr,
+                remap_ptr,
                 bloom_ptr,
                 state.bloom_blocks,
                 state.bloom_bit_shift,

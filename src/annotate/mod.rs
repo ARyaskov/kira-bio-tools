@@ -6,7 +6,7 @@ pub mod postproc;
 pub mod reader;
 pub mod structs;
 
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", test))]
 pub mod cuda;
 
 pub use builder_v2::*;

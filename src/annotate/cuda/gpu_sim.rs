@@ -4,12 +4,12 @@
 //! `GpuExport` POD snapshot. The CUDA and OpenCL kernels mirror this same
 //! arithmetic — any divergence is a kernel bug.
 //!
-//! kira_kv_engine 0.6.3 splits an index into parts of ~32 768 keys, so every
-//! real index is multi-part: the part is picked first, and its own salt and
+//! kira_kv_engine splits an index into parts of ~32 768 keys, so every real
+//! index is multi-part: the part is picked first, and its own salt and
 //! bucket/slot ranges drive the rest. A single-part export takes the same
-//! path with the identity offsets, which is the pre-0.6.3 formula.
-
-#![cfg(feature = "gpu")]
+//! path with the identity offsets, which is the pre-0.6.3 formula. Since 0.7
+//! the hash is minimal: a slot past a part's keys is redirected through the
+//! shared `remap` table.
 
 use kira_kv_engine::{BloomExport, GpuExport, GpuPart};
 
@@ -39,7 +39,7 @@ const BLOOM_BLOCK_WORDS: usize = 8;
 
 /// Per-block bit pattern derived from a hash (Impala/Pibiri split-block layout).
 /// Must match `block_bloom::block_and_mask` exactly. `bit_shift` is the
-/// export's own lane shift: 26 (6-bit index) for filters built by 0.6.3,
+/// export's own lane shift: 26 (6-bit index) for filters built by 0.6.3 and later,
 /// 27 (5-bit) for ones deserialized from a 0.6 file.
 #[inline]
 fn bloom_block_and_mask(
@@ -138,7 +138,8 @@ fn ptrhash_part_of(rotated: u64, part_salt: u64, parts: usize) -> usize {
 }
 
 /// Part geometry, falling back to the whole index when the export carries no
-/// part table (single-partition builds from kira_kv_engine 0.6).
+/// part table (single-partition builds from kira_kv_engine 0.6). Such an index
+/// has no tail, so every slot is a key slot and the remap table is unused.
 #[inline]
 fn part_geometry(export: &GpuExport, part: usize) -> GpuPart {
     match export.parts.get(part) {
@@ -147,9 +148,11 @@ fn part_geometry(export: &GpuExport, part: usize) -> GpuPart {
             slot_off: 0,
             salt: export.mph_salt,
             bucket_off: 0,
+            num_keys: export.num_slots as u32,
             num_slots: export.num_slots as u32,
             num_buckets: export.num_buckets,
             large_buckets: large_buckets_of(export.num_buckets as usize) as u32,
+            remap_off: 0,
         },
     }
 }
@@ -171,11 +174,32 @@ fn ptrhash_hash_key(export: &GpuExport, canonical: u64) -> (usize, u64, u64) {
     (part, h1, h1.rotate_left(23) ^ H2_XOR)
 }
 
-/// u16 fingerprint check (low 16 bits of canonical hash) — matches
-/// `index::fingerprint16_mph`.
+/// Membership fingerprint check, matching kira_kv_engine's `Fingerprints::matches`:
+/// the low 16/24/32 bits of the canonical hash. `None` when the index carries no
+/// fingerprints (lean builds).
 #[inline]
-const fn fingerprint16(canonical: u64) -> u16 {
-    (canonical & 0xFFFF) as u16
+fn fingerprint_matches(export: &GpuExport, slot: usize, canonical: u64) -> Option<bool> {
+    if let Some(fps) = &export.fingerprints {
+        return Some(fps.get(slot).copied() == Some(canonical as u16));
+    }
+    let bytes = export.fingerprint_bytes.as_ref()?;
+    let width = usize::from(export.fingerprint_bits / 8);
+    let Some(stored) = slot
+        .checked_mul(width)
+        .and_then(|start| bytes.get(start..start + width))
+    else {
+        return Some(false);
+    };
+    let got = stored
+        .iter()
+        .rev()
+        .fold(0u32, |acc, &b| (acc << 8) | u32::from(b));
+    let mask = if width >= 4 {
+        u32::MAX
+    } else {
+        (1u32 << (8 * width)) - 1
+    };
+    Some(got == canonical as u32 & mask)
 }
 
 // ---------- top-level kernel -----------------------------------------------
@@ -219,13 +243,16 @@ pub fn lookup_u64(export: &GpuExport, key: u64) -> GpuLookup {
     let small = (geom.num_buckets as usize).saturating_sub(large);
     let bucket = geom.bucket_off as usize + ptrhash_bucket_in_part(h1, large, small);
     let pilot = export.pilots[bucket];
-    let slot = geom.slot_off + ptrhash_slot_for(h2, pilot, geom.num_slots as usize) as u64;
+    let mut local = ptrhash_slot_for(h2, pilot, geom.num_slots as usize);
+    // Minimal MPH (kira_kv_engine >= 0.7): a slot past the part's keys is a
+    // tail slot, redirected to a free key slot through the shared remap table.
+    if local >= geom.num_keys as usize {
+        local = export.remap[geom.remap_off as usize + local - geom.num_keys as usize] as usize;
+    }
+    let slot = geom.slot_off + local as u64;
 
-    if let Some(fps) = &export.fingerprints {
-        let expected = fingerprint16(canonical);
-        if fps.get(slot as usize).copied() != Some(expected) {
-            return GpuLookup::FingerprintMiss;
-        }
+    if fingerprint_matches(export, slot as usize, canonical) == Some(false) {
+        return GpuLookup::FingerprintMiss;
     }
 
     GpuLookup::Found(slot as u32)

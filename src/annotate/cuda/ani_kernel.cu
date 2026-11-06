@@ -31,15 +31,19 @@
 //   - fingerprint: low 16 bits of canonical hash
 //   - bloom: 8-word split-block, ((h>>32) * blocks) >> 32 selects block, lane
 //     bit is `(seed * SALT[w]) >> bit_shift`, with bit_shift 26 for filters
-//     built by 0.6.3 and 27 for ones loaded from a 0.6 file
+//     built by 0.6.3 and later, 27 for ones loaded from a 0.6 file
 //
 // **Memory layout pushed to the device per index (allocated once at GpuAni::load):**
 //   - prehash_seed (u64), mph_salt (u64), part_salt (u64), num_buckets (u32),
 //     num_slots (u64), num_parts (u32), prerotate (u8), bloom_bit_shift (u32)
 //     — uploaded as scalars via cudaMemcpyToSymbol or kernel args.
-//   - parts: AniMphPart array of length `num_parts` (32 B each, so a few MB
+//   - parts: AniMphPart array of length `num_parts` (40 B each, so a few MB
 //     even for 100M keys).
 //   - pilots: u8 array of length `num_buckets`. ~30-50 MB for a 100M-key index.
+//   - remap: u32 tail-redirection table shared by all parts (kira_kv_engine
+//     >= 0.7 builds a minimal hash: a slot at or past a part's `num_keys` is
+//     replaced by `remap[part.remap_off + slot - part.num_keys]`). Null when
+//     the index has no tail.
 //   - bloom_words: optional u64 array of length `bloom_blocks * 8`, a multiple
 //     of 256 blocks, ~16-20 MB for 100M keys at 11 bits/key.
 //   - fingerprints: optional u16 array of length `num_slots`. ~200 MB for 100M.
@@ -74,9 +78,11 @@ typedef struct {
     unsigned long long slot_off;
     unsigned long long salt;
     unsigned int       bucket_off;
+    unsigned int       num_keys;
     unsigned int       num_slots;
     unsigned int       num_buckets;
     unsigned int       large_buckets;
+    unsigned int       remap_off;
 } AniMphPart;
 
 typedef struct {
@@ -220,10 +226,11 @@ __device__ __forceinline__ unsigned int ptrhash25_lookup(
     const AniMphPart       *parts,
     unsigned int            num_parts,
     const unsigned char    *pilots,
+    const unsigned int     *remap,         // null when the index has no tail
     const unsigned long long *bloom_words,
     unsigned int            bloom_blocks,
     unsigned int            bloom_bit_shift,
-    const unsigned short   *fingerprints   // null if lean_mph
+    const unsigned short   *fingerprints   // null if lean_mph or not fp16
 ) {
     unsigned long long canonical = canonical_u64(key, prehash_seed);
     if (!bloom_contains(bloom_words, bloom_blocks, bloom_bit_shift, canonical)) {
@@ -240,20 +247,28 @@ __device__ __forceinline__ unsigned int ptrhash25_lookup(
     unsigned int bucket_off = 0u;
     unsigned int part_buckets = num_buckets;
     unsigned long long part_slots = num_slots;
+    unsigned long long part_keys = num_slots;
+    unsigned int remap_off = 0u;
     unsigned int large = (unsigned int)((double)num_buckets * 0.30);
     if (parts != 0 && num_parts > 0u) {
         slot_off = parts[part].slot_off;
         bucket_off = parts[part].bucket_off;
         part_buckets = parts[part].num_buckets;
         part_slots = (unsigned long long)parts[part].num_slots;
+        part_keys = (unsigned long long)parts[part].num_keys;
         large = parts[part].large_buckets;
+        remap_off = parts[part].remap_off;
     }
     unsigned int small = part_buckets > large ? part_buckets - large : 0u;
 
     unsigned long long bucket = (unsigned long long)bucket_off
                               + ptrhash_bucket_in_part(h1, large, small);
     unsigned char pilot = pilots[(unsigned int)bucket];
-    unsigned long long slot = slot_off + ptrhash_slot_for(h2, pilot, part_slots);
+    unsigned long long local = ptrhash_slot_for(h2, pilot, part_slots);
+    if (local >= part_keys && remap != 0) {
+        local = (unsigned long long)remap[remap_off + (unsigned int)(local - part_keys)];
+    }
+    unsigned long long slot = slot_off + local;
 
     if (fingerprints != 0) {
         if (fingerprints[(unsigned int)slot] != fingerprint16(canonical)) {
@@ -275,6 +290,7 @@ extern "C" __global__ void ani_ptrhash25_lookup_kernel(
     const AniMphPart         *__restrict__ parts,        // null when not exported
     unsigned int             num_parts,
     const unsigned char      *__restrict__ pilots,
+    const unsigned int       *__restrict__ remap,        // null when no tail
     const unsigned long long *__restrict__ bloom_words,  // null when filter absent
     unsigned int             bloom_blocks,
     unsigned int             bloom_bit_shift,
@@ -286,7 +302,7 @@ extern "C" __global__ void ani_ptrhash25_lookup_kernel(
     if (tid >= nkeys) return;
     out_idx[tid] = ptrhash25_lookup(
         keys[tid], prehash_seed, mph_salt, part_salt, num_buckets, num_slots,
-        prerotate, parts, num_parts, pilots, bloom_words, bloom_blocks,
+        prerotate, parts, num_parts, pilots, remap, bloom_words, bloom_blocks,
         bloom_bit_shift, fingerprints);
 }
 
