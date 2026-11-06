@@ -46,7 +46,7 @@ fn scalar_values_render_like_kputd() {
 #[test]
 fn vectors_keep_missing_entries() {
     assert_eq!(canonical_floats("1e-1,.,2e-2"), "0.1,.,0.02");
-    assert!(matches!(canonical_floats("0.1,.,0.02"), Cow::Borrowed(_)));
+    std::assert_matches!(canonical_floats("0.1,.,0.02"), Cow::Borrowed(_));
     assert_eq!(canonical_floats("0.1,0.20"), "0.1,0.2");
 }
 

@@ -14,6 +14,7 @@ use crate::cli::args::MpileupArgs;
 use crate::fx::FxHashMap;
 use crate::regions::RegionSet;
 use anyhow::{Context, Result, bail};
+use core::fmt::NumBuffer;
 use noodles_sam::alignment::record::cigar::op::Kind;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -1623,8 +1624,7 @@ fn compute_chunks(
 /// FORMAT keys in output order for the requested annotations.
 #[inline]
 fn push_u32(out: &mut Vec<u8>, v: u32) {
-    let mut b = itoa::Buffer::new();
-    out.extend_from_slice(b.format(v).as_bytes());
+    out.extend_from_slice(v.format_into(&mut NumBuffer::new()).as_bytes());
 }
 
 fn push_u32_list(out: &mut Vec<u8>, v: &[u32]) {
@@ -1663,7 +1663,7 @@ fn push_gt(out: &mut Vec<u8>, alleles_kept: &[u32], gt: Option<(u32, u32)>) {
 }
 
 fn push_pl(out: &mut Vec<u8>, pl: &[i32]) {
-    let mut b = itoa::Buffer::new();
+    let mut b = NumBuffer::new();
     for (i, &v) in pl.iter().enumerate() {
         if i > 0 {
             out.push(b',');
@@ -1671,7 +1671,7 @@ fn push_pl(out: &mut Vec<u8>, pl: &[i32]) {
         if v == PL_MISSING {
             out.push(b'.');
         } else {
-            out.extend_from_slice(b.format(v).as_bytes());
+            out.extend_from_slice(v.format_into(&mut b).as_bytes());
         }
     }
 }

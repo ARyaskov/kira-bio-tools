@@ -314,7 +314,7 @@ pub fn apply_to_header(headers: Vec<String>, opts: &HeaderOptions<'_>) -> Vec<St
 }
 
 fn rewrite_contig_id(rest: &str, rmap: &FxHashMap<String, String>) -> String {
-    if let Some(body) = rest.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+    if let Some(body) = rest.strip_circumfix('<', '>') {
         let mut parts: Vec<String> = Vec::new();
         for kv in split_top_commas(body) {
             if let Some(rest) = kv.strip_prefix("ID=")

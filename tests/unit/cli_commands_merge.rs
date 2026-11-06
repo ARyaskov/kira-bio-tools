@@ -3,10 +3,10 @@ use super::*;
 #[test]
 fn info_rules_defaults_and_parse() {
     let m = parse_info_rules(None).unwrap();
-    assert!(matches!(m["DP"], InfoRule::Sum));
-    assert!(matches!(m["DP4"], InfoRule::Sum));
+    std::assert_matches!(m["DP"], InfoRule::Sum);
+    std::assert_matches!(m["DP4"], InfoRule::Sum);
     let m = parse_info_rules(Some("AN:sum,AC:sum,AF:join")).unwrap();
-    assert!(matches!(m["AF"], InfoRule::Join));
+    std::assert_matches!(m["AF"], InfoRule::Join);
     assert!(parse_info_rules(Some("-")).unwrap().is_empty());
     assert!(parse_info_rules(Some("DP:bogus")).is_err());
 }

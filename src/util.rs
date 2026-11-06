@@ -1,3 +1,4 @@
+use core::fmt::NumBuffer;
 use memmap2::MmapMut;
 use std::fs::OpenOptions;
 use std::path::Path;
@@ -175,8 +176,8 @@ pub fn push_g(out: &mut String, v: f64) {
     let idx = LIMIT.iter().position(|&l| d < l).unwrap_or(9);
     let k = 9 - idx;
     let i = (d * SCALE[idx]).round_ties_even() as u64;
-    let mut buf = itoa::Buffer::new();
-    let digits = buf.format(i);
+    let mut buf = NumBuffer::new();
+    let digits = i.format_into(&mut buf);
     if k == 0 {
         out.push_str(digits);
         return;
@@ -222,8 +223,7 @@ fn push_percent_g(out: &mut String, d: f64) {
         if e < 10 {
             out.push('0');
         }
-        let mut b = itoa::Buffer::new();
-        out.push_str(b.format(e));
+        out.push_str(e.format_into(&mut NumBuffer::new()));
     }
 }
 

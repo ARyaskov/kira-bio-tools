@@ -1032,7 +1032,6 @@ dependencies = [
  "fxhash",
  "indexmap",
  "indicatif",
- "itoa",
  "kira-bam",
  "kira-ls-aligner",
  "kira_kv_engine 0.6.3",

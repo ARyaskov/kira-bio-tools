@@ -26,10 +26,10 @@ fn membership_and_ranges_match_a_set_oracle() {
         c.insert(p);
     }
     assert_eq!(c.len(), oracle.len());
-    assert!(matches!(
+    std::assert_matches!(
         c.chunks.get(&((1_000_000u32 >> 16) as u16)),
         Some(Container::Bitset(_))
-    ));
+    );
     for _ in 0..20_000 {
         let p = lcg(&mut seed) % 5_100_000;
         assert_eq!(c.contains(p), oracle.contains(&p), "contains {p}");
