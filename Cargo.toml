@@ -43,7 +43,7 @@ url = "2.5.7"
 form_urlencoded = "1.2.2"
 
 kira-bam = "0.4.0"
-kira-ls-aligner = "0.6.0"
+kira-ls-aligner = "0.6.1"
 
 [dev-dependencies]
 # Only to prove crate::fx computes the same hashes that key existing .ani files.
