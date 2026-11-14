@@ -541,7 +541,9 @@ Commands: `query`, `cnv`.
   CN0..CN3 states (16 paired states with `-c`), per-genotype Gaussian BAF
   mixtures, LRR smoothing, `-O` aberrant-cell-fraction estimation and the
   `dat.*.tab`/`cn.*.tab`/`summary*.tab` outputs (plus the plotting
-  scripts). Matches bcftools 1.19 byte for byte on `tests/cnv`.  
+  scripts). Tested against bcftools 1.23 with defined smoothing windows.
+  Short segments use only observed values; temporary smoothing storage is
+  bounded by the segment length even for oversized windows.
   Args: `[-- ]<bcftools cnv options> FILE.vcf`: `-s/--query-sample`,
   `-c/--control-sample`, `-f/--AF-file`, `-o/--output-dir`,
   `-p/--plot-threshold`, `-a/--aberrant`, `-b/--BAF-weight`, `-d/--BAF-dev`,

@@ -69,13 +69,44 @@ fn moving_average_smoothing() {
     let mut d = vec![0.0f32, 0.0, 3.0, 0.0, 0.0];
     smooth_data(&mut d, 3);
     assert_eq!(d, vec![0.0, 1.0, 1.0, 1.0, 0.0]);
-    // Short arrays: the window is primed past the end with zeros.
     let mut short = vec![1.0f32, 1.0, 1.0, 1.0];
     smooth_data(&mut short, 10);
-    assert_eq!(short, vec![0.8, 0.8, 0.8, 0.8]);
+    assert_eq!(short, vec![1.0, 1.0, 1.0, 1.0]);
     let mut e = vec![1.0f32, 2.0, 3.0];
     smooth_data(&mut e, 1);
     assert_eq!(e, vec![1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn smoothing_uses_only_observed_values_at_every_boundary() {
+    for length in 1usize..=12 {
+        let original: Vec<f32> = (0..length)
+            .map(|i| ((i * 7 % 11) as f32 - 5.0) / 4.0)
+            .collect();
+        for window in 1usize..=27 {
+            let mut actual = original.clone();
+            smooth_data(&mut actual, window as i64);
+            for (index, &value) in actual.iter().enumerate() {
+                let begin = index.saturating_sub(window / 2);
+                let end = (index + window - window / 2).min(length);
+                let expected = original[begin..end].iter().sum::<f32>() / (end - begin) as f32;
+                assert_eq!(value, expected, "n={length} window={window} index={index}");
+            }
+        }
+    }
+}
+
+#[test]
+fn oversized_smoothing_windows_are_bounded_by_the_input() {
+    for mut input in [vec![], vec![3.0], vec![1.0, 2.0, 3.0, 4.0]] {
+        let expected = if input.is_empty() {
+            0.0
+        } else {
+            input.iter().sum::<f32>() / input.len() as f32
+        };
+        smooth_data(&mut input, i64::MAX);
+        assert!(input.iter().all(|&value| value == expected));
+    }
 }
 
 #[test]

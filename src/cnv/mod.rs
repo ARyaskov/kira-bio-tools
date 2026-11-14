@@ -348,20 +348,19 @@ fn set_gauss_params(s: &mut Sample) {
     }
 }
 
-/// `smooth_data`: moving average of window `win` in single precision. The
-/// C code primes the window with `win - win/2` values whatever the array
-/// length, reading past short arrays; those reads count as zeros here.
 fn smooth_data(dat: &mut [f32], win: i64) {
-    if win <= 1 {
+    if win <= 1 || dat.is_empty() {
         return;
     }
-    let win = win as usize;
+    let win = usize::try_from(win)
+        .unwrap_or(usize::MAX)
+        .min(dat.len().saturating_mul(2));
     let (k1, k2) = (win / 2, win - win / 2);
     let ndat = dat.len();
-    let mut buf: std::collections::VecDeque<f32> = std::collections::VecDeque::with_capacity(win);
+    let mut buf: std::collections::VecDeque<f32> =
+        std::collections::VecDeque::with_capacity(win.min(ndat));
     let mut sum: f32 = 0.0;
-    for i in 0..k2 {
-        let v = dat.get(i).copied().unwrap_or(0.0);
+    for &v in &dat[..k2] {
         sum += v;
         buf.push_back(v);
     }

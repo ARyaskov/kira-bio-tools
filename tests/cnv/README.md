@@ -2,6 +2,13 @@
 
 This suite validates kira-bt cnv behavior and regression stability.
 
+Short comparison fixtures use an explicit safe LRR window. The optimization
+fixture has 32 heterozygous sites per chromosome, enough for the internal
+50-site probability window. Default-window behavior on short segments is
+covered separately in `cnv_regressions.rs` and the live bcftools test, using
+the equivalent bounded reference window where bcftools 1.23 would read
+past its input array.
+
 ## Test Layout
 
 In each testN directory:
@@ -14,47 +21,47 @@ In each testN directory:
 ## Test Case Matrix
 
 test1
-- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -s Q -c C -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf 
+- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -L 3 -s Q -c C -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf
 - Checks: scenario-specific behavior and stable output for this command.
 
 test2
-- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -s Q -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf 
+- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -L 3 -s Q -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf
 - Checks: scenario-specific behavior and stable output for this command.
 
 test3
-- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -s Q -c C -r 1 -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf 
+- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -L 3 -s Q -c C -r 1 -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf
 - Checks: scenario-specific behavior and stable output for this command.
 
 test4
-- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -s Q -c C -r 2:100-300 -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf 
+- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -L 3 -s Q -c C -r 2:100-300 -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf
 - Checks: scenario-specific behavior and stable output for this command.
 
 test5
-- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -s Q -c C -R regions.bed -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf 
+- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -L 3 -s Q -c C -R regions.bed -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf
 - Checks: scenario-specific behavior and stable output for this command.
 
 test6
-- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -s Q -c C -t 2:100-400 -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf 
+- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -L 3 -s Q -c C -t 2:100-400 -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf
 - Checks: scenario-specific behavior and stable output for this command.
 
 test7
-- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -s Q -c C -T targets.bed -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf 
+- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -L 3 -s Q -c C -T targets.bed -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf
 - Checks: scenario-specific behavior and stable output for this command.
 
 test8
-- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -s Q -c C --regions-overlap 0 -R regions.bed -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf 
+- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -L 3 -s Q -c C --regions-overlap 0 -R regions.bed -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf
 - Checks: scenario-specific behavior and stable output for this command.
 
 test9
-- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -s Q -c C --regions-overlap 2 -R regions.bed -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf 
+- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -L 3 -s Q -c C --regions-overlap 2 -R regions.bed -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf
 - Checks: scenario-specific behavior and stable output for this command.
 
 test10
-- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -s Q -c C -f af.tab.gz -o out in.noaf.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf 
+- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -L 3 -s Q -c C -f af.tab.gz -o out in.noaf.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf
 - Checks: scenario-specific behavior and stable output for this command.
 
 test11
-- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -s Q -c C -a 0.7,0.8 -P 0.7 -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf 
+- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -L 3 -s Q -c C -a 0.7,0.8 -P 0.7 -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf
 - Checks: scenario-specific behavior and stable output for this command.
 
 test12
@@ -62,7 +69,7 @@ test12
 - Checks: scenario-specific behavior and stable output for this command.
 
 test13
-- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -s Q -c C -O 0.8 -o out in.vcf.gz; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf 
+- Command: set -euo pipefail; rm -rf out; kira-bt cnv -- -s Q -c C -O 0.8 -o out optimization.vcf; for f in summary.tab summary.Q.tab summary.C.tab cn.Q.tab cn.C.tab dat.Q.tab dat.C.tab; do if [ -f "out/$f" ]; then echo "###$f"; grep -v "^#" "out/$f"; fi; done > out.kira.vcf
 - Checks: scenario-specific behavior and stable output for this command.
 
 ## Pass Criteria

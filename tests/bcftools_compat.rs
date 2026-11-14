@@ -506,3 +506,83 @@ fn indel_flags_and_extents_survive_cross_tool_indexed_queries() {
         assert_eq!(data(&queried.stdout), expected[1..], "{kind}");
     }
 }
+
+#[test]
+#[ignore = "requires bcftools"]
+fn cnv_smoothing_matches_defined_bcftools_windows() {
+    let work = tempfile::tempdir().unwrap();
+    let summarize = |directory: &Path| {
+        [
+            "summary.tab",
+            "summary.Q.tab",
+            "summary.C.tab",
+            "cn.Q.tab",
+            "cn.C.tab",
+            "dat.Q.tab",
+            "dat.C.tab",
+        ]
+        .into_iter()
+        .map(|name| {
+            let bytes = std::fs::read(directory.join(name)).unwrap();
+            data(&bytes)
+        })
+        .collect::<Vec<_>>()
+    };
+    for count in [1usize, 2, 3, 4, 5, 12, 32] {
+        let input = work.path().join(format!("n{count}.vcf"));
+        let mut text = "##fileformat=VCFv4.2\n##contig=<ID=1,length=10000>\n##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n##FORMAT=<ID=BAF,Number=1,Type=Float,Description=\"B allele frequency\">\n##FORMAT=<ID=LRR,Number=1,Type=Float,Description=\"Log R ratio\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tQ\tC\n".to_string();
+        for index in 0..count {
+            let baf = ["0.4", "0.5", "0.6"][index % 3];
+            let lrr = ["-0.1", "0.3", "0.1"][index % 3];
+            text.push_str(&format!(
+                "1\t{}\t.\tA\tG\t.\tPASS\t.\tGT:BAF:LRR\t0/1:{baf}:{lrr}\t0/1:0.5:0\n",
+                100 + index * 10
+            ));
+        }
+        std::fs::write(&input, text).unwrap();
+        for window in [3usize, 10] {
+            let reference_window = window.min(count * 2).to_string();
+            let window_text = window.to_string();
+            let expected = work.path().join(format!("reference-{count}-{window}"));
+            let actual = work.path().join(format!("kira-{count}-{window}"));
+            run(
+                &tool("bcftools"),
+                &[
+                    "cnv",
+                    "-s",
+                    "Q",
+                    "-c",
+                    "C",
+                    "-L",
+                    &reference_window,
+                    "-l",
+                    "0.8",
+                    "-o",
+                    expected.to_str().unwrap(),
+                    input.to_str().unwrap(),
+                ],
+            );
+            let mut args = vec![
+                "cnv",
+                "-s",
+                "Q",
+                "-c",
+                "C",
+                "-l",
+                "0.8",
+                "-o",
+                actual.to_str().unwrap(),
+                input.to_str().unwrap(),
+            ];
+            if window != 10 {
+                args.extend(["-L", window_text.as_str()]);
+            }
+            run(&kira(), &args);
+            assert_eq!(
+                summarize(&actual),
+                summarize(&expected),
+                "sites={count}, window={window}, reference_window={reference_window}"
+            );
+        }
+    }
+}
