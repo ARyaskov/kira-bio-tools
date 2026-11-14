@@ -634,6 +634,18 @@ Commands: `query`, `cnv`.
 cargo test
 ```
 
+Oracle integration tests require bcftools and samtools. Set `BCFTOOLS` and
+`SAMTOOLS` to their executable paths when they are not on PATH, then run:
+
+```bash
+cargo test --test bcftools_compat -- --ignored
+```
+
+`tests/compare_bcftools.py` runs the existing shell fixtures against both
+executables in isolated copies. Use `--help` for tool paths, the scratch
+directory and case selection. It removes only version, command and date
+metadata from comparisons; differences and failed commands remain failures.
+
 Rust unit tests live beside the code (included from `tests/unit/`), with
 end-to-end pipeline tests in `tests/*.rs`. `tests/unit/props.rs` holds
 proptest property tests for the parsers and formatters that face untrusted
