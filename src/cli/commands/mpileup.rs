@@ -16,7 +16,6 @@ use crate::regions::RegionSet;
 use anyhow::{Context, Result, bail};
 use core::fmt::NumBuffer;
 use noodles_sam::alignment::record::cigar::op::Kind;
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -254,8 +253,6 @@ pub fn cmd_mpileup(args: MpileupArgs) -> Result<()> {
         return finish_output(out, &args);
     }
     if args.bcftools_layout() && (args.regions.is_some() || args.regions_file.is_some()) {
-        // bcftools walks `-r` regions one at a time, each with its own
-        // pileup, so overlapping regions repeat their records.
         let targets = collect_targets(&args)?;
         let mut header_written = false;
         for (c, b, e) in ordered_regions(&args)? {
@@ -562,33 +559,16 @@ fn engine_opts(args: &MpileupArgs, min_mq: u8, min_bq: u8, skip_indels: bool) ->
     o
 }
 
-/// `-r/-R` regions in bcftools' iteration order: contigs by first
-/// appearance, regions by start within a contig, overlaps kept.
 fn ordered_regions(args: &MpileupArgs) -> Result<Vec<(String, u32, u32)>> {
-    let mut regs: Vec<(String, u32, u32)> = Vec::new();
-    if let Some(s) = &args.regions {
-        for tok in s.split(',') {
-            let t = tok.trim();
-            if t.is_empty() {
-                continue;
-            }
-            regs.push(crate::regions::parse_region_spec(t)?);
-        }
-    }
-    if let Some(f) = &args.regions_file {
-        regs.extend(crate::cli::commands::tabix::read_region_file(f)?);
-    }
-    let mut order = HashMap::new();
-    for (c, _, _) in &regs {
-        let next = order.len();
-        order.entry(c.as_str()).or_insert(next);
-    }
-    let ranks: HashMap<String, usize> = order
-        .into_iter()
-        .map(|(name, rank)| (name.to_string(), rank))
-        .collect();
-    regs.sort_by_key(|(c, _, _)| ranks[c]);
-    Ok(regs)
+    let Some(regions) =
+        RegionSet::from_args(args.regions.as_deref(), args.regions_file.as_deref())?
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(regions
+        .iter()
+        .map(|(contig, begin, end)| (contig.to_string(), begin, end))
+        .collect())
 }
 
 /// bcftools' `mplp_realn` (1.19, `MPLP_REALN_PARTIAL`): at a site where some
