@@ -1,4 +1,4 @@
-use crate::bam::bcf_layout::{self, IndelSpec, LayoutCtx};
+use crate::bam::bcf_layout::{self, LayoutCtx};
 use crate::bam::errmod::{Drand48, pack_base};
 use crate::bam::pileup::{EngineOpts, IndelEvent, SiteHook, strand_bias_phred};
 use crate::bam::pos_filter::InterestingMap;
@@ -582,8 +582,20 @@ fn bcftools_realn_hook<'a>(
     kept: Vec<bool>,
     max_read_len: usize,
     redo: bool,
+    regions: Option<&'a RegionSet>,
+    targets: Option<&'a RegionSet>,
 ) -> Box<SiteHook<'a>> {
-    Box::new(move |live: &mut [LiveRead], _ref_id: usize, pos: u32| {
+    Box::new(move |live: &mut [LiveRead], ref_id: usize, pos: u32| {
+        let Some(chromosome) = ref_names.get(ref_id) else {
+            return;
+        };
+        if [regions, targets]
+            .iter()
+            .flatten()
+            .any(|filter| !filter.contains(chromosome, pos + 1))
+        {
+            return;
+        }
         let (mut nt, mut has_indel, mut has_clip) = (0i64, 0i64, 0i64);
         let (mut min_indel, mut max_indel) = (i64::MAX, i64::MIN);
         for lr in live.iter_mut() {
@@ -861,6 +873,7 @@ fn run_streaming<W: Write>(
         em: &em,
         seed: args.seed,
         rng: std::sync::Mutex::new(Drand48::new(args.seed as u32)),
+        snp_bias: std::sync::Mutex::new((Some(0.0), Some(0.0))),
         caller: &caller,
         annotate,
         fmt_keys: format_keys(annotate).join(":"),
@@ -895,6 +908,8 @@ fn run_streaming<W: Write>(
                 sample_keep.clone(),
                 args.max_read_len,
                 args.redo_baq,
+                ctx.regions,
+                ctx.targets,
             )),
             _ => None,
         };
@@ -1113,6 +1128,7 @@ fn run_prepared<W: Write>(
         em: &em,
         seed: args.seed,
         rng: std::sync::Mutex::new(Drand48::new(args.seed as u32)),
+        snp_bias: std::sync::Mutex::new((Some(0.0), Some(0.0))),
         caller: &caller,
         annotate,
         fmt_keys: format_keys(annotate).join(":"),
@@ -1165,6 +1181,8 @@ fn run_prepared<W: Write>(
                 sample_keep.clone(),
                 args.max_read_len,
                 args.redo_baq,
+                ctx.regions,
+                ctx.targets,
             )),
             _ => None,
         };
@@ -1395,6 +1413,7 @@ struct EmitCtx<'a> {
     /// the kira layout seeds one per site (see [`Drand48::for_site`]).
     seed: u64,
     rng: std::sync::Mutex<Drand48>,
+    snp_bias: std::sync::Mutex<(Option<f64>, Option<f64>)>,
     /// Multiallelic caller (bcftools `call -m`) applied to every site.
     caller: &'a Caller,
     annotate: &'a AnnotateSpec,
@@ -2234,8 +2253,6 @@ fn emit_site(site: &PileupSite, overlapping_reads: &[LiveRead], ctx: &EmitCtx, o
     }
 }
 
-/// bcftools layout: one SNP record per covered site (reference `N` when the
-/// base is unknown), then kira's indel candidates as biallelic INDEL records.
 fn emit_site_bcftools(
     site: &PileupSite,
     reads: &[LiveRead],
@@ -2253,19 +2270,54 @@ fn emit_site_bcftools(
         .and_then(|fa| fa.base(chr, pos1 as u32))
         .unwrap_or(b'N');
     let lctx = ctx.layout();
-    bcf_layout::render_snp(site, reads, &kept, ref_base, chr, pos1, &lctx, out);
+    if let Some(value) =
+        bcf_layout::render_snp_with_bias(site, reads, &kept, ref_base, (chr, pos1), &lctx, out)
+    {
+        *ctx.snp_bias.lock().unwrap() = value;
+    }
+    let inherited = *ctx.snp_bias.lock().unwrap();
     if ctx.skip_indels || matches!(ref_base, b'N' | b'n') {
         return;
     }
-    let agg = site.aggregated();
-    let total: u32 = agg.base_counts.iter().sum();
-    if total == 0 {
+    let count = reads
+        .iter()
+        .filter(|read| kept.contains(&read.sample_idx))
+        .count();
+    if count >= ctx.args.max_idepth.unwrap_or(250) as usize * kept.len() {
         return;
     }
-    let mean_mq = (agg.mq_sum as f64) / (total as f64);
-    emit_indels(
-        site, &agg, chr, pos1, ref_base, total, mean_mq, ctx, out, reads,
-    );
+    let Some(reference) = ctx.fasta.and_then(|fasta| fasta.contig(chr)) else {
+        return;
+    };
+    let options = crate::bam::indel::IndelOptions {
+        min_support: ctx.min_ireads as usize,
+        min_fraction: ctx.gap_frac,
+        per_sample: ctx.args.per_sample_mf,
+        window: ctx.args.indel_size.max(20) as usize,
+        open_quality: ctx.args.open_prob_dup.unwrap_or(40) as i32,
+        extension_quality: ctx.args.ext_prob as i32,
+        tandem_quality: ctx.args.tandem_qual as i32,
+        bias: ctx.args.indel_bias.map_or(1.0, |value| 1.0 / value),
+        minimum_quality: ctx.engine.min_bq as i32,
+        ambiguous: match ctx.args.ambig_reads.as_deref() {
+            Some("incAD") => 1,
+            Some("incAD0") => 2,
+            _ => 0,
+        },
+    };
+    if let Some(prepared) =
+        crate::bam::indel::prepare(reads, &kept, pos1 as usize - 1, reference, &options)
+    {
+        bcf_layout::render_indel_model(
+            reads,
+            &kept,
+            (chr, pos1, reference),
+            &prepared,
+            &lctx,
+            inherited,
+            out,
+        );
+    }
 }
 
 /// Realignment flank (bp each side of the anchor).
@@ -2407,32 +2459,6 @@ fn emit_indels(
         }
         let ref_str = (ref_base as char).to_string();
         let alt_str = format!("{}{}", ref_base as char, seq);
-        if args.bcftools_layout() {
-            let iq = if ctx.hp_indel {
-                hp_indel_qual(ctx, chr, pos1, &ref_str, &alt_str)
-            } else {
-                30
-            };
-            let spec = IndelSpec {
-                ref_str: &ref_str,
-                alt_str: &alt_str,
-                is_ins: true,
-                ins_seq: seq.as_bytes(),
-                del_len: 0,
-                indel_qual: iq,
-            };
-            bcf_layout::render_indel(
-                site,
-                overlapping_reads,
-                &ctx.kept_samples(site.per_sample.len()),
-                chr,
-                pos1,
-                &spec,
-                &ctx.layout(),
-                out,
-            );
-            continue;
-        }
         emit_one_indel(
             site, agg, chr, pos1, &ref_str, &alt_str, *c, *f, total, mean_mq, ctx, out, annotate,
         );
@@ -2470,32 +2496,6 @@ fn emit_indels(
             ref_str.push(b as char);
         }
         let alt_str = (ref_base as char).to_string();
-        if args.bcftools_layout() {
-            let iq = if ctx.hp_indel {
-                hp_indel_qual(ctx, chr, pos1, &ref_str, &alt_str)
-            } else {
-                30
-            };
-            let spec = IndelSpec {
-                ref_str: &ref_str,
-                alt_str: &alt_str,
-                is_ins: false,
-                ins_seq: &[],
-                del_len: *l,
-                indel_qual: iq,
-            };
-            bcf_layout::render_indel(
-                site,
-                overlapping_reads,
-                &ctx.kept_samples(site.per_sample.len()),
-                chr,
-                pos1,
-                &spec,
-                &ctx.layout(),
-                out,
-            );
-            continue;
-        }
         emit_one_indel(
             site, agg, chr, pos1, &ref_str, &alt_str, *c, *f, total, mean_mq, ctx, out, annotate,
         );

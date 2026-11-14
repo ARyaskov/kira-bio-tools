@@ -453,14 +453,13 @@ Commands: `query`, `cnv`.
   only flag exclusion, orphan pairs dropped unless `-A`, `-d` per-file depth
   cap, `--max-read-len` for BAQ), lazy BAQ applied per site only where a
   pileup read carries an indel (bcftools 1.19's partial realignment), stored
-  `BQ` tags honoured unless `-E`, and `-r` regions walked one at a time in
-  the order given. Sample selection follows bcftools in both layouts:
+  `BQ` tags honoured unless `-E`, and overlapping `-r` intervals merged before querying. Sample selection follows bcftools in both layouts:
   `-s ^A,B` excludes, `-S FILE` rows may rename (`OLD NEW`), `-G FILE` lists
   read groups (`ID [FILE] [SAMPLE]`, `^FILE` to exclude) and `--ignore-RG`
-  names one sample per file. The indel records keep kira's candidate model
-  behind bcftools' layout. `-g` retains per-sample PL and DP in reference
+  names one sample per file. Indels use local haplotype likelihoods with repeat penalties,
+  multiallelic records and `--ambig-reads drop|incAD|incAD0` depth handling. `-g` retains per-sample PL and DP in reference
   blocks. `--native-layout` selects Kira genotypes; `-v` and `--assemble`
-  also select that mode. Some BAQ and indel likelihoods still differ from bcftools.
+  also select that mode. The local mpileup fixture suite is checked against bcftools 1.23.
 
 - `call`  
   SNP/indel calling from genotype likelihoods.  

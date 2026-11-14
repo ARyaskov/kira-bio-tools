@@ -58,6 +58,13 @@ struct SampleCall {
 
 /// The bias-test histograms of `bcf_callaux_t`, pooled over samples.
 struct Bias {
+    inherited: Option<(Option<f64>, Option<f64>)>,
+    raw_ref_pos: [i32; NPOS],
+    raw_alt_pos: [i32; NPOS],
+    raw_ref_mq: [i32; NQUAL],
+    raw_alt_mq: [i32; NQUAL],
+    raw_ref_scl: [i32; NPOS],
+    raw_alt_scl: [i32; NPOS],
     ref_nm: [i32; N_NM],
     alt_nm: [i32; N_NM],
     /// Mismatch observations and their sum for ref/alt reads (INFO/NM).
@@ -79,6 +86,13 @@ struct Bias {
 impl Bias {
     fn new(want_nm: bool) -> Self {
         Self {
+            inherited: None,
+            raw_ref_pos: [0; NPOS],
+            raw_alt_pos: [0; NPOS],
+            raw_ref_mq: [0; NQUAL],
+            raw_alt_mq: [0; NQUAL],
+            raw_ref_scl: [0; NPOS],
+            raw_alt_scl: [0; NPOS],
             ref_nm: [0; N_NM],
             alt_nm: [0; N_NM],
             nnm: [0; 2],
@@ -828,19 +842,42 @@ fn write_record(
             sep(&mut info);
             info.push_str(&format!("NM={}", nm.join(",")));
         }
+        let (ref_pos, alt_pos, ref_mq, alt_mq, ref_scl, alt_scl) = if bias.inherited.is_some() {
+            (
+                &bias.raw_ref_pos,
+                &bias.raw_alt_pos,
+                &bias.raw_ref_mq,
+                &bias.raw_alt_mq,
+                &bias.raw_ref_scl,
+                &bias.raw_alt_scl,
+            )
+        } else {
+            (
+                &bias.ref_pos,
+                &bias.alt_pos,
+                &bias.ref_mq,
+                &bias.alt_mq,
+                &bias.ref_scl,
+                &bias.alt_scl,
+            )
+        };
         let z_tags: [(bool, &str, &[i32], &[i32]); 6] = [
-            (tags.info_rpbz, "RPBZ", &bias.ref_pos, &bias.alt_pos),
-            (tags.info_mqbz, "MQBZ", &bias.ref_mq, &bias.alt_mq),
+            (tags.info_rpbz, "RPBZ", ref_pos, alt_pos),
+            (tags.info_mqbz, "MQBZ", &ref_mq[1..], &alt_mq[1..]),
             (tags.info_mqsbz, "MQSBZ", &bias.fwd_mqs, &bias.rev_mqs),
             (tags.info_bqbz, "BQBZ", &bias.ref_bq, &bias.alt_bq),
             (tags.info_nmbz, "NMBZ", &bias.ref_nm, &bias.alt_nm),
-            (tags.info_scbz, "SCBZ", &bias.ref_scl, &bias.alt_scl),
+            (tags.info_scbz, "SCBZ", ref_scl, alt_scl),
         ];
         for (on, name, a, b) in z_tags {
             if !on {
                 continue;
             }
-            if let Some(z) = mwu_z(a, b) {
+            let value = match (name, bias.inherited) {
+                ("BQBZ", Some((value, _))) | ("MQSBZ", Some((_, value))) => value,
+                _ => mwu_z(a, b),
+            };
+            if let Some(z) = value {
                 sep(&mut info);
                 info.push_str(&format!("{name}={}", fmt_f32(z)));
             }
@@ -984,6 +1021,19 @@ pub fn render_snp(
     ctx: &LayoutCtx,
     out: &mut Vec<u8>,
 ) {
+    let _ = render_snp_with_bias(site, reads, kept, ref_char, (chr, pos1), ctx, out);
+}
+
+pub(crate) fn render_snp_with_bias(
+    site: &PileupSite,
+    reads: &[LiveRead],
+    kept: &[usize],
+    ref_char: u8,
+    location: (&str, u64),
+    ctx: &LayoutCtx,
+    out: &mut Vec<u8>,
+) -> Option<(Option<f64>, Option<f64>)> {
+    let (chr, pos1) = location;
     let ref4 = ref4_of(ref_char);
     let want_nm = ctx.tags.info_nm || ctx.tags.info_nmbz || ctx.tags.fmt_nmbz;
     let mut bias = Bias::new(want_nm);
@@ -1021,6 +1071,148 @@ pub fn render_snp(
         .collect();
     write_record(
         out, chr, pos1, &ref_str, &alts, &calls, &comb, &bias, ctx, None,
+    );
+    comb.has_alt.then(|| {
+        (
+            mwu_z(&bias.ref_bq, &bias.alt_bq),
+            mwu_z(&bias.fwd_mqs, &bias.rev_mqs),
+        )
+    })
+}
+
+pub fn render_indel_model(
+    reads: &[LiveRead],
+    kept: &[usize],
+    location: (&str, u64, &[u8]),
+    prepared: &super::indel::IndelCalls,
+    ctx: &LayoutCtx,
+    inherited: (Option<f64>, Option<f64>),
+    out: &mut Vec<u8>,
+) {
+    let mut bias = Bias::new(ctx.tags.info_nm || ctx.tags.info_nmbz || ctx.tags.fmt_nmbz);
+    bias.inherited = Some(inherited);
+    let mut calls = Vec::new();
+    let mut bases = Vec::new();
+    for &sample in kept {
+        let observations: Vec<_> = prepared
+            .observations
+            .iter()
+            .filter(|o| reads[o.read].sample_idx == sample)
+            .collect();
+        let mut call = new_call();
+        call.ori_depth = observations.len() as i32;
+        call.scr = softclip_reads(reads, sample);
+        let mut missed = [[0i32; 4]; 2];
+        bases.clear();
+        for observation in observations.iter() {
+            let read = &reads[observation.read];
+            let qi = observation.query;
+            let (pos, sc) = super::indel::bias_position(read, qi, observation.gap);
+            let mq = (read.mapq as usize).min(59);
+            if observation.gap != 0 {
+                bias.raw_alt_pos[pos.min(NPOS - 1)] += 1;
+                bias.raw_alt_mq[mq] += 1;
+                bias.raw_alt_scl[sc] += 1;
+            } else {
+                bias.raw_ref_pos[pos.min(NPOS - 1)] += 1;
+                bias.raw_ref_mq[mq] += 1;
+                bias.raw_ref_scl[sc] += 1;
+            }
+            let mut allele = observation.allele;
+            let (mut q, mut cap) = (observation.quality, observation.quality);
+            if observation.gap == 0
+                && (q < observations.len() as i32 / 2 || observations.len() > 20)
+            {
+                allele = 0;
+                q = read.qual()[qi] as i32;
+                cap = (3 * cap + 2 * q) / 8;
+            }
+            if observations.len() > 20 {
+                cap = cap.min(40);
+            }
+            if q < prepared.minimum_quality {
+                if observation.gap == 0 && allele < 4 {
+                    missed[usize::from(read.is_reverse())][allele] += 1;
+                }
+                continue;
+            }
+            let q = q.min(cap) as i64;
+            add_observation(
+                &mut call,
+                &mut bias,
+                &mut bases,
+                read,
+                qi,
+                allele,
+                q,
+                allele != 0,
+            );
+            let index = 4 + if allele != 0 { 2 } else { 0 };
+            let baseq = observation.sequence_quality as i64;
+            call.anno[index] += (baseq - q) as f64;
+            call.anno[index + 1] += (baseq * baseq - q * q) as f64;
+        }
+        for (strand, missing) in missed.iter().enumerate() {
+            let counts = if strand == 0 {
+                &mut call.adf
+            } else {
+                &mut call.adr
+            };
+            let missing: i32 = missing.iter().sum();
+            if prepared.ambiguous == 2 {
+                counts[0] += missing;
+            } else if prepared.ambiguous == 1 {
+                let total: i32 = counts[..4].iter().sum();
+                if total > 0 {
+                    for count in &mut counts[..4] {
+                        *count += ((missing as f32 * *count as f32) / total as f32).round() as i32;
+                    }
+                }
+            }
+        }
+        call.p = ctx
+            .em
+            .cal(&mut bases, MAX_ALLELES, &mut ctx.rng.lock().unwrap());
+        calls.push(call);
+    }
+    let comb = combine(&calls, None);
+    if comb.n_alleles < 2 {
+        return;
+    }
+    let (chromosome, position, reference) = location;
+    let anchor = position as usize - 1;
+    let end = (anchor + 1 + prepared.extent).min(reference.len());
+    let reference_allele = String::from_utf8_lossy(&reference[anchor..end]).into_owned();
+    let alternatives: Vec<_> = (1..comb.n_alleles)
+        .map(|i| {
+            let allele = comb.a[i] as usize;
+            let length = prepared.types[allele];
+            let mut result = vec![reference[anchor]];
+            if length > 0 {
+                result.extend(
+                    prepared.insertions[allele]
+                        .iter()
+                        .map(|&base| b"ACGTN"[base as usize]),
+                );
+            }
+            let after = anchor + 1 + (-length).max(0) as usize;
+            if after < end {
+                result.extend_from_slice(&reference[after..end]);
+            }
+            String::from_utf8(result).unwrap()
+        })
+        .collect();
+    write_record(
+        out,
+        chromosome,
+        position,
+        &reference_allele,
+        &alternatives,
+        &calls,
+        &comb,
+        &bias,
+        ctx,
+        Some((prepared.max_support, prepared.max_fraction)),
     );
 }
 

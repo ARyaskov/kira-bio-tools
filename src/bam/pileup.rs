@@ -168,6 +168,7 @@ pub struct LiveRead {
     /// Stored `BQ` tag (BAQ offsets from `samtools calmd`), applied instead
     /// of recomputing BAQ unless `-E`.
     pub bq_tag: Option<Box<[u8]>>,
+    pub baq_delta: Option<Box<[u8]>>,
     cur_op: u32,
     cur_r: u32,
     cur_q: u32,
@@ -251,6 +252,7 @@ impl LiveRead {
             overlap_processed: false,
             nm: -1,
             bq_tag: None,
+            baq_delta: None,
             cur_op: 0,
             cur_r: ref_start,
             cur_q: 0,

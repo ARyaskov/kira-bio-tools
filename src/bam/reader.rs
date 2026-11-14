@@ -142,11 +142,13 @@ pub fn apply_hmm_baq_to_reads_masked(
 /// `redo` (`-E`). The reference window reaches a read length past both ends
 /// of the alignment, as `sam_prob_realn` may look that far.
 pub fn baq_read(lr: &mut LiveRead, ref_names: &[String], fasta: &impl FastaLike, redo: bool) {
+    let original_quality = lr.qual().to_vec();
     if let Some(tag) = lr.bq_tag.take()
         && !redo
     {
         let (_, qual) = lr.seq_qual_mut();
         if crate::bam::baq::apply_bq_tag(qual, &tag) {
+            save_baq_delta(lr, &original_quality);
             return;
         }
     }
@@ -180,6 +182,7 @@ pub fn baq_read(lr: &mut LiveRead, ref_names: &[String], fasta: &impl FastaLike,
         let (_, qual) = lr.seq_qual_mut();
         if q.len() == qual.len() {
             qual.copy_from_slice(&q);
+            save_baq_delta(lr, &original_quality);
             BAQ_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return;
         }
@@ -198,7 +201,22 @@ pub fn baq_read(lr: &mut LiveRead, ref_names: &[String], fasta: &impl FastaLike,
             }
             c.insert(key, qual.to_vec().into_boxed_slice());
         });
+        save_baq_delta(lr, &original_quality);
     }
+}
+
+fn save_baq_delta(read: &mut LiveRead, original: &[u8]) {
+    if original == read.qual() {
+        read.baq_delta = None;
+        return;
+    }
+    read.baq_delta = Some(
+        original
+            .iter()
+            .zip(read.qual())
+            .map(|(&before, &after)| before.saturating_sub(after))
+            .collect(),
+    );
 }
 
 const BAQ_CACHE_CAP: usize = 4096;

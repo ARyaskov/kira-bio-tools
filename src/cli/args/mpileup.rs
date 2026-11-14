@@ -49,7 +49,7 @@ pub struct MpileupArgs {
     #[arg(short = 'Q', long = "min-BQ")]
     pub min_bq: Option<u32>,
 
-    #[arg(short = 'm', long = "min-ireads", default_value_t = 1)]
+    #[arg(short = 'm', long = "min-ireads", default_value_t = 2)]
     pub min_ireads: u32,
 
     #[arg(short = 'I', long = "skip-indels")]
@@ -79,8 +79,7 @@ pub struct MpileupArgs {
     /// quality sum with the unseen `<*>`, PL and AD (no GT), I16/QS/MQ0F and
     /// the bias statistics in INFO, bcftools' tag order and `-a` defaults, and
     /// its read/base filters (`--delta-BQ 30`, `--max-BQ 60`, orphan pairs
-    /// skipped unless `-A`). The indel model stays kira's; only the layout is
-    /// bcftools'.
+    /// skipped unless `-A`).
     #[arg(
         long = "bcftools-layout",
         default_value_t = true,
@@ -147,7 +146,7 @@ pub struct MpileupArgs {
     #[arg(short = 'X', long = "config")]
     pub config: Option<String>,
 
-    #[arg(short = 'F', long = "gap-frac", default_value_t = 0.002)]
+    #[arg(short = 'F', long = "gap-frac", default_value_t = 0.05)]
     pub gap_frac: f64,
 
     #[arg(short = 'h', long = "tandem-qual", default_value_t = 500)]

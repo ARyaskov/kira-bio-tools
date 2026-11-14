@@ -11,6 +11,7 @@ pub mod baq;
 pub mod bcf_layout;
 pub mod errmod;
 pub mod fastmath;
+pub mod indel;
 pub mod mpileup_opts;
 pub mod pos_filter;
 pub mod samples;
