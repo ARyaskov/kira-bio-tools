@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn stage_round_preserves_first_variant_type_in_input_order() {
+    let mut contigs = ContigDict::new();
+    let parse =
+        |text: &str, contigs: &mut ContigDict| parse_record(text.to_string(), contigs).unwrap();
+    let bufs = vec![
+        vec![
+            parse("1\t10\tdeletion\tGTTT\tG\t.\t.\t.", &mut contigs),
+            parse("1\t10\tsnp\tG\tT\t.\t.\t.", &mut contigs),
+        ],
+        vec![
+            parse("1\t10\tsnp\tG\tA\t.\t.\t.", &mut contigs),
+            parse("1\t10\tdeletion\tGTTT\tG\t.\t.\t.", &mut contigs),
+        ],
+    ];
+    assert_eq!(
+        stage_round(&bufs, &[vec![false; 2], vec![false; 2]], MergeMode::Both),
+        vec![Some(0), Some(1)]
+    );
+}
+
+#[test]
 fn info_rules_defaults_and_parse() {
     let m = parse_info_rules(None).unwrap();
     std::assert_matches!(m["DP"], InfoRule::Sum);

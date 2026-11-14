@@ -1,5 +1,5 @@
 //! `bcftools merge` port: records at a position are grouped by the `-m`
-//! rules (SNVs first, then indels), INFO follows the bcftools ordering
+//! rules, INFO follows the bcftools ordering
 //! (plain tags, rule tags, A/R/G tags, AN/AC) and AN/AC are recomputed from
 //! the merged genotypes.
 
@@ -87,7 +87,29 @@ pub fn cmd_merge(args: MergeArgs) -> Result<()> {
             all_samples.push(name);
         }
         for h in &headers {
-            if h.starts_with("##") && seen_meta.insert(h.clone()) {
+            let identity = if h.starts_with("##fileformat=") {
+                if let Some(previous) = all_meta_lines
+                    .iter_mut()
+                    .find(|line| line.starts_with("##fileformat="))
+                {
+                    let version = |line: &str| {
+                        line.trim_start_matches("##fileformat=VCFv")
+                            .split('.')
+                            .map(|part| part.parse::<u32>().unwrap_or(0))
+                            .collect::<Vec<_>>()
+                    };
+                    if version(h) > version(previous) {
+                        *previous = h.clone();
+                    }
+                }
+                "##fileformat".to_string()
+            } else if let Some((kind, definition)) = h.split_once("=<ID=") {
+                let id = definition.split([',', '>']).next().unwrap_or("");
+                format!("{kind}=<ID={id}")
+            } else {
+                h.clone()
+            };
+            if h.starts_with("##") && seen_meta.insert(identity) {
                 all_meta_lines.push(h.clone());
             }
             if let Some((id, len)) = crate::vcf::header::parse_contig_line(h) {
@@ -398,6 +420,22 @@ fn allele_mask(refa: &str, alt: &str) -> u32 {
 }
 
 /// Type mask of a record (`ref_mask` when it has no variant alleles).
+fn symbolic_end(rec: &Record) -> Option<u32> {
+    rec.alt
+        .split(',')
+        .any(|alt| alt.starts_with('<') && !matches!(alt, "<*>" | "<NON_REF>"))
+        .then(|| {
+            rec.info
+                .split(';')
+                .find_map(|field| {
+                    field
+                        .strip_prefix("END=")
+                        .and_then(|value| value.parse().ok())
+                })
+                .unwrap_or(rec.pos)
+        })
+}
+
 fn record_mask(r: &Record, mode: MergeMode) -> u32 {
     let mut m = 0;
     if r.alt != "." && !r.alt.is_empty() {
@@ -476,7 +514,7 @@ fn types_compatible(
         x >>= 1;
         y >>= 1;
     }
-    if x != 0 || y != 0 {
+    if mode != MergeMode::None_ && (x != 0 || y != 0) {
         return false;
     }
     if !refs_compatible(sel_ref, &rec.refa) {
@@ -539,6 +577,7 @@ fn stage_round(bufs: &[Vec<Record>], done: &[Vec<bool>], mode: MergeMode) -> Vec
 
     // Candidate records compatible with the growing selection.
     let mut sel_types = 0u32;
+    let mut sel_end = None;
     let mut sel_ref = String::new();
     let mut sel_alts: Vec<String> = Vec::new();
     let mut cand: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -553,17 +592,15 @@ fn stage_round(bufs: &[Vec<Record>], done: &[Vec<bool>], mode: MergeMode) -> Vec
                     continue;
                 }
             } else if sel_types != 0
-                && !types_compatible(mode, sel_types, &sel_ref, &sel_alts, rec, types[i][j])
+                && (!types_compatible(mode, sel_types, &sel_ref, &sel_alts, rec, types[i][j])
+                    || sel_end
+                        .zip(symbolic_end(rec))
+                        .is_some_and(|(selected, candidate)| selected != candidate))
             {
-                continue;
-            } else if (mode.merges_snps() || mode == MergeMode::None_)
-                && var_all & M_SNP != 0
-                && types[i][j] & (M_SNP | M_REF) == 0
-            {
-                // SNVs go first when present.
                 continue;
             }
             sel_types |= types[i][j];
+            sel_end = sel_end.or_else(|| symbolic_end(rec));
             // Extend the selected allele set (padding to the longest REF).
             let up = rec.refa.to_uppercase();
             if up.len() > sel_ref.len() {
@@ -875,33 +912,6 @@ struct MergeCtx<'a> {
     do_gvcf: bool,
 }
 
-/// htslib drops the phase of a missing allele (`0|.` is written `0/.`).
-fn normalize_gt(gt: &str) -> String {
-    if !gt.contains('|') {
-        return gt.to_string();
-    }
-    let mut out = String::with_capacity(gt.len());
-    let mut cur = String::new();
-    let mut seps: Vec<char> = Vec::new();
-    let mut alleles: Vec<String> = Vec::new();
-    for c in gt.chars() {
-        if c == '|' || c == '/' {
-            seps.push(c);
-            alleles.push(std::mem::take(&mut cur));
-        } else {
-            cur.push(c);
-        }
-    }
-    alleles.push(cur);
-    for (i, a) in alleles.iter().enumerate() {
-        if i > 0 {
-            out.push(if a == "." { '/' } else { seps[i - 1] });
-        }
-        out.push_str(a);
-    }
-    out
-}
-
 fn fmt_float_list(v: &str) -> String {
     crate::vcf::canonical_floats(v).into_owned()
 }
@@ -1035,7 +1045,7 @@ fn merge_group(
                         .and_then(|i| local_vals.get(i).copied())
                         .unwrap_or(if *k == "GT" { "./." } else { "." });
                     if *k == "GT" {
-                        normalize_gt(v)
+                        v.to_string()
                     } else if float_keys[ki] {
                         fmt_float_list(v)
                     } else {
