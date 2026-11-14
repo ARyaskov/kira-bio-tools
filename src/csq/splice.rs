@@ -678,6 +678,7 @@ fn splice_csq_mnp(
         return Ok(SPLICE_VAR_REF);
     }
     let strand = ctx.gff.tscripts[sp.tr].strand;
+    let mut result = SPLICE_INSIDE;
     sp.ref_beg = (sp.vcf.pos + sp.tbeg) as u32;
     sp.ref_end = (sp.vcf.pos + sp.vcf.rlen - sp.tend - 1) as u32;
     if sp.ref_beg < ex_beg {
@@ -699,6 +700,7 @@ fn splice_csq_mnp(
         if sp.ref_end >= ex_beg {
             sp.tbeg = sp.ref_beg.wrapping_sub(sp.vcf.pos as u32) as i32;
             sp.ref_beg = ex_beg;
+            result = SPLICE_OVERLAP;
         }
     }
     if ex_end < sp.ref_end {
@@ -722,6 +724,7 @@ fn splice_csq_mnp(
                 .wrapping_sub(sp.ref_end.wrapping_sub(sp.vcf.pos as u32).wrapping_add(1))
                 as i32;
             sp.ref_end = ex_end;
+            result = SPLICE_OVERLAP;
         }
     }
     if sp.ref_end < ex_beg || sp.ref_beg > ex_end {
@@ -754,11 +757,12 @@ fn splice_csq_mnp(
     }
     if sp.set_refalt {
         sp.vcf.rlen -= sp.tbeg + sp.tend;
+        sp.vcf.alen -= sp.tbeg + sp.tend;
         sp.kref = sub(&sp.vcf.ref_, sp.tbeg as i64, sp.vcf.rlen as i64);
-        sp.kalt = sub(&sp.vcf.alt, sp.tbeg as i64, sp.vcf.rlen as i64);
+        sp.kalt = sub(&sp.vcf.alt, sp.tbeg as i64, sp.vcf.alen as i64);
     }
     ctx.csq_stage_splice(rec, sp.tr, sp.csq, sp.vcf.ial)?;
-    Ok(SPLICE_INSIDE)
+    Ok(result)
 }
 
 /// `splice_csq`: trim shared bases from both ends of REF/ALT and classify
@@ -795,6 +799,16 @@ pub(crate) fn splice_csq(
     }
     sp.tbeg = i;
     if sp.vcf.rlen == sp.vcf.alen {
+        return splice_csq_mnp(ctx, sp, rec, ex_beg, ex_end);
+    }
+    let rtrim = sp.vcf.rlen - sp.tbeg - sp.tend;
+    let atrim = sp.vcf.alen - sp.tbeg - sp.tend;
+    if !sp.vcf.alt.starts_with(b"<") && rtrim > 1 && atrim > 1 {
+        sp.csq |= if sp.vcf.rlen > sp.vcf.alen {
+            CSQ_TRUNCATION
+        } else {
+            CSQ_ELONGATION
+        };
         return splice_csq_mnp(ctx, sp, rec, ex_beg, ex_end);
     }
     if sp.vcf.rlen < sp.vcf.alen {

@@ -45,7 +45,8 @@ pub const CSQ_UPSTREAM_STOP: u32 = 1 << 19;
 pub const CSQ_INCOMPLETE_CDS: u32 = 1 << 20;
 pub const CSQ_CODING_SEQUENCE: u32 = 1 << 21;
 pub const CSQ_ELONGATION: u32 = 1 << 22;
-pub const CSQ_START_RETAINED: u32 = 1 << 23;
+pub const CSQ_TRUNCATION: u32 = 1 << 23;
+pub const CSQ_START_RETAINED: u32 = 1 << 24;
 
 /// Consequences printed on one record only; the others reference it.
 pub const CSQ_COMPOUND: u32 = CSQ_SYNONYMOUS_VARIANT
@@ -60,7 +61,9 @@ pub const CSQ_COMPOUND: u32 = CSQ_SYNONYMOUS_VARIANT
     | CSQ_INFRAME_ALTERING
     | CSQ_INCOMPLETE_CDS
     | CSQ_UPSTREAM_STOP
-    | CSQ_START_RETAINED;
+    | CSQ_START_RETAINED
+    | CSQ_ELONGATION
+    | CSQ_TRUNCATION;
 pub const CSQ_START_STOP: u32 =
     CSQ_STOP_LOST | CSQ_STOP_GAINED | CSQ_STOP_RETAINED | CSQ_START_LOST | CSQ_START_RETAINED;
 pub(crate) const CSQ_PRN_TSCRIPT: u32 = !(CSQ_INTRON | CSQ_NON_CODING);
@@ -68,10 +71,16 @@ pub(crate) const CSQ_PRN_NMD: u32 = !(CSQ_INTRON | CSQ_NON_CODING);
 
 #[inline]
 pub(crate) fn csq_prn_strand(c: u32) -> bool {
-    c & CSQ_COMPOUND != 0 && c & (CSQ_SPLICE_ACCEPTOR | CSQ_SPLICE_DONOR | CSQ_SPLICE_REGION) == 0
+    c & CSQ_COMPOUND != 0
+        && c & (CSQ_SPLICE_ACCEPTOR
+            | CSQ_SPLICE_DONOR
+            | CSQ_SPLICE_REGION
+            | CSQ_ELONGATION
+            | CSQ_TRUNCATION)
+            == 0
 }
 
-const CSQ_STRINGS: [Option<&str>; 24] = [
+const CSQ_STRINGS: [Option<&str>; 25] = [
     None,
     Some("synonymous"),
     Some("missense"),
@@ -95,6 +104,7 @@ const CSQ_STRINGS: [Option<&str>; 24] = [
     None,
     Some("coding_sequence"),
     Some("feature_elongation"),
+    Some("feature_truncation"),
     Some("start_retained"),
 ];
 
@@ -328,6 +338,12 @@ impl VcfBuf {
     /// `csq_push`: merge the consequence into the record's list following the
     /// bcftools de-duplication rules. Returns `false` when it already existed.
     pub fn csq_push(&mut self, gff: &Gff, csq: &mut Csq, rec: RecId, chrom: &str) -> Result<bool> {
+        if csq.ty.ty & CSQ_ELONGATION != 0 {
+            csq.ty.ty &= !CSQ_INFRAME_INSERTION;
+        }
+        if csq.ty.ty & CSQ_TRUNCATION != 0 {
+            csq.ty.ty &= !CSQ_INFRAME_DELETION;
+        }
         let Some(&id) = self.pos2vbuf.get(&csq.pos) else {
             bail!(
                 "This should not happen. {}:{}  {}",
@@ -391,6 +407,9 @@ impl VcfBuf {
                             v.ty |= csq.ty.ty;
                             if v.ty & CSQ_STOP_RETAINED != 0 {
                                 v.ty &= !(CSQ_STOP_LOST | CSQ_SYNONYMOUS_VARIANT);
+                            }
+                            if v.ty & CSQ_START_RETAINED != 0 {
+                                v.ty &= !(CSQ_START_LOST | CSQ_SYNONYMOUS_VARIANT);
                             }
                             if v.vstr.is_none() {
                                 v.vstr = csq.ty.vstr.clone();

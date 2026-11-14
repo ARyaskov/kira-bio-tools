@@ -1191,6 +1191,7 @@ impl Caller {
                     continue;
                 }
                 sp.vcf.alt = rec.alleles[ial].as_bytes().to_vec();
+                sp.vcf.ial = ial as i32;
                 sp.csq = 0;
                 let sret = splice_csq(&mut ctx, &mut sp, &[], rec, beg, end)?;
                 if sret != SPLICE_INSIDE && sret != SPLICE_OVERLAP {
@@ -1241,6 +1242,7 @@ impl Caller {
                     continue;
                 }
                 sp.vcf.alt = rec.alleles[ial].as_bytes().to_vec();
+                sp.vcf.ial = ial as i32;
                 sp.csq = 0;
                 splice_csq(&mut ctx, &mut sp, &[], rec, ex_beg, ex_end)?;
                 if sp.csq != 0 {
