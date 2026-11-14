@@ -1157,7 +1157,10 @@ fn print_stats(
         )?;
     }
 
-    writeln!(out, "# TSTV, transitions/transversions:")?;
+    writeln!(
+        out,
+        "# TSTV, transitions/transversions\n#   - transitions, see https://en.wikipedia.org/wiki/Transition_(genetics)\n#   - transversions, see https://en.wikipedia.org/wiki/Transversion"
+    )?;
     writeln!(
         out,
         "# TSTV\t[2]id\t[3]ts\t[4]tv\t[5]ts/tv\t[6]ts (1st ALT)\t[7]tv (1st ALT)\t[8]ts/tv (1st ALT)"
@@ -1177,6 +1180,10 @@ fn print_stats(
     }
 
     writeln!(out, "# SiS, Singleton stats:")?;
+    writeln!(
+        out,
+        "#   - allele count, i.e. the number of singleton genotypes (AC=1)\n#   - number of transitions, see above\n#   - number of transversions, see above\n#   - repeat-consistent, inconsistent and n/a: experimental and useless stats [DEPRECATED]"
+    )?;
     writeln!(
         out,
         "# SiS\t[2]id\t[3]allele count\t[4]number of SNPs\t[5]number of transitions\t[6]number of transversions\t[7]number of indels\t[8]repeat-consistent\t[9]repeat-inconsistent\t[10]not applicable"
@@ -1288,6 +1295,10 @@ fn print_stats(
         print_concordance(&mut out, cs, ci, &sets[2].sample_names)?;
     }
 
+    writeln!(
+        out,
+        "# DP, depth:\n#   - set id, see above\n#   - the depth bin, corresponds to the depth (unless --depth was given)\n#   - number of genotypes with this depth (zero unless -s/-S was given)\n#   - fraction of genotypes with this depth (zero unless -s/-S was given)\n#   - number of sites with this depth\n#   - fraction of sites with this depth"
+    )?;
     writeln!(out, "# DP, Depth distribution")?;
     writeln!(
         out,

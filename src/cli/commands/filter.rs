@@ -187,7 +187,7 @@ pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
                 && last.rec.chrom != out_rec.chrom
             {
                 let flush_start = Instant::now();
-                flush_buffer(&mut buffer, &mut writer, filter_name.is_some())?;
+                flush_buffer(&mut buffer, &mut writer, args.soft_filter.is_some())?;
                 stats.flush_time += flush_start.elapsed();
             }
             buffer.push_back(BufferedRecord {
@@ -202,7 +202,7 @@ pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
                 &mut buffer,
                 snp_gap.as_ref(),
                 args.indel_gap,
-                filter_name.is_some(),
+                args.soft_filter.is_some(),
                 false,
                 &mut writer,
             )?;
@@ -220,13 +220,13 @@ pub fn cmd_filter(args: &FilterArgs) -> Result<()> {
             &mut buffer,
             snp_gap.as_ref(),
             args.indel_gap,
-            filter_name.is_some(),
+            args.soft_filter.is_some(),
             true,
             &mut writer,
         )?;
         stats.gap_time += gap_start.elapsed();
         let flush_start = Instant::now();
-        flush_buffer(&mut buffer, &mut writer, filter_name.is_some())?;
+        flush_buffer(&mut buffer, &mut writer, args.soft_filter.is_some())?;
         stats.flush_time += flush_start.elapsed();
     }
 
@@ -362,6 +362,9 @@ fn prepare_filter_header(
     let Some(name) = args.soft_filter.clone() else {
         return Ok(None);
     };
+    if expr.is_none() && args.mask.is_none() && args.mask_file.is_none() {
+        return Ok(None);
+    }
 
     let mut filter_name = name;
     if filter_name == "+" {

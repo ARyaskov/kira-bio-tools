@@ -120,8 +120,21 @@ impl VcfSink {
         if self.is_bcf() {
             return Ok(());
         }
+        let pass = headers
+            .iter()
+            .find(|h| h.starts_with("##FILTER=<ID=PASS,"))
+            .map(String::as_str)
+            .unwrap_or("##FILTER=<ID=PASS,Description=\"All filters passed\">");
+        let mut emitted_pass = false;
         for h in headers {
+            if h.starts_with("##FILTER=<ID=PASS,") {
+                continue;
+            }
             self.write_line(h)?;
+            if h.starts_with("##fileformat=") && !emitted_pass {
+                self.write_line(pass)?;
+                emitted_pass = true;
+            }
         }
         Ok(())
     }

@@ -412,7 +412,7 @@ fn parse_query_args(args: &[String]) -> Result<QueryConfig> {
             "-D" | "--allow-undef-tags" => cfg.allow_undef_tags = true,
             "--print-header" => cfg.print_header = true,
             "-l" | "--list-samples" => cfg.list_samples = true,
-            "-H" => cfg.header_mode = cfg.header_mode.max(1),
+            "-H" => cfg.header_mode = (cfg.header_mode + 1).min(2),
             "-HH" => cfg.header_mode = 2,
             a if !a.starts_with('-') => cfg.input = std::path::PathBuf::from(a),
             _ => {}
@@ -563,7 +563,11 @@ impl QueryFormatContext {
             match p {
                 QPart::Text(t) => out.push_str(t),
                 QPart::Token(tok) => {
-                    out.push_str(&format!("[{}]{}", *idx, token_label(tok)));
+                    if per_sample {
+                        out.push_str(&token_label(tok));
+                    } else {
+                        out.push_str(&format!("[{}]{}", *idx, token_label(tok)));
+                    }
                     *idx += 1;
                 }
                 QPart::Loop(inner) => {
@@ -585,7 +589,7 @@ impl QueryFormatContext {
             match p {
                 QPart::Text(t) => out.push_str(t),
                 QPart::Token(tok) => {
-                    out.push_str(&format!("[{}]{}:{}", *idx, sample, token_label(tok)));
+                    out.push_str(&format!("{}:{}", sample, token_label(tok)));
                     *idx += 1;
                 }
                 QPart::Loop(inner) => self.render_header_loop(inner, sample, idx, out),
@@ -1139,3 +1143,7 @@ fn known_vkx_for_rs(rs: u32) -> Option<&'static str> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/query.rs"]
+mod tests;
