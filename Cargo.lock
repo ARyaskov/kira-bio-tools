@@ -1011,9 +1011,9 @@ dependencies = [
 
 [[package]]
 name = "kira-ls-aligner"
-version = "0.8.1"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02f6719bc5ba0ef07ba1c3e9135e93ba0c014785f53fd3a9b55128f20b854a5a"
+checksum = "f7d45db96437477b916a01d1a9b8d1b976f9fff3b6b5fa0d1586cb910620bfda"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -1046,14 +1046,15 @@ checksum = "02a7de5f0cf02d66f73b1b1289df74ad96b465546fe5a184d78e57fa6df608d3"
 
 [[package]]
 name = "kira_kv_engine"
-version = "0.8.1"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "365c2f8bd1964a26c6e5a00b8c255c975b89c1eea5d9e0c8fcbb99247cdc6a42"
+checksum = "8967f972170cf7df12743652f7da3dff2caed25e77cb4050f0686a60ead575cd"
 dependencies = [
  "core_affinity",
  "hashbrown 0.16.1",
  "memmap2",
  "rayon",
+ "tempfile",
  "thiserror",
  "wyhash",
 ]
