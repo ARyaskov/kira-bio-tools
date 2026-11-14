@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FieldScope {
@@ -34,7 +35,7 @@ enum Literal {
     Int(i64),
     Float(f64),
     Str(String),
-    StrList(HashSet<String>),
+    StrList(Arc<HashSet<String>>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -173,7 +174,7 @@ struct SampleValues {
 enum EvalValue {
     Scalar(ValueVec),
     Samples(SampleValues),
-    StrList(HashSet<String>),
+    StrList(Arc<HashSet<String>>),
 }
 
 #[derive(Clone)]
@@ -817,7 +818,7 @@ impl<'a> Parser<'a> {
         Ok(ident)
     }
 
-    fn parse_file_list(&mut self) -> Result<HashSet<String>> {
+    fn parse_file_list(&mut self) -> Result<Arc<HashSet<String>>> {
         self.pos += 1;
         let start = self.pos;
         while let Some(ch) = self.peek_char() {
@@ -835,7 +836,7 @@ impl<'a> Parser<'a> {
                 set.insert(v.to_string());
             }
         }
-        Ok(set)
+        Ok(Arc::new(set))
     }
 
     fn skip_ws(&mut self) {
@@ -2104,9 +2105,7 @@ fn compare_filter(op: BinaryOp, filter: &ValueVec, other: EvalValue) -> EvalResu
             }
         }
         EvalValue::StrList(list) => {
-            for v in list {
-                query.push(v);
-            }
+            query.extend(list.iter().cloned());
         }
         _ => {}
     }
@@ -2178,7 +2177,7 @@ fn filter_in(query: Vec<String>, filter: Vec<String>, want_in: bool) -> bool {
 fn compare_gt(op: BinaryOp, gt: &SampleValues, other: EvalValue) -> EvalResult {
     let query = match other {
         EvalValue::Scalar(v) => extract_gt_query(&v.values),
-        EvalValue::StrList(list) => list.into_iter().collect::<Vec<_>>(),
+        EvalValue::StrList(list) => list.iter().cloned().collect::<Vec<_>>(),
         _ => Vec::new(),
     };
     let mut pass_samples = vec![false; gt.values.len()];
