@@ -3,6 +3,42 @@ use super::*;
 const REF: &[u8] = b"TTGACCGTAGACGTACGTACGTACGTACGTACGGATCCATTG";
 
 #[test]
+fn deletion_qualities_match_htslib() {
+    let mut fixture = include_str!("../fixtures/baq-deletions.tsv").lines();
+    let reference = fixture.next().unwrap().as_bytes();
+    let mut differences = Vec::new();
+    for case in fixture {
+        let fields: Vec<_> = case.split('\t').collect();
+        let query = fields[1].as_bytes();
+        let parse_quality = |text: &str| {
+            text.split(',')
+                .map(|q| q.parse::<u8>().unwrap())
+                .collect::<Vec<_>>()
+        };
+        let mut actual = parse_quality(fields[2]);
+        let expected = parse_quality(fields[5]);
+        let flank = fields[3].parse::<u32>().unwrap();
+        let deletion = fields[4].parse::<u32>().unwrap();
+        assert!(apply_baq_hmm(
+            query,
+            &mut actual,
+            &[
+                (Kind::Match, flank),
+                (Kind::Deletion, deletion),
+                (Kind::Match, flank)
+            ],
+            reference,
+            0,
+            30
+        ));
+        if actual != expected {
+            differences.push((fields[0], actual, expected));
+        }
+    }
+    assert!(differences.is_empty(), "{differences:?}");
+}
+
+#[test]
 fn perfect_match_keeps_most_of_the_quality() {
     let read = &REF[10..30];
     let mut qual = vec![40u8; read.len()];

@@ -65,9 +65,8 @@ pub fn apply_baq_hmm(
     }
     xe += l_qseq as i64 - ye + bw / 2;
     if xe - xb - l_qseq as i64 > bw {
-        let adj = (xe - xb - l_qseq as i64 - bw) / 2;
-        xb += adj;
-        xe -= adj;
+        xb += (xe - xb - l_qseq as i64 - bw) / 2;
+        xe -= (xe - xb - l_qseq as i64 - bw) / 2;
     }
     // Reference codes for [xb, xe), truncated where the window ends.
     let ws = win_start as i64;
