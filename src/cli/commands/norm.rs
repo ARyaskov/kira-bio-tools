@@ -1152,9 +1152,18 @@ fn left_align_symbolic(
     {
         return None;
     }
-    // Without INFO/END the span is the anchor base alone (rlen 1), as in htslib.
     let has_end = info_get_u32(&cols[7], "END").is_some();
-    let end = info_get_u32(&cols[7], "END").unwrap_or(orig_pos);
+    let svlen = cols[7]
+        .split(';')
+        .find_map(|field| {
+            field
+                .strip_prefix("SVLEN=")
+                .and_then(|value| value.split(',').next()?.parse::<i64>().ok())
+        })
+        .and_then(|len| u32::try_from(len.unsigned_abs()).ok());
+    let end = info_get_u32(&cols[7], "END")
+        .or_else(|| svlen.and_then(|len| orig_pos.checked_add(len)))
+        .unwrap_or(orig_pos);
     if end < orig_pos || end - orig_pos > MAX_SV_SPAN {
         return None;
     }

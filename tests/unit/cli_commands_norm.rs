@@ -1,5 +1,21 @@
 use super::*;
 
+#[test]
+fn symbolic_deletion_uses_svlen_when_end_is_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ref.fa");
+    std::fs::write(&path, ">1\nACGTACGTCCCGTACGTACCCCCGT\n").unwrap();
+    let fasta = load_fasta(&path).unwrap();
+    let cols: Vec<String> = "1\t10\t.\tC\t<DEL>\t.\t.\tSVLEN=-10"
+        .split('\t')
+        .map(String::from)
+        .collect();
+    let normalized = left_align_symbolic(&cols, "1", 10, &["<DEL>"], &fasta).unwrap();
+    assert_eq!(normalized[1], "8");
+    assert_eq!(normalized[3], "T");
+    assert_eq!(normalized[7], "SVLEN=-10");
+}
+
 fn hdr() -> HeaderInfo {
     HeaderInfo::parse(&[
         "##INFO=<ID=AC,Number=A,Type=Integer,Description=\"x\">",
