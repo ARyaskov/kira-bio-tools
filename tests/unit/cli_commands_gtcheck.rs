@@ -1,6 +1,90 @@
 use super::*;
 
 #[test]
+fn discordant_genotypes_do_not_increment_hwe_match_count() {
+    let mut check = Gtcheck {
+        use_pls: 40,
+        neg_log_e: 4.0,
+        hom_only: false,
+        calc_hwe: true,
+        pairs: None,
+        cross: false,
+        acc: vec![PairAcc::default()],
+        cnt: Counters::default(),
+        ds: None,
+        rng: Lrand48::new(0),
+    };
+    check.score(
+        0,
+        &(1, gt_to_prob(1, 4.0)),
+        &(4, gt_to_prob(4, 4.0)),
+        &[0.0; 8],
+        &mut Vec::new(),
+    );
+    assert_eq!(check.acc[0].ncnt, 1);
+    assert_eq!(check.acc[0].nmatch, 0);
+    check.score(
+        0,
+        &(1, gt_to_prob(1, 4.0)),
+        &(1, gt_to_prob(1, 4.0)),
+        &[0.0; 8],
+        &mut Vec::new(),
+    );
+    assert_eq!(check.acc[0].nmatch, 1);
+}
+
+#[test]
+fn overlapping_reference_blocks_compare_with_variant_sites() {
+    let side = || Side {
+        samples: vec!["A".into()],
+        sel: vec![0],
+        use_gt: true,
+        include: None,
+        exclude: None,
+    };
+    let mut check = Gtcheck {
+        use_pls: 0,
+        neg_log_e: 4.0,
+        hom_only: false,
+        calc_hwe: true,
+        pairs: None,
+        cross: false,
+        acc: vec![PairAcc::default()],
+        cnt: Counters::default(),
+        ds: None,
+        rng: Lrand48::new(0),
+    };
+    let mut query = Rec::parse("1\t2\t.\tA\t<*>\t.\t.\tEND=5\tGT\t0/0".into());
+    let mut panel = Rec::parse("1\t3\t.\tC\tT\t.\t.\t.\tGT\t0/0".into());
+    assert!(compare_active(
+        &mut check,
+        &mut query,
+        &mut panel,
+        &side(),
+        &side()
+    ));
+    panel = Rec::parse("1\t4\t.\tG\tA\t.\t.\t.\tGT\t1/1".into());
+    assert!(compare_active(
+        &mut check,
+        &mut query,
+        &mut panel,
+        &side(),
+        &side()
+    ));
+    assert_eq!(check.acc[0].ncnt, 2);
+    assert_eq!(check.acc[0].ndiff, 1);
+    panel = Rec::parse("1\t6\t.\tG\tA\t.\t.\t.\tGT\t0/0".into());
+    assert!(!compare_active(
+        &mut check,
+        &mut query,
+        &mut panel,
+        &side(),
+        &side()
+    ));
+    assert!(query.is_none());
+}
+
+#[test]
 fn scientific_format_matches_c() {
     assert_eq!(sci6(0.0), "0.000000e+00");
     assert_eq!(sci6(0.1234567891), "1.234568e-01");

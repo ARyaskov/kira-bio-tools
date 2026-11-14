@@ -278,27 +278,17 @@ struct Gtcheck {
     rng: Lrand48,
 }
 
-/// Split `[qry:|gt:]VALUE` specs into the query and panel parts.
 /// `-g` panel streamed alongside the query. Both inputs are position-sorted
 /// (contig order from the query header, then first appearance), so only the
-/// records at the current site are buffered; earlier records are unmatched.
+/// records at the current site and overlapping reference spans are retained.
 struct PanelStream {
     reader: UnifiedVcfReader,
     peek: Option<(usize, Rec)>,
-    buf: Vec<(Rec, bool)>,
-    key: Option<(usize, u32)>,
-    unmatched: u32,
 }
 
 impl PanelStream {
     fn new(reader: UnifiedVcfReader) -> Self {
-        Self {
-            reader,
-            peek: None,
-            buf: Vec::new(),
-            key: None,
-            unmatched: 0,
-        }
+        Self { reader, peek: None }
     }
 
     fn fill(
@@ -310,7 +300,7 @@ impl PanelStream {
             let Some(line) = self.reader.read_line()? else {
                 return Ok(());
             };
-            if line.is_empty() || line.as_bytes()[0] == b'#' || !keep(&line) {
+            if line.is_empty() || line.starts_with('#') || !keep(&line) {
                 continue;
             }
             if let Some(rec) = Rec::parse(line) {
@@ -321,59 +311,133 @@ impl PanelStream {
         Ok(())
     }
 
-    /// Panel records at `key` (contig rank, position).
-    fn at(
+    fn group(
         &mut self,
         key: (usize, u32),
         contigs: &mut crate::vcf::ContigDict,
         keep: &dyn Fn(&str) -> bool,
-    ) -> Result<&mut Vec<(Rec, bool)>> {
-        if self.key != Some(key) {
-            self.unmatched += self.buf.iter().filter(|(_, used)| !used).count() as u32;
-            self.buf.clear();
-            self.key = Some(key);
-            loop {
-                self.fill(contigs, keep)?;
-                let Some((rank, rec)) = self.peek.take() else {
-                    break;
-                };
-                let k = (rank, rec.pos);
-                if k < key {
-                    self.unmatched += 1;
-                    continue;
-                }
-                if k == key {
-                    self.buf.push((rec, false));
-                    continue;
-                }
-                self.peek = Some((rank, rec));
-                break;
-            }
-        }
-        Ok(&mut self.buf)
-    }
-
-    /// Records never paired with a query site, including the rest of the file.
-    fn finish(
-        &mut self,
-        contigs: &mut crate::vcf::ContigDict,
-        keep: &dyn Fn(&str) -> bool,
-    ) -> Result<u32> {
-        let mut n = self.unmatched + self.buf.iter().filter(|(_, used)| !used).count() as u32;
-        self.buf.clear();
-        self.unmatched = 0;
-        if self.peek.take().is_some() {
-            n += 1;
-        }
+    ) -> Result<Vec<Rec>> {
+        let mut records = Vec::new();
         loop {
             self.fill(contigs, keep)?;
-            if self.peek.take().is_none() {
+            if !self
+                .peek
+                .as_ref()
+                .is_some_and(|(rank, rec)| (*rank, rec.pos) == key)
+            {
                 break;
             }
-            n += 1;
+            records.push(self.peek.take().unwrap().1);
         }
-        Ok(n)
+        Ok(records)
     }
+}
+
+fn record_end(rec: &Rec) -> u32 {
+    rec.info
+        .split(';')
+        .find_map(|field| {
+            field
+                .strip_prefix("END=")
+                .and_then(|value| value.parse().ok())
+        })
+        .unwrap_or_else(|| {
+            rec.pos
+                .saturating_add(rec.refa.len().saturating_sub(1) as u32)
+        })
+}
+
+fn compare_active(
+    gc: &mut Gtcheck,
+    query: &mut Option<Rec>,
+    panel: &mut Option<Rec>,
+    qside: &Side,
+    gside: &Side,
+) -> bool {
+    let (Some(q), Some(g)) = (query.as_ref(), panel.as_ref()) else {
+        gc.cnt.no_match += 1;
+        return false;
+    };
+    if q.chrom != g.chrom || record_end(q) < g.pos || record_end(g) < q.pos {
+        if q.chrom == g.chrom {
+            if record_end(q) < g.pos {
+                *query = None;
+            } else {
+                *panel = None;
+            }
+        }
+        gc.cnt.no_match += 1;
+        return false;
+    }
+    if q.n_allele > 2 || g.n_allele > 2 {
+        gc.cnt.not_ba += 1;
+        return false;
+    }
+    if q.is_ref_only && g.is_ref_only {
+        gc.cnt.mono += 1;
+        return false;
+    }
+    if !passes(qside, q) || !passes(gside, g) {
+        gc.cnt.filter += 1;
+        return false;
+    }
+    gc.process(q, Some(g), qside, gside);
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compare_streams(
+    query: UnifiedVcfReader,
+    panel: &mut PanelStream,
+    contigs: &mut crate::vcf::ContigDict,
+    keep: &dyn Fn(&str) -> bool,
+    gc: &mut Gtcheck,
+    qside: &Side,
+    gside: &Side,
+    dry_run: bool,
+) -> Result<()> {
+    let mut query = PanelStream::new(query);
+    let (mut active_q, mut active_g) = (None, None);
+    loop {
+        query.fill(contigs, keep)?;
+        panel.fill(contigs, keep)?;
+        let key = query
+            .peek
+            .as_ref()
+            .map(|(rank, rec)| (*rank, rec.pos))
+            .into_iter()
+            .chain(panel.peek.as_ref().map(|(rank, rec)| (*rank, rec.pos)))
+            .min();
+        let Some(key) = key else {
+            break;
+        };
+        let mut queries = query.group(key, contigs, keep)?;
+        let mut panels: Vec<Option<Rec>> = panel
+            .group(key, contigs, keep)?
+            .into_iter()
+            .map(Some)
+            .collect();
+        for q in queries.drain(..) {
+            let matched = panels.iter().position(|g| {
+                g.as_ref()
+                    .is_some_and(|g| g.refa == q.refa && same_alt_set(&g.alt, &q.alt))
+            });
+            active_q = Some(q);
+            if let Some(index) = matched {
+                active_g = panels[index].take();
+            }
+            if compare_active(gc, &mut active_q, &mut active_g, qside, gside) && dry_run {
+                return Ok(());
+            }
+        }
+        for g in panels.into_iter().flatten() {
+            active_g = Some(g);
+            if compare_active(gc, &mut active_q, &mut active_g, qside, gside) && dry_run {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn split_side(specs: &[String]) -> (Vec<String>, Vec<String>) {
@@ -564,7 +628,7 @@ impl Gtcheck {
             min = min.min(q.1[1] + g.1[1]);
             min = min.min(q.1[2] + g.1[2]);
             a.pdiff += min;
-            if self.calc_hwe {
+            if self.calc_hwe && m != 0 {
                 a.hwe += hwe_dsg[m as usize];
                 a.nmatch += 1;
             }
@@ -1035,58 +1099,25 @@ pub fn cmd_gtcheck(args: GtcheckArgs) -> Result<()> {
         rng: Lrand48::new(0),
     };
 
-    // With a `.kbm` next to the -g file, query sites it has no record at are
-    // counted as unmatched without parsing their genotypes.
-    let panel_sites = args
-        .genotypes
-        .as_deref()
-        .and_then(crate::kbi::PosBitmap::load_sidecar);
-
-    // Walk the query; -g sites are looked up by position and paired by alleles.
-    while let Some(line) = qreader.read_line()? {
-        if line.is_empty() || line.as_bytes()[0] == b'#' || !keep(&line) {
-            continue;
-        }
-        if let Some(bm) = &panel_sites {
-            let mut it = line.splitn(3, '\t');
-            let chrom = it.next().unwrap_or("");
-            let pos = it.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
-            if !bm.contains(chrom, pos) {
-                contigs.insert(chrom);
-                gc.cnt.no_match += 1;
+    if let Some(ps) = panel.as_mut() {
+        compare_streams(
+            qreader,
+            ps,
+            &mut contigs,
+            &keep,
+            &mut gc,
+            &qside,
+            &gside,
+            args.dry_run,
+        )?;
+    } else {
+        while let Some(line) = qreader.read_line()? {
+            if line.is_empty() || line.starts_with('#') || !keep(&line) {
                 continue;
             }
-        }
-        let Some(q) = Rec::parse(line) else { continue };
-        if let Some(ps) = panel.as_mut() {
-            let rank = contigs.insert(&q.chrom) as usize;
-            let cands = ps.at((rank, q.pos), &mut contigs, &keep)?;
-            let Some(k) = cands
-                .iter()
-                .position(|(g, used)| !used && g.refa == q.refa && same_alt_set(&g.alt, &q.alt))
-            else {
-                gc.cnt.no_match += 1;
+            let Some(q) = Rec::parse(line) else {
                 continue;
             };
-            cands[k].1 = true;
-            let g = &cands[k].0;
-            if q.n_allele > 2 || g.n_allele > 2 {
-                gc.cnt.not_ba += 1;
-                continue;
-            }
-            if q.is_ref_only || g.is_ref_only {
-                gc.cnt.mono += 1;
-                continue;
-            }
-            if !passes(&qside, &q) || !passes(&gside, g) {
-                gc.cnt.filter += 1;
-                continue;
-            }
-            if args.dry_run {
-                break;
-            }
-            gc.process(&q, Some(g), &qside, &gside);
-        } else {
             if q.n_allele > 2 {
                 gc.cnt.not_ba += 1;
                 continue;
@@ -1104,9 +1135,6 @@ pub fn cmd_gtcheck(args: GtcheckArgs) -> Result<()> {
             }
             gc.process(&q, None, &qside, &gside);
         }
-    }
-    if let Some(ps) = panel.as_mut() {
-        gc.cnt.no_match += ps.finish(&mut contigs, &keep)?;
     }
     qside.sel.shrink_to_fit();
 
