@@ -7,18 +7,19 @@ use std::io::BufRead;
 use std::path::Path;
 
 use anyhow::{Result, bail};
+use kira_kv_engine::{PgmBuilder, PgmIndex};
 
 pub struct AfFile {
     fname: String,
-    /// First line seen per `(chrom, 1-based pos)`: alleles, the raw AF
-    /// column (parsed only once the alleles match, as bcftools does) and the
-    /// raw line for error messages.
-    sites: HashMap<(String, u32), (Vec<String>, String, String)>,
+    contigs: HashMap<String, u32>,
+    index: PgmIndex,
+    sites: Vec<(Vec<String>, String, String)>,
 }
 
 impl AfFile {
     pub fn load(path: &Path) -> Result<Self> {
         let mut rd = crate::util::open_text_maybe_gz(path)?;
+        let mut contigs = HashMap::new();
         let mut sites = HashMap::new();
         let mut line = String::new();
         loop {
@@ -37,28 +38,44 @@ impl AfFile {
             let Ok(pos) = cols[1].trim().parse::<u32>() else {
                 bail!("Could not parse the targets file {}: {}", path.display(), l);
             };
-            let alleles: Vec<String> = cols[2].split(',').map(str::to_string).collect();
-            let af = cols.get(3).map(|s| s.to_string()).unwrap_or_default();
-            sites
-                .entry((cols[0].to_string(), pos))
-                .or_insert((alleles, af, l.to_string()));
+            let chrom_id = match contigs.get(cols[0]) {
+                Some(&id) => id,
+                None => {
+                    let id = u32::try_from(contigs.len())?;
+                    contigs.insert(cols[0].to_string(), id);
+                    id
+                }
+            };
+            let key = (u64::from(chrom_id) << 32) | u64::from(pos);
+            sites.entry(key).or_insert_with(|| {
+                let alleles = cols[2].split(',').map(str::to_string).collect();
+                let af = cols.get(3).map(|s| s.to_string()).unwrap_or_default();
+                (alleles, af, l.to_string())
+            });
         }
+        let mut entries: Vec<_> = sites.into_iter().collect();
+        entries.sort_unstable_by_key(|(key, _)| *key);
+        let (keys, sites): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        let index = PgmBuilder::new().with_elias_fano(true).build(keys)?;
         Ok(Self {
             fname: path.display().to_string(),
+            contigs,
+            index,
             sites,
         })
     }
 
     /// Targets semantics: is the site listed at all?
     pub fn has_site(&self, chrom: &str, pos1: u32) -> bool {
-        self.sites.contains_key(&(chrom.to_string(), pos1))
+        self.site_index(chrom, pos1).is_some()
     }
 
     /// `read_AF`: `Ok(None)` when the alleles differ or the AF is missing.
     pub fn read_af(&self, chrom: &str, pos1: u32, alleles: &[String]) -> Result<Option<f64>> {
-        let Some((als, af, line)) = self.sites.get(&(chrom.to_string(), pos1)) else {
+        let Some(site_id) = self.site_index(chrom, pos1) else {
             return Ok(None);
         };
+        let (als, af, line) = &self.sites[site_id];
         if als.len() < 2 {
             bail!(
                 "Expected two comma-separated alleles (REF,ALT) in the third column of {}, found:\n\t{}",
@@ -98,4 +115,14 @@ impl AfFile {
             }
         }
     }
+
+    fn site_index(&self, chrom: &str, pos1: u32) -> Option<usize> {
+        let &chrom_id = self.contigs.get(chrom)?;
+        let key = (u64::from(chrom_id) << 32) | u64::from(pos1);
+        self.index.index(key).ok()
+    }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/af_file.rs"]
+mod tests;
