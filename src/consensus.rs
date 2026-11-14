@@ -1082,7 +1082,7 @@ impl<'a> Consensus<'a> {
                 ialt = 1;
             }
         }
-        if n_allele == 1 && ialt != -1 {
+        if ialt == 0 || (n_allele == 1 && ialt != -1) {
             if self.opts.absent_allele.is_some() {
                 self.freeze_ref(rec.pos, rlen);
             }

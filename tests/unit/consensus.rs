@@ -156,3 +156,16 @@ fn samples_and_absent_characters() {
     );
     assert_eq!(out, ">1\nAYGTGCGT\n");
 }
+
+#[test]
+fn reference_iupac_call_preserves_bases_beyond_previous_deletion() {
+    let mut options = opts();
+    options.iupac_gts = Some(vec![0]);
+    options.absent_allele = Some(b'N');
+    let records = vec![
+        rec(2, "GGGAC", &["G", "<NON_REF>"], Some("1/1")),
+        rec(6, "CA", &["C", "<NON_REF>"], Some("0/0")),
+    ];
+    let (result, _) = run(&options, ">1\nCGGGACAC\n", records);
+    assert_eq!(result, ">1\nNGAN\n");
+}
