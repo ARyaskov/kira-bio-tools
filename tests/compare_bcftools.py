@@ -62,6 +62,12 @@ def main():
             elif path.suffix == ".sh":
                 path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
         row = {"fixture": str(relative), "status": "NOT_RUN", "commands": []}
+        for fasta in sorted([*target.glob("*.fa"), *target.glob("*.fasta")]):
+            if not fasta.with_suffix(fasta.suffix + ".fai").exists():
+                continue
+            indexed = subprocess.run([str(args.samtools), "faidx", str(fasta)], env=env, capture_output=True, timeout=args.timeout)
+            if indexed.returncode:
+                raise RuntimeError(f"FASTA indexing failed for {relative}: {indexed.stderr.decode(errors='replace')}")
         for script in ["bcftools.sh", "kira.sh"]:
             if not (target / script).exists():
                 row["status"] = "MISSING_SCRIPT"

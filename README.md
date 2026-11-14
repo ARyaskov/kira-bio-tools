@@ -196,6 +196,8 @@ Commands: `query`, `cnv`.
 - `db-build`  
   Build an ANI database from annotation data.  
   Args: `<input>`, `-o/--output`.
+  ANI v7 preserves symbolic variants with distinct `INFO/END` values.
+  Annotation source caches rebuild automatically; explicit older `.ani` files require rebuilding.
 
 - `tile`  
   Build and manage `.ktile` sidecars that let `annotate` skip the BGZF decode
@@ -440,10 +442,10 @@ Commands: `query`, `cnv`.
   the pre-0.7 environment-variable interface keep working; an explicit flag
   always wins.
 
-  `--bcftools-layout` writes records exactly the way `bcftools mpileup`
-  does, so `bcftools call`, `kira-bt call` and the usual hard-filter recipes
-  read them unchanged: alleles ordered by quality sum with the unseen `<*>`,
-  PL only (no GT), `INFO/DP` as raw depth, `I16`, `QS`, `MQ0F` and the bias
+  The default `--bcftools-layout` writes the likelihood layout consumed by
+  `bcftools call`, `kira-bt call` and the usual hard-filter recipes: alleles
+  ordered by quality sum with the unseen `<*>`, PL and AD (no GT),
+  `INFO/DP` as raw depth, `I16`, `QS`, `MQ0F` and the bias
   statistics (`VDB`, `SGB`, `RPBZ`, `MQBZ`, `BQBZ`, `MQSBZ`, `SCBZ`, `NMBZ`,
   `FS`) in bcftools' tag order, `-a` with bcftools' tag names and defaults
   (`-a DP,AD,INFO/AD,...`), bcftools' read and base filters (`-Q 1`,
@@ -456,10 +458,9 @@ Commands: `query`, `cnv`.
   `-s ^A,B` excludes, `-S FILE` rows may rename (`OLD NEW`), `-G FILE` lists
   read groups (`ID [FILE] [SAMPLE]`, `^FILE` to exclude) and `--ignore-RG`
   names one sample per file. The indel records keep kira's candidate model
-  behind bcftools' layout, and `-g`, `-v` and `--assemble` need the kira
-  layout. On the bcftools test suite the SNP records match bcftools 1.19
-  byte for byte on 18 of 28 cases; the rest differ in a few base-quality sums
-  where BAQ posteriors disagree by one or two phred at read ends.
+  behind bcftools' layout. `-g` retains per-sample PL and DP in reference
+  blocks. `--native-layout` selects Kira genotypes; `-v` and `--assemble`
+  also select that mode. Some BAQ and indel likelihoods still differ from bcftools.
 
 - `call`  
   SNP/indel calling from genotype likelihoods.  
