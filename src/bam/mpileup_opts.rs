@@ -44,10 +44,11 @@ pub struct AnnotateSpec {
 }
 
 impl AnnotateSpec {
-    /// bcftools 1.19 defaults: PL plus the INFO bias statistics.
+    /// bcftools 1.23 defaults: PL, AD and INFO bias statistics.
     pub fn bcftools_defaults() -> Self {
         Self {
             fmt_pl: true,
+            fmt_ad: true,
             info_vdb: true,
             info_rpbz: true,
             info_mqbz: true,

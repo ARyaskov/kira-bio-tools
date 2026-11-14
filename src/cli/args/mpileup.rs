@@ -76,13 +76,24 @@ pub struct MpileupArgs {
     pub min_qual: u8,
 
     /// Write records the way `bcftools mpileup` does: alleles ordered by
-    /// quality sum with the unseen `<*>`, PL only (no GT), I16/QS/MQ0F and
+    /// quality sum with the unseen `<*>`, PL and AD (no GT), I16/QS/MQ0F and
     /// the bias statistics in INFO, bcftools' tag order and `-a` defaults, and
     /// its read/base filters (`--delta-BQ 30`, `--max-BQ 60`, orphan pairs
     /// skipped unless `-A`). The indel model stays kira's; only the layout is
     /// bcftools'.
-    #[arg(long = "bcftools-layout")]
+    #[arg(
+        long = "bcftools-layout",
+        default_value_t = true,
+        overrides_with = "native_layout"
+    )]
     pub bcftools_layout: bool,
+
+    #[arg(
+        long = "native-layout",
+        overrides_with = "bcftools_layout",
+        help = "Emit Kira genotypes and annotations"
+    )]
+    pub native_layout: bool,
 
     #[arg(short = 'B', long = "no-BAQ")]
     pub no_baq: bool,
@@ -262,3 +273,13 @@ pub struct MpileupArgs {
     #[arg(last = true, allow_hyphen_values = true)]
     pub passthrough: Vec<String>,
 }
+
+impl MpileupArgs {
+    pub fn bcftools_layout(&self) -> bool {
+        self.bcftools_layout && !self.native_layout && !self.variants_only && !self.assemble
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../tests/unit/cli_args_mpileup.rs"]
+mod tests;

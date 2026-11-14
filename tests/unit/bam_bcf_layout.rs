@@ -78,6 +78,7 @@ fn allele_order_follows_bcftools() {
 #[test]
 fn default_header_carries_bias_tags() {
     let tags = AnnotateSpec::bcftools_defaults();
+    assert!(tags.fmt_ad && tags.fmt_pl);
     let lines = header_lines(&tags);
     assert!(lines.iter().any(|l| l.starts_with("##INFO=<ID=VDB,")));
     assert!(lines.iter().any(|l| l.starts_with("##INFO=<ID=MQ0F,")));

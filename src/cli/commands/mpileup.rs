@@ -63,7 +63,7 @@ fn prepare_bams(
             r.records_buf.retain(|lr| flag_filters.passes(lr.flags));
         }
         // The bcftools layout realigns lazily per site (`mplp_realn`).
-        if !baq_off && !args.bcftools_layout {
+        if !baq_off && !args.bcftools_layout() {
             match fasta {
                 Some(fa) => {
                     let ref_names = r.ref_names.clone();
@@ -181,14 +181,11 @@ pub fn cmd_mpileup(args: MpileupArgs) -> Result<()> {
         Some(args.annotate.join(","))
     };
     let annotate = parse_annotate(&args, annotate_spec.as_deref())?;
-    if args.bcftools_layout {
+    if args.bcftools_layout() {
         if args.variants_only {
             bail!(
                 "mpileup: --bcftools-layout writes genotype likelihoods only; -v/--variants-only needs the kira layout"
             );
-        }
-        if args.gvcf.is_some() {
-            bail!("mpileup: --gvcf is not available with --bcftools-layout");
         }
         if args.assemble {
             bail!("mpileup: --assemble is not available with --bcftools-layout");
@@ -256,7 +253,7 @@ pub fn cmd_mpileup(args: MpileupArgs) -> Result<()> {
         )?;
         return finish_output(out, &args);
     }
-    if args.bcftools_layout && (args.regions.is_some() || args.regions_file.is_some()) {
+    if args.bcftools_layout() && (args.regions.is_some() || args.regions_file.is_some()) {
         // bcftools walks `-r` regions one at a time, each with its own
         // pileup, so overlapping regions repeat their records.
         let targets = collect_targets(&args)?;
@@ -373,7 +370,7 @@ fn resolve_min_bq(args: &MpileupArgs, preset: Option<&PresetConfig>) -> u8 {
     preset
         .and_then(|p| p.min_bq)
         .or(args.min_bq)
-        .unwrap_or(if args.bcftools_layout { 1 } else { 13 })
+        .unwrap_or(if args.bcftools_layout() { 1 } else { 13 })
         .min(255) as u8
 }
 
@@ -382,7 +379,7 @@ fn resolve_min_bq(args: &MpileupArgs, preset: Option<&PresetConfig>) -> u8 {
 /// QC-fail and duplicate reads, not supplementary ones) and `--rf` skips
 /// reads with every listed bit unset.
 fn flag_filters(args: &MpileupArgs) -> Result<FlagFilters> {
-    if args.bcftools_layout {
+    if args.bcftools_layout() {
         let mut f = FlagFilters::from_full(
             args.ef,
             args.df,
@@ -532,11 +529,15 @@ fn regroup_by_sample(bams: Vec<BamReader>, n: usize) -> Vec<BamReader> {
 /// `-a` under the requested layout: kira's tag set, or bcftools' defaults
 /// and tag names with `--bcftools-layout`.
 fn parse_annotate(args: &MpileupArgs, spec: Option<&str>) -> Result<AnnotateSpec> {
-    if args.bcftools_layout {
+    let mut annotate = if args.bcftools_layout() {
         AnnotateSpec::parse_bcftools(spec)
     } else {
         AnnotateSpec::parse(spec)
+    }?;
+    if args.gvcf.is_some() {
+        annotate.fmt_dp = true;
     }
+    Ok(annotate)
 }
 
 /// Read and base filters of the pileup pass. The bcftools layout applies
@@ -546,7 +547,7 @@ fn parse_annotate(args: &MpileupArgs, spec: Option<&str>) -> Result<AnnotateSpec
 fn engine_opts(args: &MpileupArgs, min_mq: u8, min_bq: u8, skip_indels: bool) -> EngineOpts {
     let mut o = EngineOpts::new(min_mq, min_bq, skip_indels, !args.ignore_overlaps);
     let clamp = |v: u32| v.min(255) as u8;
-    if args.bcftools_layout {
+    if args.bcftools_layout() {
         o.max_bq = Some(clamp(args.max_bq.unwrap_or(60)));
         o.delta_bq = Some(clamp(args.delta_bq.unwrap_or(30)));
         o.skip_orphans = !args.count_orphans;
@@ -788,7 +789,7 @@ fn run_streaming<W: Write>(
     use crate::bam::{ReadHook, StreamingBam};
     let fasta = fasta.map(std::sync::Arc::new);
     let workers = (crate::threads::bam_workers() / args.inputs.len().max(1)).max(1);
-    let bcftools_layout = args.bcftools_layout;
+    let bcftools_layout = args.bcftools_layout();
     let redo_baq = args.redo_baq;
     // One decoder per input feeds one engine source, so each input must map
     // to exactly its own sample, in input order.
@@ -843,7 +844,7 @@ fn run_streaming<W: Write>(
     let any_filter = false;
     let ref_names = streams[0].ref_names.clone();
     let ref_lengths = streams[0].ref_lengths.clone();
-    if args.bcftools_layout {
+    if args.bcftools_layout() {
         write_bcftools_header(
             out,
             annotate,
@@ -853,6 +854,7 @@ fn run_streaming<W: Write>(
             &sample_keep,
             any_filter,
             args.fasta_ref.as_deref(),
+            args.gvcf.is_some(),
         )?;
     } else {
         write_vcf_header(
@@ -870,7 +872,8 @@ fn run_streaming<W: Write>(
     let mut gvcf_blocker: Option<GvcfBlocker> = args
         .gvcf
         .as_ref()
-        .map(|s| GvcfBlocker::new(s.split(',').filter_map(|t| t.parse::<u32>().ok()).collect()));
+        .map(|s| GvcfBlocker::from_spec(s))
+        .transpose()?;
     let caller = site_caller(args, &sample_keep, any_filter);
     let eo = engine_opts(args, min_mq, min_bq, skip_indels);
     let ctx = EmitCtx {
@@ -905,7 +908,7 @@ fn run_streaming<W: Write>(
     let mut err: Option<anyhow::Error> = None;
     let mut buf: Vec<u8> = Vec::with_capacity(256);
     let mut hook: Option<Box<SiteHook<'_>>> =
-        match (args.bcftools_layout && !baq_off, fasta.as_deref()) {
+        match (args.bcftools_layout() && !baq_off, fasta.as_deref()) {
             (true, Some(fa)) => Some(bcftools_realn_hook(
                 fa,
                 &ref_names,
@@ -947,6 +950,11 @@ fn write_site<W: Write>(
 ) -> Result<()> {
     buf.clear();
     if let Some(g) = gvcf.as_mut() {
+        if ctx.args.bcftools_layout() {
+            emit_site(site, reads, ctx, buf);
+            g.write_likelihoods(std::str::from_utf8(buf)?, out)?;
+            return Ok(());
+        }
         if !emit_site_or_gvcf(site, reads, ctx, buf, Some(g), out)? {
             return Ok(());
         }
@@ -1074,7 +1082,7 @@ fn run_prepared<W: Write>(
     let ref_lengths: Vec<u64> = bams[0].ref_lengths.clone();
 
     if write_header {
-        if args.bcftools_layout {
+        if args.bcftools_layout() {
             write_bcftools_header(
                 out,
                 annotate,
@@ -1084,6 +1092,7 @@ fn run_prepared<W: Write>(
                 &sample_keep,
                 any_filter,
                 args.fasta_ref.as_deref(),
+                args.gvcf.is_some(),
             )?;
         } else {
             write_vcf_header(
@@ -1099,16 +1108,16 @@ fn run_prepared<W: Write>(
     }
 
     let em = ErrorModel::new();
-    let gvcf_opts: Option<Vec<u32>> = args
+    let mut gvcf_blocker = args
         .gvcf
-        .as_ref()
-        .map(|s| s.split(',').filter_map(|t| t.parse::<u32>().ok()).collect());
-    let mut gvcf_blocker: Option<GvcfBlocker> = gvcf_opts.map(GvcfBlocker::new);
+        .as_deref()
+        .map(GvcfBlocker::from_spec)
+        .transpose()?;
 
     let n_chunks = args.threads.max(1);
     // Lazy per-site BAQ makes the bcftools layout order-dependent, so it
     // always runs sequentially.
-    let parallel_eligible = n_chunks > 1 && gvcf_blocker.is_none() && !args.bcftools_layout;
+    let parallel_eligible = n_chunks > 1 && gvcf_blocker.is_none() && !args.bcftools_layout();
     // The skip-list drops reference-only sites; that is only valid when such
     // sites are never emitted. It is then applied on every path so the output
     // does not depend on the thread count.
@@ -1168,7 +1177,8 @@ fn run_prepared<W: Write>(
             .transpose()?
             .and_then(|p| p.no_baq)
             .unwrap_or(args.no_baq);
-        let mut hook: Option<Box<SiteHook<'_>>> = match (args.bcftools_layout && !baq_off, fasta) {
+        let mut hook: Option<Box<SiteHook<'_>>> = match (args.bcftools_layout() && !baq_off, fasta)
+        {
             (true, Some(fa)) => Some(bcftools_realn_hook(
                 fa,
                 &ref_names,
@@ -1359,6 +1369,7 @@ fn write_bcftools_header<W: Write>(
     sample_keep: &[bool],
     any_filter: bool,
     fasta: Option<&Path>,
+    gvcf: bool,
 ) -> Result<()> {
     writeln!(out, "##fileformat=VCFv4.2")?;
     writeln!(out, "##FILTER=<ID=PASS,Description=\"All filters passed\">")?;
@@ -1375,6 +1386,16 @@ fn write_bcftools_header<W: Write>(
     }
     for l in bcf_layout::header_lines(annotate) {
         writeln!(out, "{l}")?;
+    }
+    if gvcf {
+        writeln!(
+            out,
+            "##INFO=<ID=END,Number=1,Type=Integer,Description=\"End position of the variant described in this record\">"
+        )?;
+        writeln!(
+            out,
+            "##INFO=<ID=MIN_DP,Number=1,Type=Integer,Description=\"Minimum per-sample depth in this gVCF block\">"
+        )?;
     }
     write!(out, "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT")?;
     for (i, s) in samples.iter().enumerate() {
@@ -1981,7 +2002,7 @@ fn emit_site(site: &PileupSite, overlapping_reads: &[LiveRead], ctx: &EmitCtx, o
     if !ctx.in_regions(chr, pos1) {
         return;
     }
-    if args.bcftools_layout {
+    if args.bcftools_layout() {
         emit_site_bcftools(site, overlapping_reads, ctx, chr, pos1, out);
         return;
     }
@@ -2406,7 +2427,7 @@ fn emit_indels(
         }
         let ref_str = (ref_base as char).to_string();
         let alt_str = format!("{}{}", ref_base as char, seq);
-        if args.bcftools_layout {
+        if args.bcftools_layout() {
             let iq = if ctx.hp_indel {
                 hp_indel_qual(ctx, chr, pos1, &ref_str, &alt_str)
             } else {
@@ -2469,7 +2490,7 @@ fn emit_indels(
             ref_str.push(b as char);
         }
         let alt_str = (ref_base as char).to_string();
-        if args.bcftools_layout {
+        if args.bcftools_layout() {
             let iq = if ctx.hp_indel {
                 hp_indel_qual(ctx, chr, pos1, &ref_str, &alt_str)
             } else {

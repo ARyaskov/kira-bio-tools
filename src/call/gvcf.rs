@@ -8,6 +8,21 @@ use std::io::Write;
 pub struct GvcfBlocker {
     bins: Vec<u32>,
     cur: Option<GvcfBlock>,
+    likelihoods: Option<LikelihoodBlock>,
+}
+
+#[derive(Clone, Debug)]
+struct LikelihoodBlock {
+    chrom: String,
+    start: u64,
+    end: u64,
+    range: usize,
+    ref_base: String,
+    alt: String,
+    min_dp: u32,
+    depths: Vec<u32>,
+    pls: Vec<Vec<i32>>,
+    qs: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -24,13 +39,182 @@ struct GvcfBlock {
 }
 
 impl GvcfBlocker {
+    pub fn from_spec(spec: &str) -> Result<Self> {
+        let bins = spec
+            .split(',')
+            .map(|value| value.parse::<u32>().map_err(anyhow::Error::from))
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            !bins.is_empty() && bins.windows(2).all(|pair| pair[0] < pair[1]),
+            "gVCF depth thresholds must be strictly increasing"
+        );
+        Ok(Self::new(bins))
+    }
     pub fn new(bins: Vec<u32>) -> Self {
         let mut b = bins;
         b.sort();
         if b.is_empty() {
             b.push(0);
         }
-        Self { bins: b, cur: None }
+        Self {
+            bins: b,
+            cur: None,
+            likelihoods: None,
+        }
+    }
+
+    pub fn write_likelihoods<W: Write>(&mut self, text: &str, out: &mut W) -> Result<()> {
+        for line in text.lines().filter(|line| !line.is_empty()) {
+            let cols: Vec<&str> = line.split('\t').collect();
+            anyhow::ensure!(cols.len() >= 9, "invalid mpileup record");
+            let pos = cols[1].parse::<u64>()?;
+            let is_ref = matches!(cols[4], "<*>" | "<NON_REF>" | ".");
+            let keys: Vec<&str> = cols[8].split(':').collect();
+            let dp_index = keys.iter().position(|key| *key == "DP");
+            let pl_index = keys.iter().position(|key| *key == "PL");
+            let samples: Vec<Vec<&str>> = cols[9..]
+                .iter()
+                .map(|sample| sample.split(':').collect())
+                .collect();
+            let depths = dp_index.and_then(|index| {
+                samples
+                    .iter()
+                    .map(|sample| sample.get(index)?.parse::<u32>().ok())
+                    .collect::<Option<Vec<_>>>()
+            });
+            let min_dp = depths
+                .as_ref()
+                .and_then(|values| values.iter().min().copied())
+                .unwrap_or(0);
+            let range = self.bins.partition_point(|threshold| *threshold <= min_dp);
+            let can_collapse = is_ref && depths.is_some() && range > 0;
+            if self.likelihoods.as_ref().is_some_and(|block| {
+                !can_collapse
+                    || block.chrom != cols[0]
+                    || pos > block.end + 1
+                    || range != block.range
+            }) {
+                if let Some(block) = &mut self.likelihoods
+                    && block.chrom == cols[0]
+                    && block.end == pos
+                {
+                    block.end = block.end.saturating_sub(1);
+                }
+                self.flush_likelihoods(out)?;
+            }
+            if can_collapse {
+                let pls = pl_index
+                    .and_then(|index| {
+                        samples
+                            .iter()
+                            .map(|sample| {
+                                sample
+                                    .get(index)?
+                                    .split(',')
+                                    .map(|value| value.parse::<i32>().ok())
+                                    .collect::<Option<Vec<_>>>()
+                            })
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .unwrap_or_default();
+                let end = cols[7]
+                    .split(';')
+                    .find_map(|field| {
+                        field
+                            .strip_prefix("END=")
+                            .and_then(|value| value.parse().ok())
+                    })
+                    .unwrap_or(pos);
+                match &mut self.likelihoods {
+                    Some(block) => {
+                        block.end = end;
+                        block.min_dp = block.min_dp.min(min_dp);
+                        for (current, next) in block.depths.iter_mut().zip(depths.unwrap()) {
+                            *current = (*current).min(next);
+                        }
+                        if pls.is_empty() {
+                            block.pls.clear();
+                        } else {
+                            for (current, next) in block.pls.iter_mut().zip(pls) {
+                                anyhow::ensure!(
+                                    current.len() == 3 && next.len() == 3,
+                                    "unexpected number of reference PL fields"
+                                );
+                                if (next[1], next[2]) < (current[1], current[2]) {
+                                    current[1] = next[1];
+                                    current[2] = next[2];
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        self.likelihoods = Some(LikelihoodBlock {
+                            chrom: cols[0].to_string(),
+                            start: pos,
+                            end,
+                            range,
+                            ref_base: cols[3].to_string(),
+                            alt: cols[4].to_string(),
+                            min_dp,
+                            depths: depths.unwrap(),
+                            pls,
+                            qs: cols[7]
+                                .split(';')
+                                .find_map(|field| field.strip_prefix("QS=").map(String::from)),
+                        });
+                    }
+                }
+            } else if is_ref && min_dp > 0 {
+                let mut cols: Vec<String> = cols.iter().map(|value| value.to_string()).collect();
+                if cols[7] == "." {
+                    cols[7].clear();
+                } else {
+                    cols[7].push(';');
+                }
+                cols[7].push_str(&format!("MIN_DP={min_dp}"));
+                writeln!(out, "{}", cols.join("\t"))?;
+            } else {
+                writeln!(out, "{line}")?;
+            }
+        }
+        Ok(())
+    }
+
+    fn flush_likelihoods<W: Write>(&mut self, out: &mut W) -> Result<()> {
+        if let Some(block) = self.likelihoods.take() {
+            write!(
+                out,
+                "{}\t{}\t.\t{}\t{}\t.\t.\t",
+                block.chrom, block.start, block.ref_base, block.alt
+            )?;
+            if block.start < block.end {
+                write!(out, "END={};", block.end)?;
+            }
+            write!(out, "MIN_DP={}", block.min_dp)?;
+            if let Some(qs) = block.qs {
+                write!(out, ";QS={qs}")?;
+            }
+            write!(
+                out,
+                "\t{}",
+                if block.pls.is_empty() { "DP" } else { "PL:DP" }
+            )?;
+            for (i, depth) in block.depths.iter().enumerate() {
+                write!(out, "\t")?;
+                if let Some(pls) = block.pls.get(i) {
+                    for (j, value) in pls.iter().enumerate() {
+                        if j > 0 {
+                            write!(out, ",")?;
+                        }
+                        write!(out, "{value}")?;
+                    }
+                    write!(out, ":")?;
+                }
+                write!(out, "{depth}")?;
+            }
+            writeln!(out)?;
+        }
+        Ok(())
     }
 
     /// Try to extend current block with a REF-only site. Returns Some(flush)
@@ -81,6 +265,7 @@ impl GvcfBlocker {
 
     /// Force flush of current block (called on chromosome change or end-of-stream).
     pub fn flush<W: Write>(&mut self, out: &mut W) -> Result<()> {
+        self.flush_likelihoods(out)?;
         if let Some(b) = self.cur.take() {
             writeln!(
                 out,

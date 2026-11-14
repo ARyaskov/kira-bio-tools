@@ -231,6 +231,7 @@ fn parse_header(bytes: &[u8]) -> Result<sam::Header> {
 fn build_mpileup_args(args: &SolidArgs) -> Result<MpileupArgs> {
     let mut argv: Vec<String> = vec![
         "solid-mpileup".to_string(),
+        "--native-layout".to_string(),
         "--output".to_string(),
         args.output.display().to_string(),
         "--fasta-ref".to_string(),
