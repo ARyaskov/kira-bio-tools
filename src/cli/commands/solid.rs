@@ -221,16 +221,6 @@ fn build_call_config(args: &SolidArgs) -> Result<Option<CallConfig>> {
 /// The fused aligner is configured for primary-only output.
 const MAX_ALIGNMENTS: usize = 1;
 
-/// Removes the window scratch directory when the windowed run ends, including on
-/// the error paths.
-struct ScratchDir(std::path::PathBuf);
-
-impl Drop for ScratchDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 fn parse_header(bytes: &[u8]) -> Result<sam::Header> {
     sam::io::Reader::new(std::io::Cursor::new(bytes))
         .read_header()
@@ -289,11 +279,11 @@ fn run_windowed(
 
     let window_len: u32 = args.window_mb.saturating_mul(1_000_000).max(1_000_000);
     let tmp_root = resolve_tmpdir(args.window_tmpdir.as_deref(), &args.output);
-    let scratch = tmp_root.join(format!("kira-solid-win-{}", std::process::id()));
-    std::fs::create_dir_all(&scratch)
-        .with_context(|| format!("create window scratch {}", scratch.display()))?;
-    // Removed on the way out; per-window files are unlinked as each is consumed.
-    let _scratch_guard = ScratchDir(scratch.clone());
+    std::fs::create_dir_all(&tmp_root).context("create window scratch root")?;
+    let scratch_guard = tempfile::Builder::new()
+        .prefix("kira-solid-win-")
+        .tempdir_in(&tmp_root)?;
+    let scratch = scratch_guard.path().to_path_buf();
     eprintln!(
         "[KIRA_SOLID] windowed mode: {} Mb windows, scratch {}",
         window_len / 1_000_000,
@@ -342,6 +332,16 @@ fn run_windowed(
         BufWriter::with_capacity(1 << 20, File::create(&args.output).context("create VCF")?);
     let mut header_written = false;
     let t = std::time::Instant::now();
+
+    if windows.is_empty() {
+        let bam = BamReader::from_parts(
+            Vec::new(),
+            header.clone(),
+            vec![sample.to_string()],
+            ref_names.clone(),
+        );
+        run_pileup(vec![bam], mp_args, call_cfg, &mut out)?;
+    }
 
     for w in &windows {
         let (_, records) = w.load().context("load window")?;

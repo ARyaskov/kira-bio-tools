@@ -7,7 +7,7 @@
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use flate2::Compression;
@@ -205,3 +205,95 @@ impl Write for VcfSink {
         }
     }
 }
+
+pub struct StreamingVcfSink {
+    path: Option<PathBuf>,
+    kind: OutputKind,
+    headers: Vec<String>,
+    partial: Vec<u8>,
+    inner: Option<VcfSink>,
+}
+
+impl StreamingVcfSink {
+    pub fn new(path: Option<&Path>, kind: OutputKind) -> Self {
+        Self {
+            path: path.map(Path::to_path_buf),
+            kind,
+            headers: Vec::new(),
+            partial: Vec::new(),
+            inner: None,
+        }
+    }
+
+    pub fn finish(mut self) -> Result<()> {
+        if !self.partial.is_empty() {
+            self.write_all(b"\n")?;
+        }
+        self.inner
+            .ok_or_else(|| anyhow::anyhow!("VCF output has no #CHROM header"))?
+            .finish()
+    }
+}
+
+impl Write for StreamingVcfSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(inner) = self.inner.as_mut() {
+            return inner.write(buf);
+        }
+        let mut rest = buf;
+        while let Some(nl) = memchr::memchr(b'\n', rest) {
+            self.partial.extend_from_slice(&rest[..nl]);
+            let line = std::str::from_utf8(&self.partial)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                .trim_end_matches('\r');
+            if !line.starts_with('#') {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "VCF record precedes #CHROM",
+                ));
+            }
+            let ready = line.starts_with("#CHROM\t");
+            self.headers.push(line.to_string());
+            self.partial.clear();
+            rest = &rest[nl + 1..];
+            if ready {
+                let mut inner = VcfSink::open(self.path.as_deref(), self.kind, &self.headers)
+                    .map_err(io::Error::other)?;
+                inner
+                    .write_header(&self.headers)
+                    .map_err(io::Error::other)?;
+                inner.write_all(rest)?;
+                self.headers.clear();
+                self.inner = Some(inner);
+                return Ok(buf.len());
+            }
+        }
+        self.partial.extend_from_slice(rest);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self.inner.as_mut() {
+            Some(inner) => inner.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+pub fn write_output_index(path: Option<&Path>, format: &str) -> Result<()> {
+    let path = path
+        .filter(|p| *p != Path::new("-"))
+        .ok_or_else(|| anyhow::anyhow!("--write-index requires an output file"))?;
+    let kind = match format {
+        "csi" => crate::csi::IndexKind::Csi,
+        "tbi" => crate::csi::IndexKind::Tbi,
+        _ => anyhow::bail!("index format must be csi or tbi"),
+    };
+    let output = PathBuf::from(format!("{}.{}", path.display(), format));
+    crate::csi::build_index(path, &output, kind, None)?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "../../tests/unit/vcf_sink.rs"]
+mod tests;

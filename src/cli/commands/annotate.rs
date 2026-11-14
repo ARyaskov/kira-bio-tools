@@ -34,43 +34,22 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
 
     let mut postproc = build_postproc(&args, &extra_header_lines)?;
 
-    let out = args.output.clone().unwrap_or_else(|| {
-        let mut p = args.input.clone();
-        p.set_extension("annot.vcf");
-        p
-    });
-
+    let out = args.output.clone().unwrap_or_else(|| PathBuf::from("-"));
     let output_kind = match args.output_type.as_deref() {
-        Some(s) => Some(annotate::postproc::parse_output_type(s)?),
-        None => None,
+        Some(s) => annotate::postproc::parse_output_type(s)?,
+        None if args.bgzf_after => {
+            annotate::postproc::OutputKind::VcfGz(args.bgzf_level.unwrap_or(1))
+        }
+        None => annotate::postproc::OutputKind::Vcf,
     };
-    if matches!(output_kind, Some(annotate::postproc::OutputKind::Bcf(_))) {
-        anyhow::bail!("-O u|b (BCF) not yet supported — use v or z");
+    if args.write_index.is_some() && out == Path::new("-") {
+        anyhow::bail!("--write-index requires an output file");
     }
-    let needs_bgzf =
-        matches!(output_kind, Some(annotate::postproc::OutputKind::VcfGz(_))) || args.bgzf_after;
-    let effective_bgzf_level = match output_kind {
-        Some(annotate::postproc::OutputKind::VcfGz(lvl)) => Some(lvl),
-        _ => args.bgzf_level,
-    };
     let needs_postproc = !postproc_is_noop(&postproc)
         || args.include.is_some()
         || args.exclude.is_some()
         || args.samples.is_some()
         || args.samples_file.is_some();
-    let intermediate_path: PathBuf = if needs_postproc || needs_bgzf {
-        let mut tmp = out.clone();
-        tmp.set_extension("kira-bt-tmp.vcf");
-        tmp
-    } else {
-        out.clone()
-    };
-    let out_for_annotate = intermediate_path.clone();
-    let bgzf_after: Option<PathBuf> = if needs_bgzf {
-        Some(intermediate_path.clone())
-    } else {
-        None
-    };
 
     // ---- B2 phase 2 auto-detect / auto-build of .ktile sidecar ----
     //
@@ -175,12 +154,58 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
             }
         })
         .collect();
-    let bgzf_level = effective_bgzf_level;
+    let bgzf_level = None;
     let mmap_output = args.mmap_output;
     let mmap_no_flush = args.mmap_no_flush;
     let ram_output = args.ram_output;
     let ram_max_mb = args.ram_max_mb;
 
+    if !args.gpu && !mmap_output && !ram_output {
+        let index_format = args.write_index.clone();
+        let destination = out.clone();
+        let writer = Box::new(
+            move |rx: crossbeam_channel::Receiver<annotate::cpu_v2::AnnotatedBatch>,
+                  headers: Vec<String>|
+                  -> Result<()> {
+                let headers = if needs_postproc {
+                    prepare_postproc_headers(headers, &args, &mut postproc)?
+                } else {
+                    headers
+                };
+                let mut sink =
+                    crate::vcf::VcfSink::open(Some(&destination), output_kind, &headers)?;
+                sink.write_header(&headers)?;
+                let mut canon = crate::vcf::RecordCanon::from_headers(&headers);
+                while let Ok(batch) = rx.recv() {
+                    for i in 0..batch.input.len() {
+                        let line = batch.output[i]
+                            .as_deref()
+                            .unwrap_or_else(|| batch.input.line(i));
+                        if needs_postproc {
+                            write_processed_line(&mut sink, line, &postproc, &mut canon)?;
+                        } else {
+                            sink.write_line(line)?;
+                        }
+                    }
+                }
+                sink.finish()
+            },
+        );
+        annotate::cpu_v2::annotate_vcf_ani_v2_with_writer(
+            &ani_path,
+            &input_path,
+            &columns,
+            &extra_header_lines,
+            writer,
+        )?;
+        if let Some(format) = index_format {
+            crate::vcf::sink::write_output_index(Some(&out), &format)?;
+        }
+        return Ok(());
+    }
+
+    let scratch = tempfile::tempdir().context("create annotation scratch")?;
+    let out_for_annotate = scratch.path().join("annotated.vcf");
     let mut ran = false;
 
     #[cfg(feature = "gpu")]
@@ -217,34 +242,20 @@ pub fn cmd_annotate(args: AnnotateArgs) -> Result<()> {
         ran = true;
     }
 
+    if ran && ram_output {
+        return Ok(());
+    }
     if ran {
         if needs_postproc {
-            let final_or_bgzf_tmp: PathBuf = if needs_bgzf {
-                let mut p = out.clone();
-                p.set_extension("kira-bt-pp.vcf");
-                p
-            } else {
-                out.clone()
-            };
-            apply_postproc_stream_with_args(
-                &out_for_annotate,
-                &final_or_bgzf_tmp,
-                &args,
-                postproc,
-            )?;
-            let _ = std::fs::remove_file(&out_for_annotate);
-
-            if needs_bgzf {
-                compress_plain_to_bgzf(&final_or_bgzf_tmp, &out, effective_bgzf_level)?;
-                let _ = std::fs::remove_file(&final_or_bgzf_tmp);
-            }
-        } else if let Some(tmp) = bgzf_after {
-            compress_plain_to_bgzf(&tmp, &out, effective_bgzf_level)?;
-            let _ = std::fs::remove_file(tmp);
+            apply_postproc_stream_with_args(&out_for_annotate, &out, &args, postproc)?;
+        } else {
+            let mut reader = BufReader::new(File::open(&out_for_annotate)?);
+            let mut sink = crate::vcf::sink::StreamingVcfSink::new(Some(&out), output_kind);
+            std::io::copy(&mut reader, &mut sink)?;
+            sink.finish()?;
         }
-
-        if let Some(idx_fmt) = &args.write_index {
-            write_output_index(&out, idx_fmt)?;
+        if let Some(format) = &args.write_index {
+            crate::vcf::sink::write_output_index(Some(&out), format)?;
         }
     }
     Ok(())
@@ -362,10 +373,15 @@ fn apply_postproc_stream_with_args(
     args: &AnnotateArgs,
     mut pp: annotate::postproc::PostProcessor,
 ) -> Result<()> {
-    use annotate::postproc::{HeaderOptions, apply_to_header, version_header_line};
-
     let reader = BufReader::with_capacity(8 * 1024 * 1024, File::open(input)?);
-    let mut writer = std::io::BufWriter::with_capacity(8 * 1024 * 1024, File::create(output)?);
+    let kind = match args.output_type.as_deref() {
+        Some(s) => annotate::postproc::parse_output_type(s)?,
+        None if args.bgzf_after => {
+            annotate::postproc::OutputKind::VcfGz(args.bgzf_level.unwrap_or(1))
+        }
+        None => annotate::postproc::OutputKind::Vcf,
+    };
+    let mut writer = crate::vcf::sink::StreamingVcfSink::new(Some(output), kind);
 
     let mut headers: Vec<String> = Vec::new();
     let mut iter = reader.lines();
@@ -380,7 +396,31 @@ fn apply_postproc_stream_with_args(
         }
     }
 
-    build_predicates_from_headers(args, &headers, &mut pp)?;
+    let out_headers = prepare_postproc_headers(headers, args, &mut pp)?;
+    for h in &out_headers {
+        writer.write_all(h.as_bytes())?;
+        writer.write_all(b"\n")?;
+    }
+    let mut canon = crate::vcf::RecordCanon::from_headers(&out_headers);
+
+    if let Some(line) = first_record {
+        write_processed_line(&mut writer, &line, &pp, &mut canon)?;
+    }
+    for line in iter {
+        let line = line?;
+        write_processed_line(&mut writer, &line, &pp, &mut canon)?;
+    }
+    writer.finish()?;
+    Ok(())
+}
+
+fn prepare_postproc_headers(
+    headers: Vec<String>,
+    args: &AnnotateArgs,
+    pp: &mut annotate::postproc::PostProcessor,
+) -> Result<Vec<String>> {
+    use annotate::postproc::{HeaderOptions, apply_to_header, version_header_line};
+    build_predicates_from_headers(args, &headers, pp)?;
     let input_samples = extract_samples_from_chrom_line(&headers);
     if !input_samples.is_empty() {
         if let Some(spec) = &args.samples {
@@ -412,22 +452,7 @@ fn apply_postproc_stream_with_args(
         samples_keep: pp.samples_keep.as_deref(),
         version_line: Some(&version),
     };
-    let out_headers = apply_to_header(headers, &opts);
-    for h in &out_headers {
-        writer.write_all(h.as_bytes())?;
-        writer.write_all(b"\n")?;
-    }
-    let mut canon = crate::vcf::RecordCanon::from_headers(&out_headers);
-
-    if let Some(line) = first_record {
-        write_processed_line(&mut writer, &line, &pp, &mut canon)?;
-    }
-    for line in iter {
-        let line = line?;
-        write_processed_line(&mut writer, &line, &pp, &mut canon)?;
-    }
-    writer.flush()?;
-    Ok(())
+    Ok(apply_to_header(headers, &opts))
 }
 
 fn write_processed_line<W: Write>(
@@ -453,29 +478,6 @@ fn extract_samples_from_chrom_line(headers: &[String]) -> Vec<String> {
     crate::vcf::header::extract_samples(headers)
 }
 
-fn write_output_index(out: &Path, fmt: &str) -> Result<()> {
-    let ext = if fmt.eq_ignore_ascii_case("tbi") {
-        "tbi"
-    } else {
-        "csi"
-    };
-    let idx = std::path::PathBuf::from(format!("{}.{}", out.display(), ext));
-    match crate::csi::build_csi_index(out, &idx) {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            eprintln!("[annotate] -W {}: {}", fmt, e);
-            Ok(())
-        }
-    }
-}
-
-/// Default ceiling (compressed input MB) for the .ktile auto-build size
-/// guard. With the new sliding-window pool reader, the previous
-/// "RAM thrashing" reason for the guard is gone — the guard is now
-/// purely a *disk-space* protection: a 60 GB sidecar for a single
-/// 1.3 GB compressed input is wasteful unless you re-annotate often.
-/// Default 2 GB compressed (≈ 60-80 GB decompressed sidecar). Override
-/// with `KIRA_BT_KTILE_MAX_INPUT_MB`.
 const KTILE_AUTOBUILD_MAX_INPUT_MB_DEFAULT: u64 = 2 * 1024;
 
 /// Returns the auto-build size threshold in bytes. Reads
@@ -517,7 +519,7 @@ fn resolve_ktile_or_fallback(
         KtileFreshness, check_ktile_freshness, ktile_path_for, write_ktile_from_vcf,
     };
 
-    if no_ktile {
+    if no_ktile || input_path == Path::new("-") {
         return input_path.to_path_buf();
     }
 
@@ -1162,35 +1164,6 @@ fn resolve_output_path(output: &Path, bgzf_after: bool) -> Result<(PathBuf, Opti
     Ok((tmp, Some(tmp_clone)))
 }
 
-fn compress_plain_to_bgzf(input: &Path, output: &Path, level: Option<u32>) -> Result<()> {
-    let timing = std::env::var("KIRA_BT_TIMING").is_ok();
-    let start = std::time::Instant::now();
-    if timing {
-        eprintln!("[bgzf-after] start: input={:?}, output={:?}", input, output);
-    }
-    let file = File::open(input).with_context(|| format!("Failed to open {:?}", input))?;
-    let mut reader = BufReader::with_capacity(8 * 1024 * 1024, file);
-    let lvl = level.unwrap_or(1).min(9);
-    if timing {
-        eprintln!("[bgzf-after] level: {}", lvl);
-    }
-    let mut writer =
-        crate::bgzf::BgzfWriter::with_compression(output, flate2::Compression::new(lvl))?;
-    std::io::copy(&mut reader, &mut writer).context("Failed to write BGZF")?;
-    writer.finish().context("Failed to finalize BGZF")?;
-    if timing {
-        let input_len = std::fs::metadata(input).map(|m| m.len()).unwrap_or(0);
-        let output_len = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
-        eprintln!(
-            "[bgzf-after] done: {:.3}s, input={} bytes, output={} bytes",
-            start.elapsed().as_secs_f64(),
-            input_len,
-            output_len
-        );
-    }
-    Ok(())
-}
-
 pub fn cmd_annotate_index(args: AnnotateIndexArgs) -> Result<()> {
     let out = args.output.clone().unwrap_or_else(|| {
         let mut p = args.input.clone();
@@ -1210,6 +1183,17 @@ pub fn cmd_annotate_index(args: AnnotateIndexArgs) -> Result<()> {
     }
     write_ani_meta(&args.input, &out, None)?;
 
+    Ok(())
+}
+
+fn compress_plain_to_bgzf(input: &Path, output: &Path, level: Option<u32>) -> Result<()> {
+    let mut reader = BufReader::new(File::open(input)?);
+    let mut writer = crate::bgzf::BgzfWriter::with_compression(
+        output,
+        flate2::Compression::new(level.unwrap_or(1).min(9)),
+    )?;
+    std::io::copy(&mut reader, &mut writer)?;
+    writer.finish()?;
     Ok(())
 }
 

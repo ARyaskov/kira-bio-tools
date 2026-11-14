@@ -52,6 +52,10 @@ fn make_fixture(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let ref_path = dir.join("ref.fa");
     let mut f = std::fs::File::create(&ref_path).unwrap();
     writeln!(f, ">chrT").unwrap();
+    for _ in 0..16_333 {
+        writeln!(f, "{}", "N".repeat(60)).unwrap();
+    }
+    writeln!(f, "{}", "N".repeat(20)).unwrap();
     for chunk in reference.chunks(60) {
         f.write_all(chunk).unwrap();
         f.write_all(b"\n").unwrap();
@@ -213,7 +217,7 @@ fn windowed_mode_runs_the_call_stage_too() {
         &r1,
         &r2,
         &whole,
-        &["--call", "--call-ploidy", "1"],
+        &["--call", "--call-ploidy", "1", "--bam-markdup"],
     );
     let whole_text = std::fs::read_to_string(&whole).unwrap();
 
@@ -223,19 +227,69 @@ fn windowed_mode_runs_the_call_stage_too() {
         &r1,
         &r2,
         &windowed,
-        &["--call", "--call-ploidy", "1", "--window-mb", "1"],
+        &[
+            "--call",
+            "--call-ploidy",
+            "1",
+            "--bam-markdup",
+            "--window-mb",
+            "1",
+        ],
     );
     let windowed_text = std::fs::read_to_string(&windowed).unwrap();
 
-    let sites = |t: &str| -> Vec<String> {
-        data_lines(t)
-            .iter()
-            .map(|l| {
-                let mut f = l.split('\t');
-                format!("{}:{}", f.next().unwrap_or(""), f.next().unwrap_or(""))
-            })
-            .collect()
-    };
-    assert!(!sites(&whole_text).is_empty());
-    assert_eq!(sites(&windowed_text), sites(&whole_text));
+    let calls = data_lines(&whole_text);
+    assert!(!calls.is_empty());
+    let positions: Vec<u32> = calls
+        .iter()
+        .map(|line| line.split('\t').nth(1).unwrap().parse().unwrap())
+        .collect();
+    assert!(positions.iter().any(|p| *p < 1_000_000));
+    assert!(positions.iter().any(|p| *p > 1_000_000));
+    assert!(positions.contains(&1_000_001));
+    assert_eq!(
+        positions,
+        [985_001, 992_501, 1_000_001, 1_011_001, 1_024_001]
+    );
+    for call in &calls {
+        assert_eq!(sample_col(call).split(':').next(), Some("1"));
+    }
+    assert_eq!(data_lines(&windowed_text), calls);
+}
+
+#[test]
+fn all_unmapped_windowed_input_still_emits_a_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let reference = dir.path().join("ref.fa");
+    std::fs::write(
+        &reference,
+        format!(">chrT\n{}\n", String::from_utf8(dna(5000, 123)).unwrap()),
+    )
+    .unwrap();
+    let reads = dir.path().join("unmapped.fq");
+    std::fs::write(
+        &reads,
+        format!("@u\n{}\n+\n{}\n", "N".repeat(150), "I".repeat(150)),
+    )
+    .unwrap();
+    let out = dir.path().join("out.vcf");
+    let args = SolidArgs::try_parse_from([
+        "solid",
+        "--aligner-ref",
+        reference.to_str().unwrap(),
+        "--aligner-r1",
+        reads.to_str().unwrap(),
+        "--threads",
+        "1",
+        "--window-mb",
+        "1",
+        "--call",
+        "-o",
+        out.to_str().unwrap(),
+    ])
+    .unwrap();
+    cmd_solid(args).unwrap();
+    let output = std::fs::read_to_string(out).unwrap();
+    assert!(output.contains("#CHROM\t"));
+    assert!(data_lines(&output).is_empty());
 }

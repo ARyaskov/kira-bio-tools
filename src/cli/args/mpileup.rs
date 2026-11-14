@@ -16,6 +16,9 @@ pub struct MpileupArgs {
     #[arg(short = 'O', long = "output-type")]
     pub output_type: Option<String>,
 
+    #[arg(short = 'W', long = "write-index", num_args = 0..=1, default_missing_value = "csi")]
+    pub write_index: Option<String>,
+
     #[arg(short = 'f', long = "fasta-ref")]
     pub fasta_ref: Option<PathBuf>,
 

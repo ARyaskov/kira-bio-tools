@@ -16,8 +16,8 @@ use crate::regions::RegionSet;
 use anyhow::{Context, Result, bail};
 use core::fmt::NumBuffer;
 use noodles_sam::alignment::record::cigar::op::Kind;
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Reference contigs are loaded on demand through the `.fai` index.
@@ -224,12 +224,16 @@ pub fn cmd_mpileup(args: MpileupArgs) -> Result<()> {
     let regions = collect_regions(&args)?;
 
     let fasta = args.fasta_ref.as_ref().map(|p| load_fasta(p)).transpose()?;
-    let out_path = args
-        .output
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("out.mpileup.vcf"));
-    let mut out =
-        BufWriter::with_capacity(1 << 20, File::create(&out_path).context("create output")?);
+    if args.write_index.is_some() && args.output.as_deref().is_none_or(|p| p == Path::new("-")) {
+        bail!("--write-index requires an output file");
+    }
+    let kind = args
+        .output_type
+        .as_deref()
+        .map(crate::vcf::sink::parse_output_type)
+        .transpose()?
+        .unwrap_or(crate::vcf::sink::OutputKind::Vcf);
+    let mut out = crate::vcf::sink::StreamingVcfSink::new(args.output.as_deref(), kind);
 
     let timing = std::env::var("KIRA_BT_TIMING").is_ok();
     if args.stream {
@@ -250,8 +254,7 @@ pub fn cmd_mpileup(args: MpileupArgs) -> Result<()> {
             timing,
             &mut out,
         )?;
-        out.flush()?;
-        return Ok(());
+        return finish_output(out, &args);
     }
     if args.bcftools_layout && (args.regions.is_some() || args.regions_file.is_some()) {
         // bcftools walks `-r` regions one at a time, each with its own
@@ -301,8 +304,7 @@ pub fn cmd_mpileup(args: MpileupArgs) -> Result<()> {
             )?;
             header_written = true;
         }
-        out.flush()?;
-        return Ok(());
+        return finish_output(out, &args);
     }
     let region_list: Option<Vec<(String, u32, u32)>> = regions
         .as_ref()
@@ -354,7 +356,14 @@ pub fn cmd_mpileup(args: MpileupArgs) -> Result<()> {
         timing,
         &mut out,
     )?;
-    out.flush()?;
+    finish_output(out, &args)
+}
+
+fn finish_output(out: crate::vcf::sink::StreamingVcfSink, args: &MpileupArgs) -> Result<()> {
+    out.finish()?;
+    if let Some(format) = &args.write_index {
+        crate::vcf::sink::write_output_index(args.output.as_deref(), format)?;
+    }
     Ok(())
 }
 
@@ -408,9 +417,15 @@ fn build_sample_map(
 ) -> Result<(SampleMap, Vec<Option<usize>>)> {
     let mut smap = SampleMap::default();
     let mut ids = Vec::with_capacity(inputs.len());
+    let mut dictionary = None;
     for p in inputs {
         let h = BamReader::read_header_only(p, reference)
             .with_context(|| format!("open {}", p.display()))?;
+        if let Some(expected) = &dictionary {
+            validate_reference_dictionary(expected, &h)?;
+        } else {
+            dictionary = Some(h.clone());
+        }
         let id = smap.add_bam(&h, &p.to_string_lossy(), sopts);
         if id.is_none() {
             eprintln!(
@@ -424,6 +439,56 @@ fn build_sample_map(
         bail!("mpileup: failed to find a file header with usable read groups");
     }
     Ok((smap, ids))
+}
+
+fn validate_reference_dictionary(
+    expected: &noodles_sam::Header,
+    actual: &noodles_sam::Header,
+) -> Result<()> {
+    let a = expected.reference_sequences();
+    let b = actual.reference_sequences();
+    if a.len() != b.len()
+        || !a
+            .iter()
+            .zip(b.iter())
+            .all(|((an, av), (bn, bv))| an == bn && av.length() == bv.length())
+    {
+        bail!(
+            "mpileup: incompatible reference dictionaries: @SQ names, order and lengths must match"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod dictionary_tests {
+    use super::*;
+
+    fn header(entries: &[(&str, usize)]) -> noodles_sam::Header {
+        let mut builder = noodles_sam::Header::builder();
+        for (name, len) in entries {
+            builder = builder.add_reference_sequence(
+                *name,
+                noodles_sam::header::record::value::Map::<
+                    noodles_sam::header::record::value::map::ReferenceSequence,
+                >::new(std::num::NonZeroUsize::new(*len).unwrap()),
+            );
+        }
+        builder.build()
+    }
+
+    #[test]
+    fn regression_reference_names_order_and_lengths_must_agree() {
+        let a = header(&[("chr1", 1000), ("chr2", 2000)]);
+        assert!(validate_reference_dictionary(&a, &a).is_ok());
+        for b in [
+            header(&[("chr2", 2000), ("chr1", 1000)]),
+            header(&[("chr1", 1001), ("chr2", 2000)]),
+            header(&[("chr1", 1000)]),
+        ] {
+            assert!(validate_reference_dictionary(&a, &b).is_err());
+        }
+    }
 }
 
 /// Load one input with every read tagged by its sample.
@@ -512,13 +577,16 @@ fn ordered_regions(args: &MpileupArgs) -> Result<Vec<(String, u32, u32)>> {
     if let Some(f) = &args.regions_file {
         regs.extend(crate::cli::commands::tabix::read_region_file(f)?);
     }
-    let mut order: Vec<String> = Vec::new();
+    let mut order = HashMap::new();
     for (c, _, _) in &regs {
-        if !order.contains(c) {
-            order.push(c.clone());
-        }
+        let next = order.len();
+        order.entry(c.as_str()).or_insert(next);
     }
-    regs.sort_by_key(|(c, _, _)| order.iter().position(|x| x == c).unwrap_or(usize::MAX));
+    let ranks: HashMap<String, usize> = order
+        .into_iter()
+        .map(|(name, rank)| (name.to_string(), rank))
+        .collect();
+    regs.sort_by_key(|(c, _, _)| ranks[c]);
     Ok(regs)
 }
 
@@ -941,6 +1009,9 @@ pub fn run_mpileup_from_bams<W: Write>(
                 .cloned()
                 .unwrap_or_else(|| format!("sample{i}")),
         );
+    }
+    for bam in bams.iter().skip(1) {
+        validate_reference_dictionary(&bams[0].header, &bam.header)?;
     }
     let combined_filter = prepare_bams(
         &mut bams,
@@ -1526,50 +1597,54 @@ fn run_parallel<W: Write>(
         indicatif::ProgressDrawTarget::stderr_with_hz(2)
     });
 
-    let buffers: Vec<Vec<u8>> = chunks
-        .par_iter()
-        .map(|chunk| {
-            let mut buf: Vec<u8> = Vec::with_capacity(1 << 20);
-            let lo_pos = chunk.start.saturating_sub(max_span);
-            let per_sample: Vec<Vec<LiveRead>> = records_per_sample
-                .iter()
-                .map(|all| {
-                    let lo = all
-                        .partition_point(|lr| (lr.ref_id, lr.ref_start) < (chunk.ref_id, lo_pos));
-                    let hi = all.partition_point(|lr| {
-                        (lr.ref_id, lr.ref_start) < (chunk.ref_id, chunk.end)
-                    });
-                    all[lo..hi]
-                        .iter()
-                        .filter(|lr| lr.ref_id == chunk.ref_id && lr.ref_end_cached > chunk.start)
-                        .cloned()
-                        .collect()
-                })
-                .collect();
-            let _ = mpileup_engine_from_records_opts(
-                per_sample,
-                &engine_opts(ctx.args, min_mq, min_bq, skip_indels),
-                pos_filter.as_ref(),
-                None,
-                &mut |site, overlapping| {
-                    if site.ref_id != chunk.ref_id {
-                        return;
-                    }
-                    if site.pos < chunk.start || site.pos >= chunk.end {
-                        return;
-                    }
-                    emit_site(site, overlapping, ctx, &mut buf);
-                },
-            );
-            pb.inc(1);
-            buf
-        })
-        .collect();
-    pb.finish_with_message("ENGINE done");
-
-    for buf in buffers {
-        out.write_all(&buf)?;
+    for batch in chunks.chunks(rayon::current_num_threads().max(1)) {
+        let buffers: Vec<Vec<u8>> = batch
+            .par_iter()
+            .map(|chunk| {
+                let mut buf: Vec<u8> = Vec::with_capacity(1 << 20);
+                let lo_pos = chunk.start.saturating_sub(max_span);
+                let per_sample: Vec<Vec<LiveRead>> = records_per_sample
+                    .iter()
+                    .map(|all| {
+                        let lo = all.partition_point(|lr| {
+                            (lr.ref_id, lr.ref_start) < (chunk.ref_id, lo_pos)
+                        });
+                        let hi = all.partition_point(|lr| {
+                            (lr.ref_id, lr.ref_start) < (chunk.ref_id, chunk.end)
+                        });
+                        all[lo..hi]
+                            .iter()
+                            .filter(|lr| {
+                                lr.ref_id == chunk.ref_id && lr.ref_end_cached > chunk.start
+                            })
+                            .cloned()
+                            .collect()
+                    })
+                    .collect();
+                mpileup_engine_from_records_opts(
+                    per_sample,
+                    &engine_opts(ctx.args, min_mq, min_bq, skip_indels),
+                    pos_filter.as_ref(),
+                    None,
+                    &mut |site, overlapping| {
+                        if site.ref_id != chunk.ref_id {
+                            return;
+                        }
+                        if site.pos < chunk.start || site.pos >= chunk.end {
+                            return;
+                        }
+                        emit_site(site, overlapping, ctx, &mut buf);
+                    },
+                )?;
+                pb.inc(1);
+                Ok(buf)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for buf in buffers {
+            out.write_all(&buf)?;
+        }
     }
+    pb.finish_with_message("ENGINE done");
     Ok(())
 }
 

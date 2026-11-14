@@ -21,9 +21,9 @@
 //!   therefore also written to the window of their *leftmost* mate, keeping a
 //!   template's records together for the dedup pass.
 
-use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::BufWriter;
+use std::collections::{BTreeMap, VecDeque};
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -41,6 +41,7 @@ pub struct WindowSpiller {
     dir: PathBuf,
     window_len: u32,
     writers: BTreeMap<WindowId, BamFileWriter>,
+    order: VecDeque<WindowId>,
     counts: BTreeMap<WindowId, u64>,
     unplaced: Option<BamFileWriter>,
     unplaced_count: u64,
@@ -54,12 +55,22 @@ fn window_path(dir: &Path, id: WindowId) -> PathBuf {
     dir.join(format!("w_{}_{}.bam", id.0, id.1))
 }
 
+fn finish_writer(writer: BamFileWriter) -> Result<()> {
+    writer
+        .into_inner()
+        .finish()?
+        .into_inner()
+        .map_err(|e| anyhow::anyhow!("flush window spill: {e}"))?;
+    Ok(())
+}
+
 impl WindowSpiller {
     pub fn new(dir: PathBuf, window_len: u32) -> Self {
         Self {
             dir,
             window_len,
             writers: BTreeMap::new(),
+            order: VecDeque::new(),
             counts: BTreeMap::new(),
             unplaced: None,
             unplaced_count: 0,
@@ -93,7 +104,7 @@ impl WindowSpiller {
 
     /// Spill one record into every window that needs it.
     pub fn push(&mut self, header: &Header, rec: &RecordBuf) -> Result<()> {
-        let Some((ref_id, start, end)) = Self::span(rec) else {
+        let Some((ref_id, start, mut end)) = Self::span(rec) else {
             return self.push_unplaced(header, rec);
         };
 
@@ -101,7 +112,6 @@ impl WindowSpiller {
         let first_covered = start / wlen;
         // `end` is exclusive, so a record ending exactly on a boundary does not
         // reach into the next window.
-        let last_covered = (end - 1) / wlen;
 
         // Keep both mates of a template together so the dedup pass ranks them
         // against the same population.
@@ -109,25 +119,58 @@ impl WindowSpiller {
         if rec.mate_reference_sequence_id() == Some(ref_id)
             && let Some(mp) = rec.mate_alignment_start()
         {
-            template = template.min(usize::from(mp) - 1);
+            let mate_start = usize::from(mp) - 1;
+            template = template.min(mate_start);
+            end = end.max(mate_start.saturating_add(end - start));
+            end = end.max(template.saturating_add(rec.template_length().unsigned_abs() as usize));
         }
+        let last_covered = (end - 1) / wlen;
         let template_window = template / wlen;
 
         let lo = first_covered.min(template_window);
         let hi = last_covered.max(template_window);
         for w in lo..=hi {
             let id = (ref_id, w as u32);
-            // Split the borrows: `dir` is read while `writers` is mutated.
-            let Self { dir, writers, .. } = self;
-            if let std::collections::btree_map::Entry::Vacant(e) = writers.entry(id) {
-                let path = window_path(dir, id);
-                let file = File::create(&path)
-                    .with_context(|| format!("create window spill {}", path.display()))?;
-                let mut w = bam::io::Writer::new(BufWriter::with_capacity(1 << 20, file));
-                w.write_header(header).context("write spill header")?;
-                e.insert(w);
+            if !self.writers.contains_key(&id) {
+                if self.writers.len() >= 16 {
+                    let old = self.order.pop_front().unwrap();
+                    finish_writer(self.writers.remove(&old).unwrap())?;
+                }
+                let path = window_path(&self.dir, id);
+                let existing = self.counts.contains_key(&id);
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .truncate(!existing)
+                    .read(true)
+                    .write(true)
+                    .open(&path)?;
+                if existing {
+                    let len = file.metadata()?.len();
+                    let mut eof = [0; 28];
+                    file.seek(SeekFrom::End(-28))?;
+                    file.read_exact(&mut eof)?;
+                    if eof
+                        != [
+                            31, 139, 8, 4, 0, 0, 0, 0, 0, 255, 6, 0, 66, 67, 2, 0, 27, 0, 3, 0, 0,
+                            0, 0, 0, 0, 0, 0, 0,
+                        ]
+                    {
+                        anyhow::bail!("window spill has no BGZF terminator");
+                    }
+                    file.set_len(len - 28)?;
+                    file.seek(SeekFrom::End(0))?;
+                }
+                let mut writer = bam::io::Writer::new(BufWriter::with_capacity(1 << 16, file));
+                if !existing {
+                    writer.write_header(header).context("write spill header")?;
+                }
+                self.writers.insert(id, writer);
             }
-            writers
+            if let Some(i) = self.order.iter().position(|old| *old == id) {
+                self.order.remove(i);
+            }
+            self.order.push_back(id);
+            self.writers
                 .get_mut(&id)
                 .expect("writer just inserted")
                 .write_alignment_record(header, rec as &dyn sam::alignment::Record)
@@ -163,11 +206,10 @@ impl WindowSpiller {
     /// Flush every writer and return the populated windows in coordinate order.
     pub fn finish(mut self) -> Result<Vec<SpilledWindow>> {
         for (_, w) in std::mem::take(&mut self.writers) {
-            let mut w = w;
-            w.try_finish().context("finish window spill")?;
+            finish_writer(w)?;
         }
-        if let Some(mut w) = self.unplaced.take() {
-            w.try_finish().context("finish unplaced spill")?;
+        if let Some(w) = self.unplaced.take() {
+            finish_writer(w)?;
         }
         let dir = self.dir.clone();
         let window_len = self.window_len;
@@ -307,7 +349,7 @@ mod tests {
         // window is 2, so it is written to 0, 1 and 2.
         assert_eq!(windows_touched(100, &rec(250, 20, Some(90))), [0, 1, 2]);
         // The mate itself sits in window 0 already.
-        assert_eq!(windows_touched(100, &rec(90, 20, Some(250))), [0, 1]);
+        assert_eq!(windows_touched(100, &rec(90, 20, Some(250))), [0, 1, 2]);
     }
 
     #[test]
@@ -350,5 +392,33 @@ mod tests {
             .map(|r| usize::from(r.alignment_start().unwrap()) - 1)
             .collect();
         assert_eq!(starts, [10, 40, 700]);
+    }
+
+    #[test]
+    fn evicted_windows_reopen_without_losing_or_duplicating_records() {
+        let h = header();
+        let dir = tempfile::tempdir().unwrap();
+        let mut spiller = WindowSpiller::new(dir.path().to_path_buf(), 10);
+        for pass in 0..2 {
+            for i in 0..40 {
+                spiller.push(&h, &rec(i * 20 + pass, 1, None)).unwrap();
+                assert!(spiller.writers.len() <= 16);
+            }
+        }
+        let windows = spiller.finish().unwrap();
+        assert_eq!(windows.len(), 40);
+        for window in windows {
+            let (_, records) = window.load().unwrap();
+            assert_eq!(records.len(), 2);
+            let start = window.id.1 as usize * 10;
+            assert_eq!(
+                usize::from(records[0].alignment_start().unwrap()) - 1,
+                start
+            );
+            assert_eq!(
+                usize::from(records[1].alignment_start().unwrap()) - 1,
+                start + 1
+            );
+        }
     }
 }

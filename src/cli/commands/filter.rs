@@ -866,6 +866,20 @@ fn load_mask(args: &FilterArgs) -> Result<Option<MaskSource>> {
     if regions.is_empty() {
         return Ok(None);
     }
+    for list in regions.values_mut() {
+        list.sort_unstable();
+        let mut merged: Vec<(u32, u32)> = Vec::with_capacity(list.len());
+        for (start, end) in list.drain(..) {
+            if let Some(last) = merged.last_mut()
+                && start <= last.1
+            {
+                last.1 = last.1.max(end);
+            } else {
+                merged.push((start, end));
+            }
+        }
+        *list = merged;
+    }
     let overlap = args.mask_overlap.unwrap_or(1);
     Ok(Some(MaskSource::Regions(MaskConfig {
         regions,
@@ -919,15 +933,10 @@ fn mask_pass_bitmap(mask: &BitmapMask, rec: &VcfRecord) -> bool {
 
 fn mask_pass_regions(mask: &MaskConfig, rec: &VcfRecord) -> bool {
     let (beg, end) = mask_bounds(rec, mask.overlap);
-    let mut hit = false;
-    if let Some(list) = mask.regions.get(&rec.chrom) {
-        for (s, e) in list {
-            if *s <= end && *e >= beg {
-                hit = true;
-                break;
-            }
-        }
-    }
+    let hit = mask.regions.get(&rec.chrom).is_some_and(|list| {
+        let i = list.partition_point(|(start, _)| *start <= end);
+        i > 0 && list[i - 1].1 >= beg
+    });
     if mask.negate { hit } else { !hit }
 }
 
@@ -1592,5 +1601,47 @@ fn alt_count(rec: &VcfRecord) -> usize {
         0
     } else {
         rec.alt.split(',').count()
+    }
+}
+
+#[cfg(test)]
+mod mask_regression_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Args {
+        #[command(flatten)]
+        inner: FilterArgs,
+    }
+
+    #[test]
+    fn adjacent_masks_preserve_an_insertion_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.vcf");
+        let output = dir.path().join("out.vcf");
+        std::fs::write(&input, "##fileformat=VCFv4.2\n##contig=<ID=chr1,length=1000>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t9\t.\tA\tAT\t.\tPASS\t.\n").unwrap();
+        for (mask, expected) in [("chr1:9-9,chr1:10-10", "PASS"), ("chr1:9-10", "MASK")] {
+            let args = Args::try_parse_from([
+                "filter",
+                input.to_str().unwrap(),
+                "-o",
+                output.to_str().unwrap(),
+                "--no-version",
+                "--soft-filter",
+                "MASK",
+                "--mask",
+                mask,
+                "--mask-overlap",
+                "2",
+            ])
+            .unwrap();
+            cmd_filter(&args.inner).unwrap();
+            let result = std::fs::read_to_string(&output).unwrap();
+            assert_eq!(
+                result.lines().last().unwrap().split('\t').nth(6),
+                Some(expected)
+            );
+        }
     }
 }

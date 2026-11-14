@@ -20,35 +20,33 @@ pub fn cmd_samview(args: SamViewArgs) -> Result<()> {
 
     let use_index = args.region.is_some() && bai_path(&args.input).is_some();
 
-    let header;
-    let mut iter: Box<dyn Iterator<Item = std::io::Result<bam::Record>>>;
     if use_index {
-        let mut ir = bam::io::indexed_reader::Builder::default()
+        let mut reader = bam::io::indexed_reader::Builder::default()
             .build_from_path(&args.input)
-            .with_context(|| format!("open indexed BAM {:?}", args.input))?;
-        header = ir.read_header().context("read BAM header")?;
-        let reg_str = args.region.as_deref().unwrap();
-        let reg: noodles_core::Region = reg_str
+            .context("open indexed BAM")?;
+        let header = reader.read_header().context("read BAM header")?;
+        let region: noodles_core::Region = args
+            .region
+            .as_deref()
+            .unwrap()
             .parse()
-            .map_err(|e| anyhow::anyhow!("parse region {reg_str:?}: {e}"))?;
-        let query = ir.query(&header, &reg).context("query region")?;
-        let records: Vec<bam::Record> = query
-            .records()
-            .collect::<std::io::Result<Vec<_>>>()
-            .context("read indexed BAM records")?;
-        iter = Box::new(records.into_iter().map(Ok));
-        eprintln!("[samview] using index for region '{}'", reg_str);
+            .map_err(|e| anyhow::anyhow!("parse region: {e}"))?;
+        let query = reader.query(&header, &region).context("query region")?;
+        filter_records(&args, &header, query.records(), true)
     } else {
-        let f = File::open(&args.input).with_context(|| format!("open {:?}", args.input))?;
-        let mut reader = bam::io::Reader::new(f);
-        header = reader.read_header().context("read BAM header")?;
-        let records: Vec<bam::Record> = reader
-            .records()
-            .collect::<std::io::Result<Vec<_>>>()
-            .context("read BAM records")?;
-        iter = Box::new(records.into_iter().map(Ok));
+        let file = File::open(&args.input).context("open BAM")?;
+        let mut reader = bam::io::Reader::new(file);
+        let header = reader.read_header().context("read BAM header")?;
+        filter_records(&args, &header, reader.records(), false)
     }
+}
 
+fn filter_records(
+    args: &SamViewArgs,
+    header: &sam::Header,
+    iter: impl Iterator<Item = std::io::Result<bam::Record>>,
+    use_index: bool,
+) -> Result<()> {
     let mut bam_writer: Option<BamWriter> = None;
     let mut text_writer: Option<Box<dyn Write>> = None;
 
@@ -67,7 +65,7 @@ pub fn cmd_samview(args: SamViewArgs) -> Result<()> {
             .output
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from(default_name));
-        bam_writer = Some(BamWriter::create_kind(&out_path, &header, kind)?);
+        bam_writer = Some(BamWriter::create_kind(&out_path, header, kind)?);
     } else {
         let writer: Box<dyn Write> = match args.output.as_deref() {
             Some(p) => Box::new(BufWriter::with_capacity(1 << 20, File::create(p)?)),
@@ -79,7 +77,7 @@ pub fn cmd_samview(args: SamViewArgs) -> Result<()> {
     if (args.with_header || args.header_only)
         && let Some(w) = text_writer.as_mut()
     {
-        write_text_header(w, &header)?;
+        write_text_header(w, header)?;
     }
     if args.header_only {
         return finish(bam_writer, text_writer);
@@ -88,12 +86,12 @@ pub fn cmd_samview(args: SamViewArgs) -> Result<()> {
     let region_filter = if use_index {
         None
     } else {
-        parse_region(args.region.as_deref(), &header)?
+        parse_region(args.region.as_deref(), header)?
     };
     let mut n_count: u64 = 0;
     let mut rng_state: u64 = 0x9E3779B97F4A7C15;
 
-    for r in iter.by_ref() {
+    for r in iter {
         let rec = r.context("read BAM record")?;
         let flags = u16::from(rec.flags());
         if args.require_flags != 0 && (flags & args.require_flags) != args.require_flags {
@@ -151,7 +149,7 @@ pub fn cmd_samview(args: SamViewArgs) -> Result<()> {
         if let Some(bw) = bam_writer.as_mut() {
             bw.write_record(&rec)?;
         } else if let Some(tw) = text_writer.as_mut() {
-            write_sam_record(tw, &header, &rec)?;
+            write_sam_record(tw, header, &rec)?;
         }
     }
 

@@ -131,6 +131,59 @@ pub fn annotate_vcf_ani_v2_with_extra_headers(
     ram_max_mb: u32,
     extra_header_lines: &[String],
 ) -> Result<()> {
+    annotate_vcf_ani_v2_output(
+        db,
+        input,
+        output,
+        columns,
+        bgzf_level,
+        mmap_output,
+        mmap_no_flush,
+        ram_output,
+        ram_max_mb,
+        extra_header_lines,
+        None,
+    )
+}
+
+type BatchWriter =
+    Box<dyn FnOnce(crossbeam_channel::Receiver<AnnotatedBatch>, Vec<String>) -> Result<()> + Send>;
+
+pub fn annotate_vcf_ani_v2_with_writer(
+    db: &Path,
+    input: &Path,
+    columns: &[String],
+    extra_header_lines: &[String],
+    writer: BatchWriter,
+) -> Result<()> {
+    annotate_vcf_ani_v2_output(
+        db,
+        input,
+        Path::new("-"),
+        columns,
+        None,
+        false,
+        false,
+        false,
+        0,
+        extra_header_lines,
+        Some(writer),
+    )
+}
+
+fn annotate_vcf_ani_v2_output(
+    db: &Path,
+    input: &Path,
+    output: &Path,
+    columns: &[String],
+    bgzf_level: Option<u32>,
+    mmap_output: bool,
+    mmap_no_flush: bool,
+    ram_output: bool,
+    ram_max_mb: u32,
+    extra_header_lines: &[String],
+    custom_writer: Option<BatchWriter>,
+) -> Result<()> {
     let timing = std::env::var("KIRA_BT_TIMING").is_ok();
     let debug = std::env::var("KIRA_BT_DEBUG").is_ok() || timing;
     let start = Instant::now();
@@ -172,7 +225,11 @@ pub fn annotate_vcf_ani_v2_with_extra_headers(
         );
     }
 
-    let input_format = detect_format(input)?;
+    let input_format = if input == Path::new("-") {
+        None
+    } else {
+        Some(detect_format(input)?)
+    };
     let output_ext = output.extension().and_then(|s| s.to_str()).unwrap_or("");
     let output_wants_bgzf = matches!(output_ext, "gz" | "bgz" | "bgzf");
     let use_bgzf = output_wants_bgzf;
@@ -232,6 +289,9 @@ pub fn annotate_vcf_ani_v2_with_extra_headers(
 
     let output_clone = output.to_path_buf();
     let writer = thread::spawn(move || {
+        if let Some(write) = custom_writer {
+            return write(work_rx, merged_headers);
+        }
         writer_thread_annotated(
             work_rx,
             merged_headers,
@@ -247,10 +307,12 @@ pub fn annotate_vcf_ani_v2_with_extra_headers(
         )
     });
 
-    read_batches(&mut reader, read_tx, timing)?;
-
-    worker.join().unwrap()?;
-    writer.join().unwrap()?;
+    let read_result = read_batches(&mut reader, read_tx, timing);
+    let worker_result = worker.join();
+    let writer_result = writer.join();
+    writer_result.map_err(|_| anyhow::anyhow!("annotation writer panicked"))??;
+    worker_result.map_err(|_| anyhow::anyhow!("annotation worker panicked"))??;
+    read_result?;
 
     if debug {
         eprintln!(
