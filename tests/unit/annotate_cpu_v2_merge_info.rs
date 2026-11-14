@@ -1,5 +1,45 @@
 use super::*;
 
+#[test]
+fn integer_vectors_use_declared_type_when_replacing_missing_values() {
+    let bundles = ["T", "G"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, alt)| {
+            (
+                index,
+                AnnotationBundle {
+                    alt: alt.into(),
+                    id: None,
+                    qual: None,
+                    filter: None,
+                    db_ref: "C".into(),
+                    format_str: None,
+                    format_samples: Vec::new(),
+                    info: vec![StructuredInfoField {
+                        key: "COUNTS".into(),
+                        number: FieldNumber::A,
+                        ty: FieldType::Integer,
+                        values: vec![(index + 1).to_string()],
+                    }],
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let metadata = HashMap::from([("COUNTS".into(), FieldNumber::A)]);
+    let (mode, key) = AnnotateMode::parse("+COUNTS");
+    let merged = merge_info_fields(
+        "COUNTS=.,99",
+        &bundles,
+        &None,
+        "C",
+        &["T", "G"],
+        &metadata,
+        &[(key.to_string(), mode)],
+    );
+    assert_eq!(merged.map["COUNTS"], "1,2");
+}
+
 fn parse_to_pairs(info: &str) -> Vec<(String, String)> {
     parse_existing_info(info).into_iter().collect()
 }

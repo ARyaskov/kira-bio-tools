@@ -422,7 +422,47 @@ impl AniIndex {
         need_format: bool,
         info_filter: Option<&std::collections::HashSet<&str>>,
     ) -> Option<AnnotationBundle> {
+        self.lookup_exact_by_chr_id_pos_index_matching(
+            chr_id,
+            pos,
+            rf,
+            rf_hash,
+            alt,
+            field_meta,
+            need_info,
+            need_format,
+            info_filter,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn lookup_exact_by_chr_id_pos_index_matching(
+        &self,
+        chr_id: u32,
+        pos: u32,
+        rf: &str,
+        rf_hash: u64,
+        alt: &str,
+        field_meta: &HashMap<String, FieldNumber>,
+        need_info: bool,
+        need_format: bool,
+        info_filter: Option<&std::collections::HashSet<&str>>,
+        end: Option<u32>,
+    ) -> Option<AnnotationBundle> {
         use crate::annotate::cpu_v2::vcmp;
+
+        let matches_end = |idx: usize| {
+            end.is_none_or(|end| {
+                self.entry_info_string(idx).is_some_and(|info| {
+                    info.split(';').find_map(|field| {
+                        field
+                            .strip_prefix("END=")
+                            .and_then(|value| value.parse::<u32>().ok())
+                    }) == Some(end)
+                })
+            })
+        };
 
         if let Some(list) = self.lookup_pos_index(chr_id, pos) {
             // Pass 1: exact REF + exact ALT. The fastest and overwhelmingly
@@ -431,7 +471,7 @@ impl AniIndex {
             // REF, as bcftools' default pair logic does.
             for &idx in list {
                 let e = &self.entries[idx as usize];
-                if e.chr_id != chr_id || e.pos != pos {
+                if e.chr_id != chr_id || e.pos != pos || !matches_end(idx as usize) {
                     continue;
                 }
                 let rf_str = self.read_cstring(e.ref_ofs as usize);
@@ -464,7 +504,7 @@ impl AniIndex {
             // mismatch — exactly the vcmp's territory.
             for &idx in list {
                 let e = &self.entries[idx as usize];
-                if e.chr_id != chr_id || e.pos != pos {
+                if e.chr_id != chr_id || e.pos != pos || !matches_end(idx as usize) {
                     continue;
                 }
                 let rf_str = self.read_cstring(e.ref_ofs as usize);
@@ -497,6 +537,10 @@ impl AniIndex {
         // same event written with different padding or anchored on the
         // other side still matches. A hit is re-expressed over the target's
         // REF so the A/R value mapping sees identical alleles.
+        if end.is_some() {
+            return None;
+        }
+
         if let Some(bundle) = self.lookup_canonical(
             chr_id,
             pos,

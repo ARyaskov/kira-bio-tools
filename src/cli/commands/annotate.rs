@@ -1072,6 +1072,13 @@ fn should_rebuild_ani(source: &Path, ani: &Path, columns: Option<&str>) -> Resul
     if !ani.exists() {
         return Ok(true);
     }
+    let mut index_header = [0u8; 16];
+    if std::io::Read::read_exact(&mut File::open(ani)?, &mut index_header).is_err()
+        || u64::from_le_bytes(index_header[8..16].try_into().unwrap())
+            != crate::annotate::structs::ani::ANI_VERSION
+    {
+        return Ok(true);
+    }
     let source_meta = std::fs::metadata(source)
         .with_context(|| format!("Failed to stat annotation source {:?}", source))?;
     let ani_meta =

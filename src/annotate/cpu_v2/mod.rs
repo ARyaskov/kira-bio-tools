@@ -78,12 +78,12 @@ fn synthetic_info_header_for_fixed_source(src_ref: &str, dst_id: &str) -> Option
         .to_ascii_uppercase();
     if src_upper == "ID" {
         return Some(format!(
-            "##INFO=<ID={dst_id},Number=1,Type=String,Description=\"Transferred ID column\">"
+            "##INFO=<ID={dst_id},Number=.,Type=String,Description=\"Transferred ID column\">"
         ));
     }
     if src_upper == "FILTER" {
         return Some(format!(
-            "##INFO=<ID={dst_id},Number=1,Type=String,Description=\"Transferred FILTER column\">"
+            "##INFO=<ID={dst_id},Number=.,Type=String,Description=\"Transferred FILTER column\">"
         ));
     }
     if src_upper == "QUAL" {
@@ -631,6 +631,29 @@ pub(crate) fn merge_annotation_headers(
         }
     }
 
+    extra.sort_by_key(|header| {
+        let id = extract_header_id(header).unwrap_or_default();
+        column_specs
+            .iter()
+            .position(|col| {
+                let (_, dst) = split_mapped_ref(&col.key);
+                if header.starts_with("##FILTER=") {
+                    dst.eq_ignore_ascii_case("FILTER")
+                } else if header.starts_with("##FORMAT=") {
+                    dst.eq_ignore_ascii_case("FMT")
+                        || dst.eq_ignore_ascii_case("FORMAT")
+                        || (is_format_ref(dst) && format_id_from_ref(dst) == id)
+                } else {
+                    !is_format_ref(dst)
+                        && !matches!(
+                            dst.to_ascii_uppercase().as_str(),
+                            "ID" | "QUAL" | "ALT" | "FILTER"
+                        )
+                        && info_id_from_ref(dst) == id
+                }
+            })
+            .unwrap_or(usize::MAX)
+    });
     merged.extend(extra);
 
     if let Some(chrom) = chrom_line {

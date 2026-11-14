@@ -3,6 +3,53 @@ use crate::annotate::cpu_v2::{ParsedFormat, ParsedSample};
 use std::collections::HashMap;
 
 #[test]
+fn structural_variants_match_end_in_all_annotation_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.vcf");
+    let index_path = dir.path().join("source.ani");
+    std::fs::write(&source, "##fileformat=VCFv4.2\n##contig=<ID=chr1>\n##INFO=<ID=END,Number=1,Type=Integer,Description=\"End\">\n##INFO=<ID=XX,Number=1,Type=String,Description=\"Annotation\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t10\t.\tC\t<DEL>\t.\t.\tEND=100;XX=short\nchr1\t10\t.\tC\t<DEL>\t.\t.\tEND=200;XX=long\n").unwrap();
+    crate::annotate::builder_v2::build_ani_index_auto_v2(&source, &index_path).unwrap();
+    let index = AniIndex::open(&index_path).unwrap();
+    let metadata = HashMap::new();
+    let columns = [("XX".to_string(), AnnotateMode::default_mode())];
+    for (end, annotation) in [(100, Some("short")), (200, Some("long")), (300, None)] {
+        let line = format!("chr1\t10\t.\tC\t<DEL>\t.\t.\tEND={end}");
+        let expected = match annotation {
+            Some(value) => format!("{line};XX={value}"),
+            None => line.clone(),
+        };
+        assert_eq!(
+            annotate_line(&line, &index, &metadata, &columns, &[], false, false),
+            expected
+        );
+        let keys = extract_line_keys(&line, &index, false).unwrap();
+        let hinted = annotate_line_with_mph_hints(
+            &line,
+            &keys,
+            &[Some(0)],
+            &index,
+            &metadata,
+            &columns,
+            &[],
+            false,
+            false,
+        );
+        assert_eq!(hinted.as_deref().unwrap_or(&line), expected);
+        let timed = annotate_line_with_timing(
+            &line,
+            &index,
+            &metadata,
+            &columns,
+            &[],
+            false,
+            false,
+            &BundleTimingAccum::new(),
+        );
+        assert_eq!(timed.as_deref().unwrap_or(&line), expected);
+    }
+}
+
+#[test]
 fn test_empty_sample_column_is_dot() {
     let vals = vec![String::new()];
     assert_eq!(normalize_sample_values(&vals), ".");

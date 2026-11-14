@@ -1498,7 +1498,14 @@ fn worker_loop_gpu(
 
         let lines: Vec<&str> = (0..batch.len()).map(|i| batch.line(i)).collect();
 
-        if use_cpu_annotate {
+        if use_cpu_annotate
+            || lines.iter().any(|line| {
+                line.split('\t').nth(4).is_some_and(|alts| {
+                    alts.split(',')
+                        .any(|alt| alt.starts_with('<') && alt != "<*>")
+                })
+            })
+        {
             let output: Vec<Option<String>> = pool.install(|| {
                 lines
                     .par_iter()
@@ -2396,7 +2403,16 @@ fn worker_loop_gpu_multi(
             }
         }
 
-        if use_cpu_annotate {
+        if use_cpu_annotate
+            || batches.iter().any(|batch| {
+                batch.lines.iter().any(|line| {
+                    line.split('\t').nth(4).is_some_and(|alts| {
+                        alts.split(',')
+                            .any(|alt| alt.starts_with('<') && alt != "<*>")
+                    })
+                })
+            })
+        {
             let annotated_batches: Vec<(usize, Vec<String>)> = batches
                 .iter()
                 .map(|batch| {

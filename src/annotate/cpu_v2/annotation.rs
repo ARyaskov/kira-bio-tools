@@ -504,13 +504,25 @@ pub fn annotate_line(
         return line.to_string();
     };
     let ref_hash = fast_hash64(ref_allele.as_bytes());
+    let end = if alt_alleles
+        .iter()
+        .any(|alt| alt.starts_with('<') && *alt != "<*>")
+    {
+        parsed.info.split(';').find_map(|field| {
+            field
+                .strip_prefix("END=")
+                .and_then(|value| value.parse::<u32>().ok())
+        })
+    } else {
+        None
+    };
 
     let need_info = info_overwrite_all || column_modes.iter().any(|(k, _)| column_targets_info(k));
     let need_format = want_format;
 
     let mut bundles = Vec::with_capacity(alt_alleles.len());
     for (vcf_idx, alt) in alt_alleles.iter().enumerate() {
-        if let Some(bundle) = ani.lookup_exact_by_chr_id_pos_index_opts(
+        if let Some(bundle) = ani.lookup_exact_by_chr_id_pos_index_matching(
             chr_id,
             pos,
             ref_allele,
@@ -519,6 +531,8 @@ pub fn annotate_line(
             field_meta,
             need_info,
             need_format,
+            None,
+            end,
         ) {
             if debug {
                 eprintln!(
@@ -662,8 +676,21 @@ pub fn annotate_line_with_mph_hints<'a>(
     let ref_allele = parsed.ref_allele;
     let pos = parsed.pos;
     let ref_hash = fast_hash64(ref_allele.as_bytes());
+    let end = if alt_alleles
+        .iter()
+        .any(|alt| alt.starts_with('<') && *alt != "<*>")
+    {
+        parsed.info.split(';').find_map(|field| {
+            field
+                .strip_prefix("END=")
+                .and_then(|value| value.parse::<u32>().ok())
+        })
+    } else {
+        None
+    };
 
     if entry_info_fast
+        && end.is_none()
         && alt_alleles.len() == 1
         && let Some(entry_idx) =
             exact_mph_entry_idx(ani, chr_id, pos, ref_allele, alt_alleles[0], mph_hits)
@@ -681,6 +708,7 @@ pub fn annotate_line_with_mph_hints<'a>(
     for (vcf_idx, alt) in alt_alleles.iter().enumerate() {
         let bundle = mph_hits
             .get(vcf_idx)
+            .filter(|_| end.is_none())
             .copied()
             .flatten()
             .and_then(|mph_idx| {
@@ -709,7 +737,7 @@ pub fn annotate_line_with_mph_hints<'a>(
                 ))
             })
             .or_else(|| {
-                ani.lookup_exact_by_chr_id_pos_index_opts_filtered(
+                ani.lookup_exact_by_chr_id_pos_index_matching(
                     chr_id,
                     pos,
                     ref_allele,
@@ -719,6 +747,7 @@ pub fn annotate_line_with_mph_hints<'a>(
                     need_info,
                     need_format,
                     info_filter.as_ref(),
+                    end,
                 )
             });
 
@@ -813,13 +842,25 @@ pub fn annotate_line_with_timing(
 
     let chr_id = ani.contig_id(chrom)?;
     let ref_hash = fast_hash64(ref_allele.as_bytes());
+    let end = if alt_alleles
+        .iter()
+        .any(|alt| alt.starts_with('<') && *alt != "<*>")
+    {
+        parsed.info.split(';').find_map(|field| {
+            field
+                .strip_prefix("END=")
+                .and_then(|value| value.parse::<u32>().ok())
+        })
+    } else {
+        None
+    };
 
     let need_info = info_overwrite_all || column_modes.iter().any(|(k, _)| column_targets_info(k));
     let need_format = want_format;
 
     let mut bundles = Vec::with_capacity(alt_alleles.len());
     for (vcf_idx, alt) in alt_alleles.iter().enumerate() {
-        if let Some(bundle) = ani.lookup_exact_by_chr_id_pos_index_opts(
+        if let Some(bundle) = ani.lookup_exact_by_chr_id_pos_index_matching(
             chr_id,
             pos,
             ref_allele,
@@ -828,6 +869,8 @@ pub fn annotate_line_with_timing(
             field_meta,
             need_info,
             need_format,
+            None,
+            end,
         ) {
             if debug {
                 eprintln!(
@@ -837,15 +880,21 @@ pub fn annotate_line_with_timing(
                 );
             }
             bundles.push((vcf_idx, bundle));
-        } else if let Some((bundle, t)) = ani.lookup_exact_by_chr_id_timed_opts(
-            chr_id,
-            pos,
-            ref_allele,
-            ref_hash,
-            alt_key(alt, column_modes),
-            need_info,
-            need_format,
-        ) {
+        } else if let Some((bundle, t)) = end
+            .is_none()
+            .then(|| {
+                ani.lookup_exact_by_chr_id_timed_opts(
+                    chr_id,
+                    pos,
+                    ref_allele,
+                    ref_hash,
+                    alt_key(alt, column_modes),
+                    need_info,
+                    need_format,
+                )
+            })
+            .flatten()
+        {
             if debug {
                 eprintln!(
                     "[ANNOTATE] Found bundle for ALT {}: INFO fields={}",

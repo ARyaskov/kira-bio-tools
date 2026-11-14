@@ -2,10 +2,12 @@ use crate::fx::FxHashMap;
 use indexmap::IndexMap;
 use std::collections::HashMap;
 
-use super::field_metadata::{infer_field_type, is_missing_value};
+use super::field_metadata::is_missing_value;
 use super::merge_info_helpers::*;
 use crate::annotate::structs::annotate_mode::AnnotateMode;
-use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber, StructuredInfoField};
+use crate::annotate::structs::bundle::{
+    AnnotationBundle, FieldNumber, FieldType, StructuredInfoField,
+};
 
 /// Threshold (in #fields per bundle) at which we flip from a linear scan over
 /// `bundle.info` to a hashmap.
@@ -223,8 +225,10 @@ pub fn merge_info_fields(
         } else {
             Vec::new()
         };
-        let field_type = infer_field_type(src_key);
-        let is_integer = field_type == "Integer";
+        let is_integer = bundle_lookups
+            .iter()
+            .find_map(|lookup| lookup.by_key.get(lookup.bundle, src_key))
+            .is_some_and(|field| field.ty == FieldType::Integer);
         if is_integer && let Some(idx) = existing_parts.iter().position(|v| is_missing_value(v)) {
             existing_parts.truncate(idx + 1);
         }

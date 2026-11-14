@@ -38,6 +38,19 @@ pub fn make_variant_key(chr_id: u32, pos: u32, ref_bytes: &[u8], alt_bytes: &[u8
     h.finish()
 }
 
+pub fn make_variant_key_with_end(
+    chr_id: u32,
+    pos: u32,
+    ref_bytes: &[u8],
+    alt_bytes: &[u8],
+    end: u32,
+) -> u64 {
+    let mut h = FxHasher::default();
+    h.write_u64(make_variant_key(chr_id, pos, ref_bytes, alt_bytes));
+    h.write_u32(end);
+    h.finish()
+}
+
 #[cfg(test)]
 #[path = "../../../../tests/unit/annotate_structs_ani_key.rs"]
 mod tests;

@@ -80,7 +80,25 @@ pub fn process_vcf_line_multiallelic_simd(
                 parsed.chrom, pos, parsed.ref_allele, alt_single, parsed.info, parsed.alt
             );
         }
-        let key = make_position_key(chr_id, pos, parsed.ref_allele.trim(), alt_single);
+        let key = if alt_single.starts_with('<') && alt_single != "<*>" {
+            let end = parsed.info.split(';').find_map(|field| {
+                field
+                    .strip_prefix("END=")
+                    .and_then(|value| value.parse::<u32>().ok())
+            });
+            match end {
+                Some(end) => crate::annotate::structs::ani::key::make_variant_key_with_end(
+                    chr_id,
+                    pos,
+                    parsed.ref_allele.trim().as_bytes(),
+                    alt_single.as_bytes(),
+                    end,
+                ),
+                None => make_position_key(chr_id, pos, parsed.ref_allele.trim(), alt_single),
+            }
+        } else {
+            make_position_key(chr_id, pos, parsed.ref_allele.trim(), alt_single)
+        };
 
         let alt_ofs = pool.append_cstr(alt_single);
         let samples_ofs = if samples.is_empty() {
