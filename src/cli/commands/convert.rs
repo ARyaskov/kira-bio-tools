@@ -483,14 +483,19 @@ fn sample_to_gen_probs(sample: &str, fmt: Option<&str>, tag: &str) -> (String, S
             };
             if tag == "PL" {
                 for v in &mut p {
-                    *v = 10f64.powf(-(*v) / 10.0);
+                    *v = 10f64.powf(-0.1 * *v);
                 }
             } else if tag == "GL" {
                 for v in &mut p {
                     *v = 10f64.powf(*v);
                 }
             }
-            let sum = p.iter().sum::<f64>();
+            let sum = if tag == "PL" {
+                p.iter()
+                    .fold(0.0f32, |sum, value| (sum as f64 + *value) as f32) as f64
+            } else {
+                p.iter().sum::<f64>()
+            };
             if sum > 0.0 {
                 if vals.len() == 2 && haploid {
                     return (
@@ -1180,3 +1185,7 @@ fn find_first_vcf_like(inputs: &[PathBuf]) -> Option<&PathBuf> {
             || s.ends_with(".bcf.gz")
     })
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/cli_commands_convert.rs"]
+mod tests;
