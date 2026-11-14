@@ -4,42 +4,120 @@
 //!   with no indels in CIGAR, so BAQ HMM is a no-op for it and can be skipped.
 
 use crate::fx::FxHashMap;
+use kira_kv_engine::EliasFano;
 use noodles_sam::alignment::record::cigar::op::Kind;
 use rayon::prelude::*;
 
 use crate::bam::pileup::LiveRead;
 use crate::bam::reader::FastaLike;
 
+enum Positions {
+    Plain(Vec<u32>),
+    Compact(Box<EliasFano>),
+}
+
+impl Default for Positions {
+    fn default() -> Self {
+        Self::Plain(Vec::new())
+    }
+}
+
+impl Positions {
+    fn len(&self) -> usize {
+        match self {
+            Self::Plain(positions) => positions.len(),
+            Self::Compact(positions) => positions.len(),
+        }
+    }
+
+    fn lower_bound(&self, pos: u32) -> usize {
+        match self {
+            Self::Plain(positions) => positions.partition_point(|&p| p < pos),
+            Self::Compact(positions) => {
+                let (mut lo, mut hi) = (0, positions.len());
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    if positions.get(mid) < u64::from(pos) {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                lo
+            }
+        }
+    }
+
+    fn get(&self, rank: usize) -> Option<u32> {
+        match self {
+            Self::Plain(positions) => positions.get(rank).copied(),
+            Self::Compact(positions) => {
+                (rank < positions.len()).then(|| positions.get(rank) as u32)
+            }
+        }
+    }
+
+    fn into_vec(self) -> Vec<u32> {
+        match self {
+            Self::Plain(positions) => positions,
+            Self::Compact(positions) => (0..positions.len())
+                .map(|i| positions.get(i) as u32)
+                .collect(),
+        }
+    }
+
+    fn freeze(&mut self) {
+        let Self::Plain(positions) = self else {
+            return;
+        };
+        if positions.len() >= 256 {
+            let keys: Vec<_> = positions.iter().map(|&p| u64::from(p)).collect();
+            if let Some(compact) = EliasFano::from_sorted(&keys)
+                && compact.memory_usage() + std::mem::size_of::<Self>()
+                    < positions.len() * std::mem::size_of::<u32>()
+            {
+                *self = Self::Compact(Box::new(compact));
+                return;
+            }
+        }
+        positions.shrink_to_fit();
+    }
+}
+
 pub struct InterestingMap {
-    per_ref: FxHashMap<usize, Vec<u32>>,
+    per_ref: FxHashMap<usize, Positions>,
 }
 
 impl InterestingMap {
     #[inline]
     pub fn next_at_or_after(&self, ref_id: usize, pos: u32) -> Option<u32> {
-        let v = self.per_ref.get(&ref_id)?;
-        let i = v.partition_point(|&p| p < pos);
-        v.get(i).copied()
+        let positions = self.per_ref.get(&ref_id)?;
+        positions.get(positions.lower_bound(pos))
     }
 
     pub fn total(&self) -> usize {
-        self.per_ref.values().map(|v| v.len()).sum()
+        self.per_ref.values().map(Positions::len).sum()
     }
 
     #[inline]
     pub fn contains(&self, ref_id: usize, pos: u32) -> bool {
-        self.per_ref
-            .get(&ref_id)
-            .is_some_and(|v| v.binary_search(&pos).is_ok())
+        self.next_at_or_after(ref_id, pos) == Some(pos)
     }
 
-    /// Union with another map (positions from all samples are interesting).
+    pub fn freeze(&mut self) {
+        for positions in self.per_ref.values_mut() {
+            positions.freeze();
+        }
+    }
+
     pub fn merge(&mut self, other: InterestingMap) {
-        for (rid, mut v) in other.per_ref {
-            let e = self.per_ref.entry(rid).or_default();
-            e.append(&mut v);
-            e.sort_unstable();
-            e.dedup();
+        for (rid, positions) in other.per_ref {
+            let entry = self.per_ref.entry(rid).or_default();
+            let mut merged = std::mem::take(entry).into_vec();
+            merged.extend(positions.into_vec());
+            merged.sort_unstable();
+            merged.dedup();
+            *entry = Positions::Plain(merged);
         }
     }
 }
@@ -191,7 +269,10 @@ pub fn pre_scan(
     let skipped_baq = needs_baq.iter().filter(|&&b| !b).count();
     PreScan {
         pos_filter: InterestingMap {
-            per_ref: all_positions,
+            per_ref: all_positions
+                .into_iter()
+                .map(|(rid, positions)| (rid, Positions::Plain(positions)))
+                .collect(),
         },
         needs_baq,
         skipped_baq,
@@ -289,7 +370,9 @@ pub fn build(
     fasta: &(impl FastaLike + Sync),
     ref_names: &[String],
 ) -> InterestingMap {
-    pre_scan(records_per_sample, fasta, ref_names, 2).pos_filter
+    let mut positions = pre_scan(records_per_sample, fasta, ref_names, 2).pos_filter;
+    positions.freeze();
+    positions
 }
 
 const RECAL_Q: usize = 64;
@@ -592,3 +675,7 @@ impl RecalTable {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/bam_pos_filter.rs"]
+mod tests;

@@ -143,6 +143,9 @@ fn prepare_bams(
             }
         }
     }
+    if let Some(filter) = &mut combined {
+        filter.freeze();
+    }
     combined
 }
 
@@ -1574,7 +1577,7 @@ fn run_parallel<W: Write>(
         }
         ctx.fasta.map(|fa| {
             let t = std::time::Instant::now();
-            let m = crate::bam::pos_filter::pre_scan(
+            let mut m = crate::bam::pos_filter::pre_scan(
                 &records_per_sample,
                 fa,
                 ctx.ref_names,
@@ -1588,6 +1591,7 @@ fn run_parallel<W: Write>(
                     t.elapsed().as_secs_f64()
                 );
             }
+            m.freeze();
             m
         })
     });
