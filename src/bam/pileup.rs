@@ -162,6 +162,7 @@ pub struct LiveRead {
     pub mate_pos: u32,
     /// BAQ has been applied (bcftools realigns a read once, lazily).
     pub realigned: bool,
+    overlap_processed: bool,
     /// `NM` tag (edit distance), -1 when absent.
     pub nm: i32,
     /// Stored `BQ` tag (BAQ offsets from `samtools calmd`), applied instead
@@ -247,6 +248,7 @@ impl LiveRead {
             qname_hash,
             mate_pos,
             realigned: false,
+            overlap_processed: false,
             nm: -1,
             bq_tag: None,
             cur_op: 0,
@@ -464,15 +466,43 @@ pub fn tweak_overlap_quality(a: &mut LiveRead, b: &mut LiveRead) {
     let pb = b.aligned_positions();
     let (la, lb) = (a.len as usize, b.len as usize);
     let a_keeps = a.qname_hash & 1 == 1;
+    let deleted = |read: &LiveRead, position: u32| {
+        let mut reference = read.ref_start;
+        for &(kind, length) in &read.cigar_pairs {
+            if kind == Kind::Deletion && (reference..reference + length).contains(&position) {
+                return true;
+            }
+            if is_aligned(kind) || matches!(kind, Kind::Deletion | Kind::Skip) {
+                reference += length;
+            }
+        }
+        false
+    };
     let (mut i, mut j) = (0usize, 0usize);
     while i < pa.len() && j < pb.len() {
         let (ra, qa) = pa[i];
         let (rb, qb) = pb[j];
         if ra < rb {
+            if deleted(b, ra) {
+                let data = std::sync::Arc::make_mut(&mut a.data);
+                data[la + qa as usize] = if a_keeps {
+                    (0.8 * data[la + qa as usize] as f64) as u8
+                } else {
+                    0
+                };
+            }
             i += 1;
             continue;
         }
         if rb < ra {
+            if deleted(a, rb) {
+                let data = std::sync::Arc::make_mut(&mut b.data);
+                data[lb + qb as usize] = if a_keeps {
+                    0
+                } else {
+                    (0.8 * data[lb + qb as usize] as f64) as u8
+                };
+            }
             j += 1;
             continue;
         }
@@ -515,8 +545,12 @@ pub fn tweak_overlap_quality(a: &mut LiveRead, b: &mut LiveRead) {
 /// that is already there (`bcftools mpileup` default; `-x` disables).
 /// Like htslib's `overlap_push`, only proper pairs with a mapped mate on
 /// the same contig take part.
-fn push_live(live: &mut VecDeque<LiveRead>, mut lr: LiveRead, overlaps: bool) {
-    if overlaps && lr.flags & 0x2 != 0 && lr.mate_pos != u32::MAX && lr.mate_pos <= lr.ref_start {
+fn fold_overlap(live: &mut VecDeque<LiveRead>, lr: &mut LiveRead) {
+    if !lr.overlap_processed
+        && lr.flags & 0x2 != 0
+        && lr.mate_pos != u32::MAX
+        && lr.mate_pos <= lr.ref_start
+    {
         let mate = live.iter_mut().rev().find(|m| {
             m.sample_idx == lr.sample_idx
                 && m.qname_hash == lr.qname_hash
@@ -524,8 +558,15 @@ fn push_live(live: &mut VecDeque<LiveRead>, mut lr: LiveRead, overlaps: bool) {
                 && m.mate_pos == lr.ref_start
         });
         if let Some(mate) = mate {
-            tweak_overlap_quality(mate, &mut lr);
+            tweak_overlap_quality(mate, lr);
+            lr.overlap_processed = true;
         }
+    }
+}
+
+fn push_live(live: &mut VecDeque<LiveRead>, mut lr: LiveRead, overlaps: bool) {
+    if overlaps {
+        fold_overlap(live, &mut lr);
     }
     live.push_back(lr);
 }
@@ -868,6 +909,11 @@ where
             }
         }
 
+        if overlaps {
+            for read in next.iter_mut().flatten() {
+                fold_overlap(&mut live, read);
+            }
+        }
         live.retain(|lr| lr.ref_end() > cur_pos);
         site.reset(cur_ref as usize, cur_pos, n_samples);
         if let Some(h) = hook.as_mut() {

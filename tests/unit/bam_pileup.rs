@@ -170,6 +170,85 @@ fn overlapping_mates_count_once() {
 }
 
 #[test]
+fn lookahead_pair_updates_neighbour_quality_before_emission() {
+    let mut a = LiveRead::new(
+        b"AAA",
+        &[36, 6, 30],
+        vec![(Kind::Match, 3)].into(),
+        0,
+        0,
+        60,
+        0,
+        0x3,
+    )
+    .with_mate(0, 1);
+    let mut b = LiveRead::new(
+        b"AAA",
+        &[30; 3],
+        vec![(Kind::Match, 3)].into(),
+        1,
+        0,
+        60,
+        0,
+        0x3,
+    )
+    .with_mate(0, 0);
+    a.qname_hash = 0;
+    b.qname_hash = 0;
+    let mut options = EngineOpts::new(0, 0, true, true);
+    options.delta_bq = Some(30);
+    let mut qualities = Vec::new();
+    mpileup_engine_from_records_opts(
+        vec![vec![a.clone(), b.clone()]],
+        &options,
+        None,
+        None,
+        &mut |site, _| {
+            qualities.push(site.per_sample[0].base_quals[0]);
+        },
+    )
+    .unwrap();
+    assert_eq!(qualities[0], 30);
+    let mut live = VecDeque::from([a]);
+    fold_overlap(&mut live, &mut b);
+    assert_eq!(adjusted_baseq(live[0].qual(), 0, Some(30), Some(60)), 30);
+    let before = b.qual().to_vec();
+    push_live(&mut live, b, true);
+    assert_eq!(live[1].qual(), before);
+}
+
+#[test]
+fn overlapping_deletion_downweights_unpaired_bases() {
+    for a_keeps in [false, true] {
+        let mut a = LiveRead::new(
+            b"AAAAAAAA",
+            &[40; 8],
+            vec![(Kind::Match, 8)].into(),
+            0,
+            0,
+            60,
+            0,
+            0,
+        );
+        let mut b = LiveRead::new(
+            b"AAAAAA",
+            &[30; 6],
+            vec![(Kind::Match, 3), (Kind::Deletion, 2), (Kind::Match, 3)].into(),
+            0,
+            0,
+            60,
+            0,
+            0,
+        );
+        a.qname_hash = u64::from(a_keeps);
+        tweak_overlap_quality(&mut a, &mut b);
+        assert_eq!(&a.qual()[3..5], if a_keeps { &[32, 32] } else { &[0, 0] });
+        assert_eq!(a.qual()[2], if a_keeps { 70 } else { 0 });
+        assert_eq!(b.qual()[2], if a_keeps { 0 } else { 70 });
+    }
+}
+
+#[test]
 fn tweak_overlap_quality_pools_agreeing_bases() {
     // qname hash bit 1 set: `a` keeps the pooled quality.
     let mut a = mk(0, 0x1, vec![(Kind::Match, 8)]).with_mate(1, 4);
