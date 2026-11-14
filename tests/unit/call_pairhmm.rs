@@ -1,5 +1,24 @@
 use super::*;
 
+#[test]
+fn prepared_haplotypes_match_individual_likelihoods() {
+    let haps = vec![
+        b"ACGTACGTACGT".to_vec(),
+        b"ACGTTCGTACGT".to_vec(),
+        b"ACGTTACGTACGT".to_vec(),
+    ];
+    let mut scorer = HaplotypeScorer::new(&haps);
+    for read in [b"ACGTACGT".as_slice(), b"ACGTTACGT", b"NNACGT"] {
+        let actual = scorer.score(read, &[35; 4]);
+        for (hap, actual) in haps.iter().zip(actual) {
+            assert_eq!(
+                actual.to_bits(),
+                read_vs_hap_loglik(read, &[35; 4], hap).to_bits()
+            );
+        }
+    }
+}
+
 fn q(n: usize) -> Vec<u8> {
     vec![40u8; n]
 }

@@ -95,9 +95,126 @@ pub fn glocal_loglik(
     iqual: Option<&[u8]>,
     c: &GlocalParams,
 ) -> f64 {
-    glocal(reference, query, iqual, c, false)
-        .map(|r| r.loglik)
-        .unwrap_or(f64::NEG_INFINITY)
+    thread_local! {
+        static SCRATCH: std::cell::RefCell<GlocalScratch> = std::cell::RefCell::new(GlocalScratch::default());
+    }
+    SCRATCH
+        .with(|scratch| glocal_loglik_with(&mut scratch.borrow_mut(), reference, query, iqual, c))
+}
+
+pub fn glocal_loglik_with(
+    scratch: &mut GlocalScratch,
+    reference: &[u8],
+    query: &[u8],
+    iqual: Option<&[u8]>,
+    c: &GlocalParams,
+) -> f64 {
+    forward_loglik(scratch, reference, query, iqual, c).unwrap_or(f64::NEG_INFINITY)
+}
+
+fn forward_loglik(
+    scratch: &mut GlocalScratch,
+    reference: &[u8],
+    query: &[u8],
+    iqual: Option<&[u8]>,
+    c: &GlocalParams,
+) -> Option<f64> {
+    let (nr, nq) = (reference.len(), query.len());
+    if nr == 0 || nq == 0 {
+        return None;
+    }
+    let bw = nr.max(nq).min(c.bw).max(nr.abs_diff(nq));
+    let bw2 = bw * 2 + 1;
+    let width = bw2 + 2;
+    let GlocalScratch { fm, fi, fd, em, .. } = scratch;
+    for plane in [&mut *fm, &mut *fi, &mut *fd] {
+        plane.clear();
+        plane.resize(width * 2, 0.0);
+    }
+    em.resize(width, 0.0);
+    let sm = 1.0 / (2.0 * nq as f64 + 2.0);
+    let si = sm;
+    let m = [
+        (1.0 - c.d - c.d) * (1.0 - sm),
+        c.d * (1.0 - sm),
+        c.d * (1.0 - sm),
+        (1.0 - c.e) * (1.0 - si),
+        c.e * (1.0 - si),
+        0.0,
+        1.0 - c.e,
+        0.0,
+        c.e,
+    ];
+    let bm = (1.0 - c.d) / nr as f64;
+    let bi = c.d / nr as f64;
+    let qual =
+        |i: usize| QUAL2PROB[iqual.and_then(|q| q.get(i - 1)).copied().unwrap_or(30) as usize];
+    let xof = |i: usize| i.saturating_sub(bw);
+    let mut sum = 0.0;
+    let x = xof(1);
+    for k in 1..=nr.min(bw + 1) {
+        let j = width + k - x + 1;
+        fm[j] = emit(reference[k - 1], query[0], qual(1)) * bm;
+        fi[j] = EI * bi;
+        sum += fm[j] + fi[j];
+    }
+    for k in 1..=nr.min(bw + 1) {
+        let j = width + k - x + 1;
+        fm[j] /= sum;
+        fi[j] /= sum;
+        fd[j] /= sum;
+    }
+    let ln = |v: f64| if v > 0.0 { v.ln() } else { f64::NEG_INFINITY };
+    let mut loglik = 0.0;
+    loglik += ln(sum);
+    for i in 2..=nq {
+        let cur = (i % 2) * width;
+        let prev = ((i - 1) % 2) * width;
+        fm[cur..cur + width].fill(0.0);
+        fi[cur..cur + width].fill(0.0);
+        fd[cur..cur + width].fill(0.0);
+        let x = xof(i);
+        let d = x - xof(i - 1);
+        let jb = 1usize.max(i.saturating_sub(bw)) - x;
+        let je = nr.min(i + bw) - x;
+        for j in jb..=je {
+            em[j] = emit(reference[j + x - 1], query[i - 1], qual(i));
+        }
+        for j in jb..=je {
+            let diag = prev + j + d;
+            let up = diag + 1;
+            fm[cur + j + 1] = em[j] * (m[0] * fm[diag] + m[3] * fi[diag] + m[6] * fd[diag]);
+            fi[cur + j + 1] = EI * (m[1] * fm[up] + m[4] * fi[up]);
+        }
+        sum = 0.0;
+        for j in jb..=je {
+            let left = cur + j;
+            let dcell = m[2] * fm[left] + m[8] * fd[left];
+            fd[left + 1] = dcell;
+            sum += fm[left + 1] + fi[left + 1] + dcell;
+        }
+        if sum <= 0.0 {
+            return None;
+        }
+        loglik += ln(sum);
+        let inv = 1.0 / sum;
+        for j in jb..=je {
+            fm[cur + j + 1] *= inv;
+            fi[cur + j + 1] *= inv;
+            fd[cur + j + 1] *= inv;
+        }
+    }
+    sum = 0.0;
+    let x = xof(nq);
+    let row = (nq % 2) * width;
+    for k in 1..=nr {
+        if k >= x && k < x + bw2 {
+            let j = row + k - x + 1;
+            sum += fm[j] * sm + fi[j] * si;
+        }
+    }
+    loglik += ln(sum);
+    Some(loglik + ((nr * nq) as f64).ln())
 }
 
 /// `reference` and `query` are nucleotide codes ([`encode_nt`]); `iqual` are

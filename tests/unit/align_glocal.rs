@@ -7,6 +7,36 @@ fn enc(s: &[u8]) -> Vec<u8> {
 const REF: &[u8] = b"TTGACCGTAGACGTTCAGGCTAGCGATCCATTGCAAGTCGA";
 
 #[test]
+fn rolling_forward_matches_full_history_bit_for_bit() {
+    let mut scratch = GlocalScratch::default();
+    for nr in [1, 2, 7, 23, 60] {
+        for nq in [1, 2, 9, 31, 60] {
+            for bw in [0, 2, 10, 80] {
+                let reference: Vec<u8> = (0..nr).map(|i| ((i * 7 + i / 3) % 5) as u8).collect();
+                let query: Vec<u8> = (0..nq).map(|i| ((i * 3 + i / 7) % 5) as u8).collect();
+                let quals: Vec<u8> = (0..nq).map(|i| (1 + i % 60) as u8).collect();
+                let params = GlocalParams {
+                    bw,
+                    ..Default::default()
+                };
+                let expected = glocal(&reference, &query, Some(&quals), &params, false)
+                    .unwrap()
+                    .loglik;
+                let actual =
+                    glocal_loglik_with(&mut scratch, &reference, &query, Some(&quals), &params);
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "nr={nr} nq={nq} bw={bw}"
+                );
+                let width = nr.max(nq).min(bw).max(nr.abs_diff(nq)) * 2 + 3;
+                assert_eq!(scratch.fm.len(), width * 2);
+            }
+        }
+    }
+}
+
+#[test]
 fn perfect_match_has_confident_states() {
     let r = enc(REF);
     let q = enc(&REF[10..26]);

@@ -12,7 +12,7 @@
 
 use crate::bam::pileup::LiveRead;
 use crate::call::haplotype::{AssembledCall, Indel, indel_alleles};
-use crate::call::pairhmm::read_vs_hap_loglik;
+use crate::call::pairhmm::HaplotypeScorer;
 use crate::fx::FxHashMap;
 
 #[derive(Clone, Debug)]
@@ -443,10 +443,8 @@ pub fn calls_from_haplotypes(
         return Vec::new();
     }
     // Read-vs-haplotype log-likelihoods.
-    let ll: Vec<Vec<f64>> = reads
-        .iter()
-        .map(|(b, q, _)| haps.iter().map(|h| read_vs_hap_loglik(b, q, h)).collect())
-        .collect();
+    let mut scorer = HaplotypeScorer::new(&haps);
+    let ll: Vec<Vec<f64>> = reads.iter().map(|(b, q, _)| scorer.score(b, q)).collect();
     let total = reads.len() as u32;
     let mut out = Vec::new();
     for (ev, carriers) in &events {
