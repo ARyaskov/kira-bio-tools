@@ -308,6 +308,10 @@ pub fn encode_record_opts<W: Write>(
 }
 
 fn encode_info_value<W: Write>(w: &mut W, typ: &str, v: Option<&str>, _key: &str) -> Result<()> {
+    if typ == "Flag" {
+        w.write_all(&[BT_NULL])?;
+        return Ok(());
+    }
     let Some(val) = v else {
         w.write_all(&[(1u8 << 4) | BT_INT8, 1])?;
         return Ok(());
@@ -339,9 +343,6 @@ fn encode_info_value<W: Write>(w: &mut W, typ: &str, v: Option<&str>, _key: &str
                 })
                 .collect();
             write_typed_floats(w, &vals)?;
-        }
-        "Flag" => {
-            w.write_all(&[(1u8 << 4) | BT_INT8, 1])?;
         }
         _ => write_typed_string(w, val.as_bytes())?,
     }

@@ -17,6 +17,16 @@ fn dict_full() -> BcfHeaderDict {
 }
 
 #[test]
+fn flag_info_uses_a_null_typed_value() {
+    let mut bytes = Vec::new();
+    encode_info_value(&mut bytes, "Flag", None, "INDEL").unwrap();
+    assert_eq!(bytes, vec![0]);
+    bytes.clear();
+    encode_info_value(&mut bytes, "Flag", Some("1"), "INDEL").unwrap();
+    assert_eq!(bytes, vec![0]);
+}
+
+#[test]
 fn end_extends_bcf_intervals_for_every_alt_class() {
     let dict = dict_full();
     for alt in ["C", ".", "<NON_REF>", "<DEL>"] {

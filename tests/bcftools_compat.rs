@@ -462,3 +462,47 @@ fn unsorted_overlapping_masks_match_bcftools() {
         );
     }
 }
+
+#[test]
+#[ignore = "requires bcftools"]
+fn indel_flags_and_extents_survive_cross_tool_indexed_queries() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/mpileup/test25");
+    let dir = tempfile::tempdir().unwrap();
+    let reference = dir.path().join("ref.fa");
+    std::fs::copy(fixture.join("ref.fa"), &reference).unwrap();
+    let first = fixture.join("annot-NMBZ.3.1.bam");
+    let second = fixture.join("annot-NMBZ.3.2.bam");
+    let expected: Vec<String> = include_str!("fixtures/mpileup/test25.records.tsv")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    for (kind, name) in [("b", "indels.bcf"), ("z", "indels.vcf.gz")] {
+        let output = dir.path().join(name);
+        run(
+            &kira(),
+            &[
+                "mpileup",
+                first.to_str().unwrap(),
+                second.to_str().unwrap(),
+                "-f",
+                reference.to_str().unwrap(),
+                "-r",
+                "chr16:75",
+                "-a",
+                "-AD,INFO/NMBZ",
+                "-O",
+                kind,
+                "-o",
+                output.to_str().unwrap(),
+                "-W=csi",
+            ],
+        );
+        let records = run(&tool("bcftools"), &["view", "-H", output.to_str().unwrap()]);
+        assert_eq!(data(&records.stdout), expected, "{kind}");
+        let queried = run(
+            &tool("bcftools"),
+            &["view", "-H", "-r", "chr16:80", output.to_str().unwrap()],
+        );
+        assert_eq!(data(&queried.stdout), expected[1..], "{kind}");
+    }
+}
