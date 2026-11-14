@@ -79,6 +79,7 @@ impl MaskWith {
 pub struct Mask {
     pub with: MaskWith,
     regions: HashMap<String, Vec<(i64, i64)>>,
+    ordered: std::collections::HashSet<String>,
 }
 
 impl Mask {
@@ -112,10 +113,30 @@ impl Mask {
             };
             regions.entry(chr.to_string()).or_default().push((beg, end));
         }
-        for v in regions.values_mut() {
+        let mut ordered = std::collections::HashSet::new();
+        for (chr, v) in &mut regions {
             v.sort_unstable();
+            if v.iter().any(|&(beg, end)| beg > end) {
+                continue;
+            }
+            let mut count = 0;
+            for i in 0..v.len() {
+                let (beg, end) = v[i];
+                if count > 0 && beg <= v[count - 1].1.saturating_add(1) {
+                    v[count - 1].1 = v[count - 1].1.max(end);
+                } else {
+                    v[count] = (beg, end);
+                    count += 1;
+                }
+            }
+            v.truncate(count);
+            ordered.insert(chr.clone());
         }
-        Ok(Self { with, regions })
+        Ok(Self {
+            with,
+            regions,
+            ordered,
+        })
     }
 
     /// A character mask skips the variants it overlaps; case masks do not.
@@ -123,12 +144,27 @@ impl Mask {
         matches!(self.with, MaskWith::Char(_))
     }
 
-    fn overlapping(&self, chr: &str, beg: i64, end: i64) -> impl Iterator<Item = (i64, i64)> + '_ {
+    fn overlapping<'a>(
+        &'a self,
+        chr: &'a str,
+        beg: i64,
+        end: i64,
+    ) -> impl Iterator<Item = (i64, i64)> + 'a {
         self.regions
             .get(chr)
             .into_iter()
-            .flat_map(|v| v.iter().copied())
-            .filter(move |&(rb, re)| rb <= end && re >= beg)
+            .flat_map(move |v| {
+                let start = if self.ordered.contains(chr) {
+                    v.partition_point(|&(_, re)| re < beg)
+                } else {
+                    0
+                };
+                v[start..]
+                    .iter()
+                    .copied()
+                    .take_while(move |&(rb, _)| rb <= end)
+            })
+            .filter(move |&(_, re)| re >= beg)
     }
 
     fn overlaps(&self, chr: &str, beg: i64, end: i64) -> bool {

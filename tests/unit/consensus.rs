@@ -169,3 +169,54 @@ fn reference_iupac_call_preserves_bases_beyond_previous_deletion() {
     let (result, _) = run(&options, ">1\nCGGGACAC\n", records);
     assert_eq!(result, ">1\nNGAN\n");
 }
+
+#[test]
+fn mask_union_matches_linear_coverage_and_action_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mask.bed");
+    let intervals = [(8, 11), (1, 4), (3, 8), (15, 18), (16, 17)];
+    std::fs::write(
+        &path,
+        intervals
+            .iter()
+            .map(|(b, e)| format!("1\t{b}\t{e}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let mask = Mask::load(&path, MaskWith::Lower).unwrap();
+    assert_eq!(mask.regions["1"], vec![(1, 10), (15, 17)]);
+    for beg in -1..22 {
+        for end in beg..22 {
+            assert_eq!(
+                mask.overlaps("1", beg, end),
+                intervals.iter().any(|&(b, e)| b <= end && e > beg),
+                "{beg}..{end}"
+            );
+        }
+    }
+    let mut options = opts();
+    options.masks.push(mask);
+    std::fs::write(&path, "1\t3\t5\n").unwrap();
+    options
+        .masks
+        .push(Mask::load(&path, MaskWith::Upper).unwrap());
+    let (out, _) = run(&options, ">1\nACGTACGTACGTACGTACGT\n", vec![]);
+    assert_eq!(out, ">1\nAcgTAcgtacgTACGtacGT\n");
+}
+
+#[test]
+fn inverted_mask_intervals_keep_existing_overlap_semantics() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mask.bed");
+    std::fs::write(&path, "1\t9\t3\n1\t2\t4\n1\t14\t17\n").unwrap();
+    let mask = Mask::load(&path, MaskWith::Char(b'N')).unwrap();
+    let original = [(9, 2), (2, 3), (14, 16)];
+    for beg in 0..20 {
+        for end in beg..20 {
+            assert_eq!(
+                mask.overlaps("1", beg, end),
+                original.iter().any(|&(b, e)| b <= end && e >= beg)
+            );
+        }
+    }
+}
