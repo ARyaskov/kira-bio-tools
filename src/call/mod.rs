@@ -1,4 +1,5 @@
 pub mod assembly;
+mod consensus;
 pub mod gvcf;
 pub mod haplotype;
 pub mod math;

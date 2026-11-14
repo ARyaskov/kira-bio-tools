@@ -1,0 +1,30 @@
+##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##samtoolsVersion=1.1-19-g6b249e2+htslib-1.1-74-g845c515
+##samtoolsCommand=samtools mpileup -uvDV -b xxx//mpileup.bam.list -f xxx//mpileup.ref.fa.gz
+##reference=file://xxx//mpileup.ref.fa.gz
+##contig=<ID=17,length=81195210>
+##ALT=<ID=X,Description="Represents allele(s) other than observed.">
+##INFO=<ID=INDEL,Number=0,Type=Flag,Description="Indicates that the variant is an INDEL.">
+##INFO=<ID=IDV,Number=1,Type=Integer,Description="Maximum number of reads supporting an indel">
+##INFO=<ID=IMF,Number=1,Type=Float,Description="Maximum fraction of reads supporting an indel">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Raw read depth">
+##INFO=<ID=VDB,Number=1,Type=Float,Description="Variant Distance Bias for filtering splice-site artefacts in RNA-seq data (bigger is better)",Version="3">
+##INFO=<ID=RPB,Number=1,Type=Float,Description="Mann-Whitney U test of Read Position Bias (bigger is better)">
+##INFO=<ID=MQB,Number=1,Type=Float,Description="Mann-Whitney U test of Mapping Quality Bias (bigger is better)">
+##INFO=<ID=BQB,Number=1,Type=Float,Description="Mann-Whitney U test of Base Quality Bias (bigger is better)">
+##INFO=<ID=MQSB,Number=1,Type=Float,Description="Mann-Whitney U test of Mapping Quality vs Strand Bias (bigger is better)">
+##INFO=<ID=SGB,Number=1,Type=Float,Description="Segregation based metric.">
+##INFO=<ID=MQ0F,Number=1,Type=Float,Description="Fraction of MQ0 reads (smaller is better)">
+##INFO=<ID=I16,Number=16,Type=Float,Description="Auxiliary tag used for calling, see description of bcf_callret1_t in bam2bcf.h">
+##INFO=<ID=QS,Number=R,Type=Float,Description="Auxiliary tag used for calling">
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description="List of Phred-scaled genotype likelihoods">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Number of high-quality bases">
+##FORMAT=<ID=DV,Number=1,Type=Integer,Description="Number of high-quality non-reference bases">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	HG00100	HG00101	HG00102
+17	1	.	A	<X>	0	.	DP=11;I16=11,0,0,0,452,18594,0,0,319,9251,0,0,223,4959,0,0;QS=3,0;MQ0F=0	PL:DP:DV	0,15,100:5:0	0,9,72:3:0	0,9,72:3:0
+17	1948	.	G	C,<X>	0	.	DP=27;I16=14,12,0,1,966,36912,16,256,1560,93600,29,841,493,11135,25,625;QS=2.90361,0.0963855,0;SGB=-0.556633;RPB=1;MQB=1;MQSB=0.94394;BQB=1;MQ0F=0	PL:DP:DV	0,45,255,45,255,255:15:0	0,21,190,21,190,190:7:0	1,0,123,13,126,132:5:1
+17	1990	.	G	T,<X>	0	.	DP=28;I16=17,9,0,1,965,36359,33,1089,1560,93600,29,841,472,10250,25,625;QS=2.90675,0.0932476,0;SGB=-0.556633;RPB=1;MQB=1;MQSB=0.912952;BQB=1;MQ0F=0	PL:DP:DV	0,48,255,48,255,255:16:0	0,6,71,6,71,71:2:0	2,0,195,26,198,215:9:1
+17	2220	.	G	A,<X>	0	.	DP=21;I16=6,2,1,11,256,8364,474,19128,457,26569,720,43200,141,2959,233,5071;QS=0.886504,2.1135,0;VDB=0.532753;SGB=-3.51597;RPB=0.964198;MQB=0.898397;MQSB=0.875769;BQB=0.0354359;MQ0F=0	PL:DP:DV	139,0,130,157,148,255:12:6	69,0,46,75,52,119:4:2	131,12,0,131,12,131:4:4
+17	2713	.	G	T,<X>	0	.	DP=25;I16=13,11,0,1,915,35485,14,196,1378,80882,29,841,419,9369,25,625;QS=2.72549,0.27451,0;SGB=-0.556633;RPB=1;MQB=1;MQSB=0.569783;BQB=1;MQ0F=0	PL:DP:DV	0,57,255,57,255,255:19:0	0,12,131,12,131,131:4:0	8,0,31,11,34,42:2:1
+17	3936	.	A	G,<X>	0	.	DP=37;I16=5,6,6,17,424,16384,801,30271,609,34563,1314,77018,225,5325,511,11851;QS=0.87994,2.12006,0;VDB=0.0574114;SGB=-4.60123;RPB=0.741697;MQB=0.812605;MQSB=0.143788;BQB=0.883831;MQ0F=0	PL:DP:DV	233,0,206,255,239,255:20:11	77,0,58,83,70,141:6:4	196,24,0,196,24,196:8:8

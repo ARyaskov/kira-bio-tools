@@ -56,7 +56,12 @@ pub struct CallArgs {
     #[arg(short = 'g', long = "gvcf")]
     pub gvcf: Option<String>,
 
-    #[arg(short = 'a', long = "annotate")]
+    #[arg(
+        short = 'a',
+        short_alias = 'f',
+        long = "annotate",
+        alias = "format-fields"
+    )]
     pub annotate: Option<String>,
 
     #[arg(long = "ploidy")]

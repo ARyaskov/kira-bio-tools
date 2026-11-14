@@ -95,6 +95,8 @@ fn config_from_args(args: &CallArgs) -> Result<CallConfig> {
             CallMode::Multiallelic
         },
         variants_only: args.variants_only,
+        keep_alts: args.keep_alts,
+        consensus_threshold: args.pval_threshold,
         emit_gq,
         emit_gp,
         theta: args.prior,
