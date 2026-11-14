@@ -3,7 +3,7 @@ use bytemuck::{self, Pod, Zeroable};
 #[cfg(feature = "gpu")]
 use cust::memory::DeviceCopy;
 use flate2::{Decompress, FlushDecompress, Status};
-use kira_kv_engine::Index;
+use kira_kv_engine::{Index, PgmBuilder, PgmIndex};
 use memchr::memchr;
 use memmap2::{Mmap, MmapOptions};
 use std::cell::RefCell;
@@ -396,6 +396,7 @@ pub struct AniIndex {
     /// O(1) chr_id → index-into-`pos_index.contigs`. Dense `Vec` lookup table
     /// when there are ≤1024 contigs; `HashMap` otherwise.
     pos_contig_lut: PosContigLut,
+    pos_block_lut: HashMap<usize, Box<PgmIndex>>,
     info_blob: Option<AniInfoBlob>,
     /// Lazily computed on first access.
     info_cache: OnceLock<AniInfoCache>,
@@ -440,6 +441,123 @@ impl PosContigLut {
     }
 }
 
+fn build_pos_block_lut(pos_index: &AniPosIndex) -> HashMap<usize, Box<PgmIndex>> {
+    let mut directories = HashMap::new();
+    for (contig_idx, contig) in pos_index.contigs.iter().enumerate() {
+        let start = contig.block_start as usize;
+        let Some(end) = start.checked_add(contig.block_count as usize) else {
+            continue;
+        };
+        let Some(blocks) = pos_index.blocks.get(start..end) else {
+            continue;
+        };
+        if blocks.len() < 2048
+            || blocks.iter().any(|b| b.base_pos % 512 != 0)
+            || blocks
+                .windows(2)
+                .any(|pair| pair[0].base_pos >= pair[1].base_pos)
+        {
+            continue;
+        }
+        let first = blocks[0].base_pos / 512;
+        let last = blocks[blocks.len() - 1].base_pos / 512;
+        if (last.saturating_sub(first) as usize) < blocks.len() {
+            continue;
+        }
+        let keys = blocks.iter().map(|b| u64::from(b.base_pos / 512)).collect();
+        let Ok(directory) = PgmBuilder::new()
+            .with_epsilon(2)
+            .with_parallel(false)
+            .with_elias_fano(true)
+            .build(keys)
+        else {
+            continue;
+        };
+        let stats = directory.stats();
+        let search_steps = (stats.total_segments.max(1) - 1)
+            .checked_ilog2()
+            .map_or(0, |n| n + 1)
+            + 2 * stats.max_error
+            + 4;
+        let binary_steps = blocks.len().ilog2();
+        let memory = stats
+            .memory_usage
+            .saturating_add(mem::size_of::<PgmIndex>())
+            .saturating_add(stats.total_segments.saturating_mul(33))
+            .saturating_add(128);
+        if search_steps < binary_steps
+            && memory < blocks.len().saturating_mul(mem::size_of::<u32>())
+        {
+            directories.insert(contig_idx, Box::new(directory));
+        }
+    }
+    directories
+}
+
+pub(super) struct AniPosRange<'a> {
+    pos_index: Option<&'a AniPosIndex>,
+    blocks: &'a [AniPosBlock],
+    block_idx: usize,
+    word_idx: usize,
+    word_base: u32,
+    rank_base: usize,
+    original_mask: u64,
+    remaining: u64,
+    lo: u32,
+    hi: u32,
+}
+
+impl<'a> Iterator for AniPosRange<'a> {
+    type Item = (u32, &'a [u32]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let index = self.pos_index?;
+        loop {
+            if self.remaining != 0 {
+                let bit = self.remaining.trailing_zeros();
+                self.remaining &= self.remaining - 1;
+                let below = (1u64 << bit) - 1;
+                let rank = self.rank_base + (self.original_mask & below).count_ones() as usize;
+                let offset = *index.pos_offsets.get(rank)? as usize;
+                let count = *index.pos_counts.get(rank)? as usize;
+                let entries = index
+                    .entry_indices
+                    .get(offset..offset.checked_add(count)?)?;
+                return Some((self.word_base + bit, entries));
+            }
+            if self.word_idx == 8 {
+                self.word_idx = 0;
+                self.block_idx += 1;
+            }
+            let block = self.blocks.get(self.block_idx)?;
+            if block.base_pos > self.hi {
+                return None;
+            }
+            let word = self.word_idx;
+            self.word_idx += 1;
+            self.word_base = block.base_pos.checked_add(word as u32 * 64)?;
+            if self.word_base > self.hi {
+                return None;
+            }
+            let lower = self.lo.saturating_sub(self.word_base);
+            if lower >= 64 {
+                continue;
+            }
+            self.original_mask = block.masks[word];
+            self.remaining = self.original_mask & (u64::MAX << lower);
+            let upper = self.hi - self.word_base;
+            if upper < 63 {
+                self.remaining &= (1u64 << (upper + 1)) - 1;
+            }
+            self.rank_base = block.offsets_start as usize
+                + block.masks[..word]
+                    .iter()
+                    .map(|m| m.count_ones() as usize)
+                    .sum::<usize>();
+        }
+    }
+}
+
 impl AniIndex {
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
@@ -474,6 +592,11 @@ impl AniIndex {
             None => PosContigLut::Empty,
         };
 
+        let pos_block_lut = pos_index
+            .as_ref()
+            .map(build_pos_block_lut)
+            .unwrap_or_default();
+
         let mut ani = Self {
             header,
             index,
@@ -483,6 +606,7 @@ impl AniIndex {
             mmap,
             pos_index,
             pos_contig_lut,
+            pos_block_lut,
             info_blob,
             info_cache: OnceLock::new(),
             contigs,
@@ -600,10 +724,21 @@ impl AniIndex {
         let end = start + contig.block_count as usize;
         let blocks = &pos_index.blocks[start..end];
         let base = (pos / 512) * 512;
-        let Ok(block_idx) = blocks.binary_search_by_key(&base, |b| b.base_pos) else {
-            return None;
+        let block_idx = if let Some(directory) = self.pos_block_lut.get(&contig_idx) {
+            directory.index(u64::from(base / 512)).ok()?
+        } else if blocks.last()?.base_pos.checked_sub(blocks[0].base_pos)
+            == u32::try_from(blocks.len() - 1)
+                .ok()
+                .and_then(|count| count.checked_mul(512))
+        {
+            (base.checked_sub(blocks[0].base_pos)? / 512) as usize
+        } else {
+            blocks.binary_search_by_key(&base, |b| b.base_pos).ok()?
         };
-        let block = &blocks[block_idx];
+        let block = blocks.get(block_idx)?;
+        if block.base_pos != base {
+            return None;
+        }
         let bit = (pos - base) as usize;
         let word = bit / 64;
         let bit_in_word = bit % 64;
@@ -626,6 +761,45 @@ impl AniIndex {
         let offset = *pos_index.pos_offsets.get(pos_idx)? as usize;
         let end = offset + count;
         pos_index.entry_indices.get(offset..end)
+    }
+
+    pub(super) fn pos_index_range(&self, chr_id: u32, lo: u32, hi: u32) -> AniPosRange<'_> {
+        let mut range = AniPosRange {
+            pos_index: self.pos_index.as_ref(),
+            blocks: &[],
+            block_idx: 0,
+            word_idx: 0,
+            word_base: 0,
+            rank_base: 0,
+            original_mask: 0,
+            remaining: 0,
+            lo,
+            hi,
+        };
+        if lo > hi {
+            return range;
+        }
+        let Some(index) = self.pos_index.as_ref() else {
+            return range;
+        };
+        let Some(contig_idx) = self.pos_contig_lut.get(chr_id) else {
+            return range;
+        };
+        let contig = &index.contigs[contig_idx];
+        let start = contig.block_start as usize;
+        let Some(end) = start.checked_add(contig.block_count as usize) else {
+            return range;
+        };
+        let Some(blocks) = index.blocks.get(start..end) else {
+            return range;
+        };
+        let base = lo / 512 * 512;
+        range.block_idx = match self.pos_block_lut.get(&contig_idx) {
+            Some(directory) => directory.lower_bound(u64::from(base / 512)),
+            None => blocks.partition_point(|block| block.base_pos < base),
+        };
+        range.blocks = blocks;
+        range
     }
 
     pub fn has_pos_index(&self) -> bool {

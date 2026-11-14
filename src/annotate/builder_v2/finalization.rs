@@ -66,72 +66,50 @@ pub fn finalize_ani_index(
         );
     }
 
-    // Reorder source entries into MPH-slot order. We need idx[i] for every i in
-    // 0..n, so we pull all of them in one SIMD-batched pass: lookup_batch_u64_simd
-    // processes 4 keys per AVX2 hash + 16-deep prefetch chain (2-3× faster than
-    // calling lookup_u64 N times, ~5-15s saved on a 10^8-key build).
     let reorder_start = std::time::Instant::now();
-    let keys_u64: Vec<u64> = keys_bytes
-        .iter()
-        .map(|kb| u64::from_le_bytes(*kb))
-        .collect();
-    let idxs: Vec<Option<usize>> = index.lookup_batch_u64_simd(&keys_u64);
+    let slot_count = index.slot_capacity();
+    let mut entries = vec![ani_sentinel_entry(); slot_count];
+    let mut keys_ordered = vec![0u64; slot_count];
+    let mut slot_filled = vec![false; slot_count];
+    let mut keys = [0u64; 4096];
+    let mut canonical = [0u64; 4096];
+    let mut hits = [None; 4096];
+    for (chunk_idx, chunk) in rows.chunks(4096).enumerate() {
+        let len = chunk.len();
+        for (dst, (key, _)) in keys.iter_mut().zip(chunk) {
+            *dst = *key;
+        }
+        index.lookup_batch_u64_simd_into(&keys[..len], &mut canonical[..len], &mut hits[..len]);
+        for (i, ((key, entry), hit)) in chunk.iter().zip(&hits[..len]).enumerate() {
+            let idx = hit.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Index lookup failed during reorder for row {}",
+                    chunk_idx * 4096 + i
+                )
+            })?;
+            if idx >= slot_count {
+                anyhow::bail!(
+                    "Index returned out-of-range idx {} (slot_count={})",
+                    idx,
+                    slot_count
+                );
+            }
+            if slot_filled[idx] {
+                anyhow::bail!("Index collision at idx {}", idx);
+            }
+            entries[idx] = *entry;
+            keys_ordered[idx] = *key;
+            slot_filled[idx] = true;
+        }
+    }
+    drop(rows);
+    drop(slot_filled);
     if timing {
         eprintln!(
             "[ani-build] Reorder lookups (SIMD batch): {:.3}s",
             reorder_start.elapsed().as_secs_f64()
         );
     }
-
-    // PtrHash25 is a *near-minimal* MPH: it returns slot ids in [0..1.10·n),
-    // not [0..n) like the old CHD backend (kira_kv_engine 0.3.2). Up to ~10%
-    // of slots are unused by real keys. We must allocate the entries array
-    // sized to the actual slot universe (max returned idx + 1) and fill the
-    // holes with a sentinel entry that has chr_id=0xFF — the existing
-    // lookup-side `if e.chr_id != chr_id` check naturally rejects sentinel
-    // hits, falling through to the interval lookup or returning None, exactly
-    // as for any other MPH false positive.
-    let max_slot = idxs
-        .iter()
-        .filter_map(|x| *x)
-        .max()
-        .ok_or_else(|| anyhow::anyhow!("No valid MPH indices returned"))?;
-    let slot_count = max_slot + 1;
-    if timing {
-        let waste_pct = 100.0 * (slot_count as f64 - n as f64) / n as f64;
-        eprintln!(
-            "[ani-build] PtrHash25 slot universe: {} slots for {} keys ({:+.2}% over n, {} holes)",
-            slot_count,
-            n,
-            waste_pct,
-            slot_count - n
-        );
-    }
-
-    let mut reordered_entries: Vec<AniEntry> = vec![ani_sentinel_entry(); slot_count];
-    let mut reordered_keys: Vec<u64> = vec![0u64; slot_count];
-    let mut slot_filled: Vec<bool> = vec![false; slot_count];
-    for (i, (key, entry)) in rows.into_iter().enumerate() {
-        let idx = idxs[i]
-            .ok_or_else(|| anyhow::anyhow!("Index lookup failed during reorder for row {}", i))?;
-        if idx >= slot_count {
-            // Shouldn't happen — max_slot was the maximum we just computed.
-            anyhow::bail!(
-                "Index returned out-of-range idx {} (slot_count={})",
-                idx,
-                slot_count
-            );
-        }
-        if slot_filled[idx] {
-            anyhow::bail!("Index collision at idx {}", idx);
-        }
-        reordered_entries[idx] = entry;
-        reordered_keys[idx] = key;
-        slot_filled[idx] = true;
-    }
-    let entries: Vec<AniEntry> = reordered_entries;
-    let keys_ordered: Vec<u64> = reordered_keys;
-    let _ = slot_filled; // sentinel chr_id=0xFF is the runtime "is this slot real?" marker
 
     if timing {
         let stats = index.stats();
@@ -157,6 +135,8 @@ pub fn finalize_ani_index(
         }
         verify_index_correctness(&index, &keys_bytes, &keys_ordered);
     }
+
+    drop(keys_bytes);
 
     let index_bytes = index.to_bytes()?;
     let pos_index_bytes = build_pos_index(&entries);

@@ -124,3 +124,30 @@ fn test_canonical_allele_lookup() {
     let _ = fs::remove_file(&tab_path);
     let _ = fs::remove_file(&ani_path);
 }
+
+#[test]
+fn slot_reorder_preserves_payload_across_chunk_boundaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let tab = dir.path().join("in.tab");
+    let path = dir.path().join("in.ani");
+    let text = (1..=8201u32)
+        .rev()
+        .map(|pos| format!("1\t{pos}\tA\tC\t{pos}\n"))
+        .collect::<String>();
+    fs::write(&tab, text).unwrap();
+    build_ani_index_from_tab(&tab, &path, Some("CHROM,POS,REF,ALT,VALUE")).unwrap();
+    let index = AniIndex::open(&path).unwrap();
+    for pos in 1..=8201u32 {
+        let bundle = index.lookup_exact("1", pos, "A", "C").unwrap();
+        assert_eq!(
+            bundle
+                .info
+                .iter()
+                .find(|f| f.key == "VALUE")
+                .unwrap()
+                .values,
+            vec![pos.to_string()]
+        );
+    }
+    assert!(index.lookup_exact("1", 8202, "A", "C").is_none());
+}

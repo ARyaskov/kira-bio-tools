@@ -61,6 +61,7 @@ pub fn worker_thread(
         .build()
         .unwrap();
 
+    let mut scratch = BatchScratch::default();
     while let Ok(batch) = rx.recv() {
         // Timing mode keeps the legacy per-line path so the bundle-timing
         // counters stay meaningful (they require the entry-by-entry call
@@ -94,6 +95,7 @@ pub fn worker_thread(
                     info_overwrite_all,
                     format_overwrite_all,
                     want_format,
+                    &mut scratch,
                 )
             })
         };
@@ -131,6 +133,14 @@ pub fn worker_thread(
 /// The win comes from collapsing N per-line scalar `lookup_u64` calls into
 /// one wide SIMD probe — documented as 2-3× faster than scalar at our
 /// batch sizes (`BATCH_SIZE` = 400 K).
+#[derive(Default)]
+struct BatchScratch {
+    flat_keys: Vec<u64>,
+    line_ranges: Vec<(usize, usize)>,
+    canonical: Vec<u64>,
+    hits: Vec<Option<usize>>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn annotate_batch_simd(
     batch: &ReadBatch,
@@ -141,6 +151,7 @@ fn annotate_batch_simd(
     info_overwrite_all: bool,
     format_overwrite_all: bool,
     want_format: bool,
+    scratch: &mut BatchScratch,
 ) -> Vec<Option<String>> {
     // Phase 1: parallel parse + per-line key extraction.
     let line_keys: Vec<Option<LineKeys<'_>>> = (0..batch.len())
@@ -153,8 +164,16 @@ fn annotate_batch_simd(
         .iter()
         .map(|lk| lk.as_ref().map_or(0, |x| x.keys.len()))
         .sum();
-    let mut flat_keys: Vec<u64> = Vec::with_capacity(total_keys);
-    let mut line_ranges: Vec<(usize, usize)> = Vec::with_capacity(batch.len());
+    let BatchScratch {
+        flat_keys,
+        line_ranges,
+        canonical,
+        hits,
+    } = scratch;
+    flat_keys.clear();
+    flat_keys.reserve(total_keys);
+    line_ranges.clear();
+    line_ranges.reserve(batch.len());
     for lk in &line_keys {
         let start = flat_keys.len();
         if let Some(lk) = lk {
@@ -164,11 +183,11 @@ fn annotate_batch_simd(
     }
 
     // Phase 3: SIMD batch MPH probe (zero-alloc with caller-owned scratch).
-    let mut canon = vec![0u64; flat_keys.len()];
-    let mut mph_out = vec![None; flat_keys.len()];
+    canonical.resize(flat_keys.len(), 0);
+    hits.resize(flat_keys.len(), None);
     if !flat_keys.is_empty() {
         ani.index
-            .lookup_batch_u64_simd_into(&flat_keys, &mut canon, &mut mph_out);
+            .lookup_batch_u64_simd_into(flat_keys, canonical, hits);
     }
 
     // Phase 4: parallel merge with MPH hints. Each line owns its slice of
@@ -181,7 +200,7 @@ fn annotate_batch_simd(
             annotate_line_with_mph_hints(
                 batch.line(i),
                 line_keys,
-                &mph_out[s..e],
+                &hits[s..e],
                 ani,
                 field_meta,
                 column_modes,
@@ -443,3 +462,7 @@ pub fn writer_thread(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/annotate_cpu_v2_threads.rs"]
+mod tests;

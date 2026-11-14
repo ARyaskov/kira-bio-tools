@@ -583,10 +583,7 @@ impl AniIndex {
         }
         let (cp, cr, ca) = canonical_allele(pos, rf.as_bytes(), alt.as_bytes());
         let lo = cp.saturating_sub(CANONICAL_MAX_PAD).max(1);
-        for p in lo..=cp {
-            let Some(list) = self.lookup_pos_index(chr_id, p) else {
-                continue;
-            };
+        for (p, list) in self.pos_index_range(chr_id, lo, cp) {
             for &idx in list {
                 let e = &self.entries[idx as usize];
                 if e.chr_id != chr_id || e.pos != p {
