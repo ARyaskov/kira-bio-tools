@@ -6,6 +6,42 @@ fn two_state() -> Hmm {
 }
 
 #[test]
+fn viterbi_and_marginals_match_exhaustive_state_paths() {
+    let transitions = [0.8, 0.3, 0.2, 0.7];
+    let emissions = [0.9, 0.1, 0.25, 0.75, 0.1, 0.9, 0.85, 0.15];
+    let sites = [1, 2, 3, 4];
+    let prior = [0.8, 0.2];
+    let mut total = 0.0;
+    let mut marginals = [[0.0; 2]; 4];
+    let mut best = (0.0, 0usize);
+    for path in 0..32usize {
+        let mut probability = prior[path & 1];
+        for i in 0..4 {
+            let previous = (path >> i) & 1;
+            let state = (path >> (i + 1)) & 1;
+            probability *= transitions[state * 2 + previous] * emissions[i * 2 + state];
+        }
+        total += probability;
+        if probability > best.0 {
+            best = (probability, path);
+        }
+        for (i, marginal) in marginals.iter_mut().enumerate() {
+            marginal[(path >> (i + 1)) & 1] += probability;
+        }
+    }
+    let mut hmm = Hmm::new(2, &transitions, 4, ());
+    hmm.init_states(Some(&prior));
+    hmm.run_viterbi(&emissions, &sites);
+    hmm.run_fwd_bwd(&emissions, &sites);
+    for (i, marginal) in marginals.iter().enumerate() {
+        assert_eq!(hmm.vstate(i) as usize, (best.1 >> (i + 1)) & 1);
+        for (state, expected) in marginal.iter().enumerate() {
+            assert!((hmm.fwd_bwd_prob()[(i + 1) * 2 + state] - expected / total).abs() < 1e-12);
+        }
+    }
+}
+
+#[test]
 fn tprob_powers_are_precomputed() {
     let h = two_state();
     assert_eq!(h.tprob(), &[0.9, 0.1, 0.1, 0.9]);

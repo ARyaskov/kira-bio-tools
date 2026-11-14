@@ -315,9 +315,9 @@ fn norm_cdf(mean: f64, dev: f64) -> f64 {
 
 /// `norm_prob` with the C float/double promotions.
 fn norm_prob(baf: f32, p: &GaussParam) -> f64 {
-    let d = baf - p.mean;
+    let d = baf as f64 - p.mean as f64;
     let d2 = -d * d;
-    (d2 as f64 * 0.5 / p.dev2 as f64).exp()
+    (d2 * 0.5 / p.dev2 as f64).exp()
         / p.norm as f64
         / (2.0 * std::f64::consts::PI * p.dev2 as f64).sqrt()
 }

@@ -142,7 +142,7 @@ impl<T: TransitionFn> Hmm<T> {
             }
         }
         self.init.fwd_prob.copy_from_slice(&self.init.vit_prob);
-        self.init.bwd_prob.copy_from_slice(&self.init.vit_prob);
+        self.init.bwd_prob.fill(1.0);
         self.state.vit_prob.copy_from_slice(&self.init.vit_prob);
         self.state.fwd_prob.copy_from_slice(&self.init.fwd_prob);
         self.state.bwd_prob.copy_from_slice(&self.init.bwd_prob);
@@ -283,8 +283,9 @@ impl<T: TransitionFn> Hmm<T> {
             }
         }
         for i in (0..n).rev() {
-            iptr = self.vpath[i * ns + iptr] as usize;
+            let previous = self.vpath[i * ns + iptr] as usize;
             self.vpath[i * ns] = iptr as u8;
+            iptr = previous;
         }
     }
 
@@ -359,7 +360,7 @@ impl<T: TransitionFn> Hmm<T> {
             let mut norm = 0.0;
             for j in 0..ns {
                 self.bwd_tmp[j] /= bwd_norm;
-                self.fwd[row + j] *= self.bwd_tmp[j];
+                self.fwd[row + j] *= self.bwd[j];
                 norm += self.fwd[row + j];
             }
             for j in 0..ns {

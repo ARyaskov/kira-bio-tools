@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn gaussian_density_promotes_inputs_before_subtraction() {
+    let params = GaussParam {
+        mean: 0.33333334,
+        dev2: 0.0025,
+        norm: 1.0,
+    };
+    let baf = 0.47f32;
+    let delta = baf as f64 - params.mean as f64;
+    let expected = (-delta * delta * 0.5 / params.dev2 as f64).exp()
+        / (2.0 * std::f64::consts::PI * params.dev2 as f64).sqrt();
+    assert!((norm_prob(baf, &params) - expected).abs() < 1e-14);
+}
+
+#[test]
 fn transition_matrices_are_column_stochastic() {
     let m = init_tprob_matrix(N_STATES, 1e-9, 0.5).unwrap();
     for j in 0..N_STATES {
