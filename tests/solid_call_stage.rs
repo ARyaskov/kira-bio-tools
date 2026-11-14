@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 //! `solid --call` fuses the caller into the pileup with no VCF in between, so
 //! only running both paths on the same reads proves they compute the same thing.
 

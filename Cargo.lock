@@ -985,7 +985,6 @@ dependencies = [
  "noodles-csi",
  "noodles-fasta",
  "noodles-sam",
- "once_cell",
  "percent-encoding",
  "proptest",
  "rand 0.8.8",

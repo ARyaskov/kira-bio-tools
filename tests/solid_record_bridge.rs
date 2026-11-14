@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 //! The fused `solid` pipeline builds `RecordBuf`s directly from the aligner's
 //! scored batches instead of round-tripping through SAM text. That bridge must
 //! agree with the aligner's SAM emitter field for field: a mismatch is silent,
