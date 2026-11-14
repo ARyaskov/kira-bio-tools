@@ -1,4 +1,16 @@
 use super::process_vcf_line_multiallelic_simd;
+
+#[test]
+fn haploid_genotype_vectors_select_the_requested_source_allele() {
+    assert_eq!(
+        super::split_format_value_for_allele("1,2,3", Some(FieldNumber::G), 1, 2),
+        "1,3"
+    );
+    assert_eq!(
+        super::split_format_value_for_allele("1,2,3", Some(FieldNumber::G), 0, 2),
+        "1,2"
+    );
+}
 use crate::annotate::builder_v2::StringPool;
 use crate::annotate::builder_v2::entry_processing::{EntryEntry, make_position_key};
 use crate::annotate::structs::ani::{ANI_STR_NONE, ContigDict};

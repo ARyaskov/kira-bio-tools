@@ -5,12 +5,29 @@ use crate::vcf::UnifiedVcfReader;
 
 pub struct VcfAnnotationReader {
     inner: UnifiedVcfReader,
+    indexed_names: Vec<String>,
 }
 
 impl VcfAnnotationReader {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let inner = UnifiedVcfReader::open(path.as_ref())?;
+        let source = if path
+            .as_ref()
+            .extension()
+            .is_some_and(|extension| extension == "ktile")
+        {
+            path.as_ref().with_extension("")
+        } else {
+            path.as_ref().to_path_buf()
+        };
+        let indexed_names = crate::csi::find_index_for(&source)
+            .map(crate::csi::BinIndex::load)
+            .transpose()?
+            .map(|index| index.names().to_vec())
+            .unwrap_or(inner.reference_sequences()?);
         Ok(Self {
-            inner: UnifiedVcfReader::open(path)?,
+            inner,
+            indexed_names,
         })
     }
 
@@ -19,18 +36,23 @@ impl VcfAnnotationReader {
     }
 
     pub fn read_header(&mut self) -> Result<Vec<String>> {
-        Ok(self.inner.header()?)
+        Ok(complete_contig_header(
+            self.inner.header()?,
+            &self.indexed_names,
+        ))
     }
 }
 
 pub struct StreamingVcfReader {
     reader: UnifiedVcfReader,
+    indexed_names: Vec<String>,
 }
 
 impl StreamingVcfReader {
     pub fn new(reader: VcfAnnotationReader) -> Self {
         Self {
             reader: reader.inner,
+            indexed_names: reader.indexed_names,
         }
     }
 
@@ -57,7 +79,26 @@ impl StreamingVcfReader {
     }
 
     pub fn into_headers_and_self(self) -> Result<(Vec<String>, Self)> {
-        let headers = self.reader.header()?;
+        let headers = complete_contig_header(self.reader.header()?, &self.indexed_names);
         Ok((headers, self))
     }
+}
+
+pub(crate) fn complete_contig_header(mut headers: Vec<String>, names: &[String]) -> Vec<String> {
+    let known: std::collections::HashSet<String> = headers
+        .iter()
+        .filter_map(|header| crate::vcf::header::parse_contig_line(header).map(|(name, _)| name))
+        .collect();
+    let offset = headers
+        .iter()
+        .position(|header| header.starts_with("#CHROM"))
+        .unwrap_or(headers.len());
+    headers.splice(
+        offset..offset,
+        names
+            .iter()
+            .filter(|name| !known.contains(*name))
+            .map(|name| format!("##contig=<ID={name}>")),
+    );
+    headers
 }

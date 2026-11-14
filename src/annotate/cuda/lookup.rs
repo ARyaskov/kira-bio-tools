@@ -1473,7 +1473,12 @@ fn worker_loop_gpu(
     };
     // CPU-annotate fallback needed only when FORMAT must merge AND
     // sample_map has gaps. For INFO-only annotation we stay on GPU.
-    let use_cpu_annotate = need_format && sample_map.iter().any(|v| v.is_none());
+    let use_cpu_annotate = need_format
+        && (sample_map.iter().any(|v| v.is_none())
+            || field_meta.iter().any(|(key, number)| {
+                key.starts_with("FMT/")
+                    && matches!(number, FieldNumber::A | FieldNumber::R | FieldNumber::G)
+            }));
     if timing {
         if use_cpu_annotate {
             eprintln!("[gpu] cpu-annotate: enabled (need_format + sample_map gaps)");
@@ -2372,7 +2377,12 @@ fn worker_loop_gpu_multi(
                 || k.eq_ignore_ascii_case("FMT")
                 || k.eq_ignore_ascii_case("FORMAT"))
         });
-    let use_cpu_annotate = need_format && sample_maps.iter().any(|m| m.iter().any(|v| v.is_none()));
+    let use_cpu_annotate = need_format
+        && (sample_maps.iter().any(|m| m.iter().any(|v| v.is_none()))
+            || field_meta.iter().any(|(key, number)| {
+                key.starts_with("FMT/")
+                    && matches!(number, FieldNumber::A | FieldNumber::R | FieldNumber::G)
+            }));
     if timing && use_cpu_annotate {
         eprintln!("[gpu] cpu-annotate: enabled (multi-job, need_format + gaps)");
     } else if timing {

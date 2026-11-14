@@ -1438,7 +1438,7 @@ fn read_header(mmap: &Mmap) -> Result<AniHeader> {
                 entry_keys_len: h6.entry_keys_len,
             })
         }
-        2..=6 => Err(anyhow!(
+        2..=7 => Err(anyhow!(
             "Unsupported ANI version {} (rebuild index)",
             h3.version
         )),

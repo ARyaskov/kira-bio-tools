@@ -1055,7 +1055,9 @@ fn annotate_record_with_alts(
 
     let mut local_transfers: Vec<(String, String, AnnotateMode)> = Vec::new();
     if !bundles.is_empty() {
-        let bundle = &bundles[0].1;
+        let remapped =
+            format_modified.then(|| format_bundle_for_target(parsed, bundles, field_meta));
+        let bundle = remapped.as_ref().unwrap_or(&bundles[0].1);
 
         for (key, mode) in column_modes {
             let (src_ref, dst_ref) = split_mapped_ref(key);
@@ -1276,7 +1278,9 @@ fn annotate_record_with_alts_and_info(
 
     let mut local_transfers: Vec<(String, String, AnnotateMode)> = Vec::new();
     if !bundles.is_empty() {
-        let bundle = &bundles[0].1;
+        let remapped =
+            format_modified.then(|| format_bundle_for_target(parsed, bundles, field_meta));
+        let bundle = remapped.as_ref().unwrap_or(&bundles[0].1);
 
         for (key, mode) in column_modes {
             let (src_ref, dst_ref) = split_mapped_ref(key);
@@ -1432,6 +1436,110 @@ fn merge_scalar_field(
         return Some(new_val.to_string());
     }
     None
+}
+
+fn format_bundle_for_target(
+    parsed: &ParsedVcfRecord,
+    bundles: &[(usize, AnnotationBundle)],
+    metadata: &HashMap<String, FieldNumber>,
+) -> AnnotationBundle {
+    let mut output = bundles[0].1.clone();
+    let Some(format) = output.format_str.as_deref() else {
+        return output;
+    };
+    let keys: Vec<&str> = format.split(':').collect();
+    let numbers: Vec<_> = keys
+        .iter()
+        .map(|key| metadata.get(&format!("FMT/{key}")).copied())
+        .collect();
+    let source_keys: Vec<Vec<&str>> = bundles
+        .iter()
+        .map(|(_, bundle)| {
+            bundle
+                .format_str
+                .as_deref()
+                .unwrap_or("")
+                .split(':')
+                .collect()
+        })
+        .collect();
+    let n_alleles = parsed.alt.split(',').count() + 1;
+    for sample in 0..output.format_samples.len() {
+        let original: Vec<&str> = output.format_samples[sample].split(':').collect();
+        let gt = keys
+            .iter()
+            .position(|key| *key == "GT")
+            .and_then(|index| original.get(index))
+            .copied();
+        let known_haploid = gt
+            .filter(|gt| *gt != ".")
+            .map(|gt| !gt.contains(['/', '|']));
+        let mut fields = original
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        fields.resize(keys.len(), ".".into());
+        for (key_index, number) in numbers.iter().copied().enumerate() {
+            let Some(number) = number else {
+                continue;
+            };
+            if !matches!(number, FieldNumber::A | FieldNumber::R | FieldNumber::G) {
+                continue;
+            }
+            let haploid = known_haploid.unwrap_or_else(|| {
+                original
+                    .get(key_index)
+                    .is_some_and(|value| value.split(',').count() == 2)
+            });
+            let length = match number {
+                FieldNumber::A => n_alleles - 1,
+                FieldNumber::R => n_alleles,
+                _ if haploid => n_alleles,
+                _ => n_alleles * (n_alleles + 1) / 2,
+            };
+            let mut values = vec![".".to_string(); length];
+            for (bundle_index, (target_alt, bundle)) in bundles.iter().enumerate() {
+                let Some(index) = source_keys[bundle_index]
+                    .iter()
+                    .position(|source_key| *source_key == keys[key_index])
+                else {
+                    continue;
+                };
+                let Some(raw) = bundle
+                    .format_samples
+                    .get(sample)
+                    .and_then(|sample| sample.split(':').nth(index))
+                else {
+                    continue;
+                };
+                if raw == "." || raw.is_empty() {
+                    continue;
+                }
+                let source: Vec<&str> = raw.split(',').collect();
+                let allele = target_alt + 1;
+                let mappings = match number {
+                    FieldNumber::A => vec![(0, *target_alt)],
+                    FieldNumber::R => vec![(0, 0), (1, allele)],
+                    _ if haploid => vec![(0, 0), (if source.len() == 3 { 2 } else { 1 }, allele)],
+                    _ => vec![
+                        (0, 0),
+                        (1, allele * (allele + 1) / 2),
+                        (2, allele * (allele + 1) / 2 + allele),
+                    ],
+                };
+                for (source_index, target_index) in mappings {
+                    if let (Some(source), Some(target)) =
+                        (source.get(source_index), values.get_mut(target_index))
+                    {
+                        *target = source.to_string();
+                    }
+                }
+            }
+            fields[key_index] = values.join(",");
+        }
+        output.format_samples[sample] = fields.join(":");
+    }
+    output
 }
 
 fn merge_all_format(

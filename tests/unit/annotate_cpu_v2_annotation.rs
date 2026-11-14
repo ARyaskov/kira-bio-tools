@@ -3,6 +3,30 @@ use crate::annotate::cpu_v2::{ParsedFormat, ParsedSample};
 use std::collections::HashMap;
 
 #[test]
+fn format_vectors_project_into_target_alleles_for_each_sample_ploidy() {
+    let parsed = parse_vcf_record_simd("1\t10\t.\tC\tCT,CTT\t.\t.\t.\tGT\t0\t0/0", true).unwrap();
+    let bundle = AnnotationBundle {
+        alt: "CTT".into(),
+        id: None,
+        qual: None,
+        filter: None,
+        info: Vec::new(),
+        db_ref: "C".into(),
+        format_str: Some("GT:AD:PL".into()),
+        format_samples: vec!["0:1,2:1,2".into(), "0/1:4,5:4,5,6".into()],
+    };
+    let metadata = HashMap::from([
+        ("FMT/AD".into(), FieldNumber::R),
+        ("FMT/PL".into(), FieldNumber::G),
+    ]);
+    let output = format_bundle_for_target(&parsed, &[(1, bundle)], &metadata);
+    assert_eq!(
+        output.format_samples,
+        ["0:1,.,2:1,.,2", "0/1:4,.,5:4,.,.,5,.,6"]
+    );
+}
+
+#[test]
 fn structural_variants_match_end_in_all_annotation_paths() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source.vcf");

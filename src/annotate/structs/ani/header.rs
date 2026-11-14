@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 
 pub const ANI_MAGIC: u64 = 0x494E4149524B4256;
-pub const ANI_VERSION: u64 = 7;
+pub const ANI_VERSION: u64 = 8;
 pub const ANI_HEADER_END: &str = "##KIRA_BT_ANI_HEADER_END";
 pub const ANI_STR_NONE: u32 = u32::MAX;
 

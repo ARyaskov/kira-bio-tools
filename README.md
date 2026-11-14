@@ -196,7 +196,7 @@ Commands: `query`, `cnv`.
 - `db-build`  
   Build an ANI database from annotation data.  
   Args: `<input>`, `-o/--output`.
-  ANI v7 preserves symbolic variants with distinct `INFO/END` values.
+  ANI v8 preserves symbolic extents and haploid FORMAT likelihoods.
   Annotation source caches rebuild automatically; explicit older `.ani` files require rebuilding.
 
 - `tile`  

@@ -37,6 +37,9 @@ pub fn load_and_infer_metadata(
         field_meta = infer_field_metadata_from_data(ani, &field_names, debug);
     }
 
+    for (tag, number) in load_format_metadata(ani, debug)? {
+        field_meta.insert(format!("FMT/{tag}"), number);
+    }
     Ok(field_meta)
 }
 

@@ -59,7 +59,11 @@ pub fn write_ktile_from_vcf_with<I: AsRef<Path>, O: AsRef<Path>>(
 
     let mut reader = UnifiedVcfReader::open(input_ref)
         .with_context(|| format!("opening input {:?}", input_ref))?;
-    let headers = reader.header().context("reading VCF header block")?;
+    let mut headers = reader.header().context("reading VCF header block")?;
+    if let Some(index) = crate::csi::find_index_for(input_ref) {
+        let index = crate::csi::BinIndex::load(index)?;
+        headers = crate::annotate::reader::complete_contig_header(headers, index.names());
+    }
 
     // Open output + write placeholder header (finalised after data is on disk).
     let out_file = OpenOptions::new()

@@ -702,7 +702,11 @@ pub(crate) fn expand_column_specs(
         }
 
         if info_ids.is_empty() {
-            info_ids = field_meta.keys().cloned().collect();
+            info_ids = field_meta
+                .keys()
+                .filter(|key| !key.starts_with("FMT/"))
+                .cloned()
+                .collect();
             info_ids.sort();
         }
 

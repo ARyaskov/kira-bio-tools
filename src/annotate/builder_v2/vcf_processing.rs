@@ -224,6 +224,13 @@ fn split_format_value_for_allele(
         FieldNumber::G => {
             let values: Vec<&str> = raw.split(',').collect();
             let allele = alt_idx + 1;
+            if values.len() == alt_count + 1 {
+                return format!(
+                    "{},{}",
+                    values[0],
+                    values.get(allele).copied().unwrap_or(".")
+                );
+            }
             let idx00 = genotype_index(0, 0);
             let idx01 = genotype_index(0, allele);
             let idx11 = genotype_index(allele, allele);
