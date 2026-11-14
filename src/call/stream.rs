@@ -627,6 +627,9 @@ fn write_headers<W: Write>(
         if h.starts_with("#CHROM\t") {
             continue;
         }
+        if h.starts_with("##INFO=<ID=I16,") || h.starts_with("##INFO=<ID=QS,") {
+            continue;
+        }
         if h.starts_with("##FORMAT=<ID=GT,") {
             has_gt = true;
         }
@@ -645,6 +648,25 @@ fn write_headers<W: Write>(
         writeln!(w, "{h}")?;
     }
 
+    if cfg.gvcf.is_some() {
+        for (tag, definition) in [
+            (
+                "END",
+                "##INFO=<ID=END,Number=1,Type=Integer,Description=\"End position of the variant described in this record\">",
+            ),
+            (
+                "MIN_DP",
+                "##INFO=<ID=MIN_DP,Number=1,Type=Integer,Description=\"Minimum per-sample depth in this gVCF block\">",
+            ),
+        ] {
+            if !headers
+                .iter()
+                .any(|header| header.starts_with(&format!("##INFO=<ID={tag},")))
+            {
+                writeln!(w, "{definition}")?;
+            }
+        }
+    }
     if !has_gt {
         writeln!(
             w,
@@ -660,13 +682,13 @@ fn write_headers<W: Write>(
     if cfg.emit_gp && !has_gp {
         writeln!(
             w,
-            "##FORMAT=<ID=GP,Number=G,Type=Float,Description=\"Genotype posterior probabilities\">"
+            "##FORMAT=<ID=GP,Number=G,Type=Float,Description=\"Genotype posterior probabilities in the range 0 to 1\">"
         )?;
     }
     if !has_ac {
         writeln!(
             w,
-            "##INFO=<ID=AC,Number=A,Type=Integer,Description=\"Allele count in genotypes\">"
+            "##INFO=<ID=AC,Number=A,Type=Integer,Description=\"Allele count in genotypes for each ALT allele, in the same order as listed\">"
         )?;
     }
     if !has_an {
@@ -674,6 +696,26 @@ fn write_headers<W: Write>(
             w,
             "##INFO=<ID=AN,Number=1,Type=Integer,Description=\"Total number of alleles in called genotypes\">"
         )?;
+    }
+
+    if cfg.mode == CallMode::Multiallelic {
+        for (tag, definition) in [
+            (
+                "DP4",
+                "##INFO=<ID=DP4,Number=4,Type=Integer,Description=\"Number of high-quality ref-forward , ref-reverse, alt-forward and alt-reverse bases\">",
+            ),
+            (
+                "MQ",
+                "##INFO=<ID=MQ,Number=1,Type=Integer,Description=\"Average mapping quality\">",
+            ),
+        ] {
+            if !headers
+                .iter()
+                .any(|h| h.starts_with(&format!("##INFO=<ID={tag},")))
+            {
+                writeln!(w, "{definition}")?;
+            }
+        }
     }
 
     let samples = selected

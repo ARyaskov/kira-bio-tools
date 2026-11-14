@@ -75,8 +75,43 @@ fn sex_file_reads_both_shapes() {
 
     let ped = dir.path().join("fam.ped");
     std::fs::write(&ped, "Fam1\tsmpl1\t0\t0\t1\nFam1\tsmpl2\t0\t0\t2\n").unwrap();
-    // PED sex codes become the M/F labels a ploidy file is keyed on.
     let m = parse_sex_file(&ped).unwrap();
     assert_eq!(m.get("smpl1").map(String::as_str), Some("M"));
     assert_eq!(m.get("smpl2").map(String::as_str), Some("F"));
+    let regions = vec![PloidyRegion {
+        chrom: "X".into(),
+        beg: 1,
+        end: 100,
+        sex: "1".into(),
+        ploidy: 0,
+    }];
+    assert_eq!(
+        ploidy_at_site("X", 50, &["smpl1".into(), "smpl2".into()], &m, &regions, 2),
+        vec![0, 2]
+    );
+    let named = vec![PloidyRegion {
+        sex: "M".into(),
+        ..regions[0].clone()
+    }];
+    assert_eq!(
+        ploidy_at_site("X", 50, &["smpl1".into()], &m, &named, 2),
+        vec![0]
+    );
+}
+
+#[test]
+fn numeric_sample_ploidy_overrides_regions_without_numeric_sex_labels() {
+    let regions = vec![PloidyRegion {
+        chrom: "X".into(),
+        beg: 1,
+        end: 100,
+        sex: "M".into(),
+        ploidy: 2,
+    }];
+    let samples = vec!["forced".into(), "male".into()];
+    let sexes = HashMap::from([("forced".into(), "1".into()), ("male".into(), "M".into())]);
+    assert_eq!(
+        ploidy_at_site("X", 50, &samples, &sexes, &regions, 2),
+        vec![1, 2]
+    );
 }

@@ -1,6 +1,20 @@
 use super::*;
 use crate::vcf::parse_vcf_line;
 
+#[test]
+fn gvcf_header_defines_every_emitted_block_tag() {
+    let output = call_one(
+        CallConfig {
+            gvcf: Some(vec![0]),
+            ..CallConfig::default()
+        },
+        SITE,
+    );
+    for tag in ["END", "MIN_DP"] {
+        assert_eq!(output.matches(&format!("##INFO=<ID={tag},")).count(), 1);
+    }
+}
+
 const HEADER: &[&str] = &[
     "##fileformat=VCFv4.2",
     "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">",

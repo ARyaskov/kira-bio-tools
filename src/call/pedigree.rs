@@ -65,13 +65,18 @@ pub fn ploidy_at_site(
         .iter()
         .map(|name| {
             let sex = sex_map.get(name).map(|s| s.as_str()).unwrap_or("");
-            // A bare 0/1/2 in the sample file is the ploidy itself, not a sex.
-            match sex {
-                "0" => return 0,
-                "1" => return 1,
-                "2" => return 2,
-                _ => {}
-            }
+            let sex = if regions.iter().any(|r| r.sex == sex) {
+                sex
+            } else {
+                match sex {
+                    "M" if regions.iter().any(|r| r.sex == "1") => "1",
+                    "F" if regions.iter().any(|r| r.sex == "2") => "2",
+                    "0" => return 0,
+                    "1" => return 1,
+                    "2" => return 2,
+                    other => other,
+                }
+            };
             for r in regions {
                 // `*` applies to every chromosome / every sex, as in bcftools.
                 let chrom_matches = r.chrom == "*" || r.chrom == chrom;
@@ -173,7 +178,6 @@ pub fn parse_sex_file<P: AsRef<Path>>(p: P) -> Result<HashMap<String, String>> {
             2..=4 => {
                 m.insert(parts[0].to_string(), parts[1].to_string());
             }
-            // PED: sex 1/2 becomes the M/F the ploidy file is keyed on.
             _ => {
                 let sex = match parts[4] {
                     "1" => "M",

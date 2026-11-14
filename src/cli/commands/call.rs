@@ -1,6 +1,4 @@
 use anyhow::{Context, Result, bail};
-use std::fs::File;
-use std::io::{BufWriter, Write};
 
 use crate::VcfReader;
 use crate::call::mcall::ConstrainMode;
@@ -10,17 +8,11 @@ use crate::cli::args::CallArgs;
 
 pub fn cmd_call(args: CallArgs) -> Result<()> {
     let cfg = config_from_args(&args)?;
-    let out_path = args.output.clone().unwrap_or_else(|| {
-        let mut p = args.input.clone();
-        p.set_extension("call.vcf");
-        p
-    });
-
     let mut reader = VcfReader::open(&args.input)?;
     let headers = reader.header()?;
 
-    let out = File::create(&out_path)?;
-    let mut w = BufWriter::new(out);
+    let kind = crate::vcf::sink::parse_output_type(args.output_type.as_deref().unwrap_or("v"))?;
+    let mut w = crate::vcf::sink::StreamingVcfSink::new(args.output.as_deref(), kind);
     let mut stream = CallStream::new(&mut w, cfg)?;
     stream.write_header(&headers)?;
 
@@ -29,7 +21,10 @@ pub fn cmd_call(args: CallArgs) -> Result<()> {
     }
     stream.finish()?;
 
-    w.flush()?;
+    w.finish()?;
+    if let Some(format) = args.write_index.as_deref() {
+        crate::vcf::sink::write_output_index(args.output.as_deref(), format)?;
+    }
     Ok(())
 }
 
