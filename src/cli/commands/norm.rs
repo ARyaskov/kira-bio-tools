@@ -1145,7 +1145,39 @@ fn left_align_symbolic(
     alt_raw: &[&str],
     fa: &Fasta,
 ) -> Option<Vec<String>> {
-    // Only symbolic deletions are realigned (bcftools leaves <DUP> etc. alone).
+    if alt_raw.iter().any(|alt| alt.starts_with("<DUP")) {
+        let length = info_get_u32(&cols[7], "SVLEN")?;
+        if length == 0 || length > MAX_SV_SPAN {
+            return None;
+        }
+        let duplicated = fa.slice_bytes(chr, orig_pos, length as usize + 1)?;
+        let mut expanded = cols.to_vec();
+        expanded[4] = alt_raw
+            .iter()
+            .map(|alt| {
+                if alt.starts_with("<DUP") {
+                    String::from_utf8_lossy(duplicated).to_ascii_uppercase()
+                } else {
+                    alt.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut normalized = left_align(&expanded, fa)?;
+        normalized[4] = normalized[4]
+            .split(',')
+            .zip(alt_raw)
+            .map(|(sequence, symbolic)| {
+                if symbolic.starts_with("<DUP") {
+                    symbolic.to_string()
+                } else {
+                    sequence.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        return Some(normalized);
+    }
     if !alt_raw
         .iter()
         .any(|a| a.eq_ignore_ascii_case("<DEL>") || a.starts_with("<DEL:"))

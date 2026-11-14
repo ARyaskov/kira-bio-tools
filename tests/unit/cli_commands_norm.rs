@@ -16,6 +16,22 @@ fn symbolic_deletion_uses_svlen_when_end_is_absent() {
     assert_eq!(normalized[7], "SVLEN=-10");
 }
 
+#[test]
+fn symbolic_duplication_is_normalized_without_replacing_its_alt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ref.fa");
+    std::fs::write(&path, ">1\nACTCACAAAGGGATTACAGATTACAGATTACAGGGGATCCAGAT\n").unwrap();
+    let fasta = load_fasta(&path).unwrap();
+    let cols: Vec<String> = "1\t26\t.\tG\t<DUP>\t.\tPASS\tSVTYPE=DUP;SVLEN=7"
+        .split('\t')
+        .map(String::from)
+        .collect();
+    let normalized = left_align(&cols, &fasta).unwrap();
+    assert_eq!(normalized[1], "11");
+    assert_eq!(normalized[4], "<DUP>");
+    assert_eq!(normalized[7], "SVTYPE=DUP;SVLEN=7");
+}
+
 fn hdr() -> HeaderInfo {
     HeaderInfo::parse(&[
         "##INFO=<ID=AC,Number=A,Type=Integer,Description=\"x\">",
