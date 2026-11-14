@@ -8,7 +8,7 @@ use crate::annotate::cpu_v2::vcf_parsing::{
 use crate::annotate::structs::ani::AniIndex;
 use crate::annotate::structs::annotate_mode::AnnotateMode;
 use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber};
-use crate::util::{chr_name_to_id, fast_hash64};
+use crate::util::fast_hash64;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct BundleTimingAccum {
@@ -500,10 +500,7 @@ pub fn annotate_line(
         );
     }
 
-    let Some(chr_id) = ani
-        .contig_id(chrom)
-        .or_else(|| chr_name_to_id(chrom).map(u32::from))
-    else {
+    let Some(chr_id) = ani.contig_id(chrom) else {
         return line.to_string();
     };
     let ref_hash = fast_hash64(ref_allele.as_bytes());
@@ -587,9 +584,7 @@ pub fn extract_line_keys<'a>(
     let bytes = line.as_bytes();
     let tab1 = memchr::memchr(b'\t', bytes)?;
     let chrom = &line[..tab1];
-    let chr_id_early = ani
-        .contig_id(chrom)
-        .or_else(|| chr_name_to_id(chrom).map(u32::from));
+    let chr_id_early = ani.contig_id(chrom);
     match chr_id_early {
         Some(id) if !ani.chrom_has_entries(id) => {
             return None;
@@ -604,9 +599,7 @@ pub fn extract_line_keys<'a>(
     if want_format {
         patch_samples_from_line(&mut parsed, line);
     }
-    let chr_id = ani
-        .contig_id(parsed.chrom)
-        .or_else(|| chr_name_to_id(parsed.chrom).map(u32::from));
+    let chr_id = ani.contig_id(parsed.chrom);
     let alt_alleles: smallvec::SmallVec<[&str; 2]> = parsed.alt.split(',').collect();
     let mut keys: smallvec::SmallVec<[u64; 2]> =
         smallvec::SmallVec::with_capacity(alt_alleles.len());
@@ -818,9 +811,7 @@ pub fn annotate_line_with_timing(
         );
     }
 
-    let chr_id = ani
-        .contig_id(chrom)
-        .or_else(|| chr_name_to_id(chrom).map(u32::from))?;
+    let chr_id = ani.contig_id(chrom)?;
     let ref_hash = fast_hash64(ref_allele.as_bytes());
 
     let need_info = info_overwrite_all || column_modes.iter().any(|(k, _)| column_targets_info(k));

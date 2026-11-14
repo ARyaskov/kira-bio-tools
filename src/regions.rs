@@ -252,11 +252,21 @@ impl RegionSet {
         if mode == 0 {
             return self.contains(chr, pos);
         }
-        let mut cols = rest[t2 + 1..].splitn(4, '\t');
+        let mut cols = rest[t2 + 1..].split('\t');
         let _id = cols.next();
         let (Some(refa), Some(alt)) = (cols.next(), cols.next()) else {
             return self.contains(chr, pos);
         };
+        if mode == 1 {
+            let _qual = cols.next();
+            let _filter = cols.next();
+            let end = cols.next().and_then(|info| {
+                info.split(';')
+                    .find_map(|field| field.strip_prefix("END=")?.parse::<u32>().ok())
+            });
+            let ref_end = pos.saturating_add(refa.len().max(1) as u32 - 1);
+            return self.overlaps_range(chr, pos, end.unwrap_or(ref_end).max(ref_end));
+        }
         self.record_passes(chr, pos, refa, alt, mode)
     }
 

@@ -3,7 +3,6 @@ use crate::annotate::structs::ani::index::{AniIndex, CStrRef};
 use crate::annotate::structs::ani::key::make_variant_key;
 use crate::annotate::structs::bundle::FieldNumber;
 use crate::annotate::structs::bundle::{AnnotationBundle, parse_info_field};
-use crate::util::chr_name_to_id;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -182,9 +181,7 @@ impl AniIndex {
     ) -> Option<AnnotationBundle> {
         // Header-derived contig dict first, fall back to the static name table
         // for legacy `.ani` files without an embedded dict (contig_count==0).
-        let chr_id = self
-            .contig_id(chr)
-            .or_else(|| chr_name_to_id(chr).map(u32::from))?;
+        let chr_id = self.contig_id(chr)?;
         // `rf_hash` was a micro-opt for the legacy XOR key (compute once,
         // reuse across multiple ALTs). The new non-commutative `make_variant_key`
         // hashes REF inline; the parameter is kept for API stability with the
@@ -713,9 +710,7 @@ impl AniIndex {
 
     pub fn lookup_any_alt(&self, chr: &str, pos: u32, rf: &str) -> Option<AnnotationBundle> {
         let debug = std::env::var("KIRA_BT_DEBUG").is_ok();
-        let chr_id = self
-            .contig_id(chr)
-            .or_else(|| chr_name_to_id(chr).map(u32::from))?;
+        let chr_id = self.contig_id(chr)?;
 
         // Use the pos-index to bound candidates to the exact position window
         // instead of scanning all 4M entries. Falls back to None (rather than

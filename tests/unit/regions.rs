@@ -1,6 +1,16 @@
 use super::*;
 
 #[test]
+fn regression_end_is_respected_by_record_overlap_filters() {
+    let regions = RegionSet::from_cli("chr1:150-150").unwrap();
+    for alt in ["C", ".", "<NON_REF>", "<DEL>"] {
+        let line = format!("chr1\t100\t.\tA\t{alt}\t.\tPASS\tEND=250");
+        assert!(regions.line_passes_mode(&line, 1));
+        assert!(!regions.line_passes_mode(&line, 0));
+    }
+}
+
+#[test]
 fn cli_regions_merge_and_lookup() {
     // Comma lists cannot carry thousands separators (bcftools splits on ',' too).
     let r = RegionSet::from_cli("1:100-200,1:150-300,2,1:1000-1050").unwrap();

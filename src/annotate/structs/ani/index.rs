@@ -199,6 +199,54 @@ pub struct IntervalEntry {
     pub entry_idx: usize,
 }
 
+struct IntervalIndex {
+    entries: Vec<IntervalEntry>,
+    max_ends: Vec<u32>,
+    leaves: usize,
+}
+
+impl IntervalIndex {
+    fn new(entries: Vec<IntervalEntry>) -> Self {
+        let leaves = entries.len().max(1).next_power_of_two();
+        let mut max_ends = vec![0; leaves * 2];
+        for (i, entry) in entries.iter().enumerate() {
+            max_ends[leaves + i] = entry.end;
+        }
+        for i in (1..leaves).rev() {
+            max_ends[i] = max_ends[i * 2].max(max_ends[i * 2 + 1]);
+        }
+        Self {
+            entries,
+            max_ends,
+            leaves,
+        }
+    }
+
+    fn find(&self, pos: u32) -> Option<usize> {
+        let limit = self.entries.partition_point(|entry| entry.start <= pos);
+        self.find_node(1, 0, self.leaves, limit, pos)
+    }
+
+    fn find_node(
+        &self,
+        node: usize,
+        lo: usize,
+        hi: usize,
+        limit: usize,
+        pos: u32,
+    ) -> Option<usize> {
+        if lo >= limit || self.max_ends[node] < pos {
+            return None;
+        }
+        if hi - lo == 1 {
+            return self.entries.get(lo).map(|entry| entry.entry_idx);
+        }
+        let mid = (lo + hi) / 2;
+        self.find_node(node * 2 + 1, mid, hi, limit, pos)
+            .or_else(|| self.find_node(node * 2, lo, mid, limit, pos))
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct AniPosIndexHeader {
@@ -341,7 +389,7 @@ pub struct AniIndex {
     pub header: AniHeader,
     pub index: Index,
     pub entries: Vec<AniEntry>,
-    intervals: Vec<Vec<IntervalEntry>>,
+    intervals: Vec<IntervalIndex>,
     strings: StringSource,
     mmap: Arc<Mmap>,
     pos_index: Option<AniPosIndex>,
@@ -450,7 +498,11 @@ impl AniIndex {
     /// wasn't stored or the name isn't in the dict.
     #[inline]
     pub fn contig_id(&self, name: &str) -> Option<u32> {
-        self.contigs.id(name)
+        if self.contigs.is_empty() {
+            crate::util::chr_name_to_id(name).map(u32::from)
+        } else {
+            self.contigs.id(name)
+        }
     }
 
     /// Number of contigs in the dict. `0` means legacy `.ani` without a dict.
@@ -707,41 +759,7 @@ impl AniIndex {
         if self.intervals.is_empty() {
             return None;
         }
-        let list = self.intervals.get(chr_id as usize)?;
-        if list.is_empty() {
-            return None;
-        }
-
-        let mut lo = 0usize;
-        let mut hi = list.len();
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if list[mid].start > pos {
-                hi = mid;
-            } else {
-                lo = mid + 1;
-            }
-        }
-        if lo == 0 {
-            return None;
-        }
-
-        let mut idx = lo - 1;
-        loop {
-            let ent = &list[idx];
-            if pos < ent.start {
-                break;
-            }
-            if pos <= ent.end {
-                return Some(ent.entry_idx);
-            }
-            if idx == 0 {
-                break;
-            }
-            idx -= 1;
-        }
-
-        None
+        self.intervals.get(chr_id as usize)?.find(pos)
     }
 
     fn decompress_block(&self, idx: usize, block: &AniBlockEntry) -> Result<Vec<u8>> {
@@ -806,7 +824,7 @@ impl AniIndex {
             }
         }
 
-        self.intervals = per_chr;
+        self.intervals = per_chr.into_iter().map(IntervalIndex::new).collect();
     }
 
     pub fn info_fields_from_blob(

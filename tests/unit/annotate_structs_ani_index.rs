@@ -1,6 +1,49 @@
 use super::*;
 use crate::annotate::structs::ani::make_variant_key;
 
+#[test]
+fn unknown_contig_cannot_alias_a_dictionary_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let vcf = dir.path().join("in.vcf");
+    let ani = dir.path().join("in.ani");
+    std::fs::write(&vcf, "##fileformat=VCFv4.2\n##contig=<ID=scaf0>\n##contig=<ID=scaf1>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nscaf1\t10\t.\tA\tC\t.\t.\t.\n").unwrap();
+    crate::annotate::builder_v2::build_ani_index_auto_v2(&vcf, &ani).unwrap();
+    let index = AniIndex::open(&ani).unwrap();
+    assert_eq!(index.contig_id("scaf1"), Some(1));
+    assert!(index.lookup_exact("scaf1", 10, "A", "C").is_some());
+    assert!(index.lookup_exact("chr1", 10, "A", "C").is_none());
+    assert!(
+        crate::annotate::cpu_v2::extract_line_keys("chr1\t10\t.\tA\tC\t.\t.\t.", &index, false)
+            .is_none()
+    );
+}
+
+#[test]
+fn interval_queries_match_the_linear_oracle() {
+    let mut entries = vec![IntervalEntry {
+        start: 0,
+        end: 4000,
+        entry_idx: 0,
+    }];
+    for i in 1..1000usize {
+        entries.push(IntervalEntry {
+            start: i as u32 * 2,
+            end: i as u32 * 2 + (i % 7) as u32,
+            entry_idx: i,
+        });
+    }
+    let index = IntervalIndex::new(entries.clone());
+    for pos in 0..5000 {
+        let expected = entries
+            .iter()
+            .rev()
+            .find(|e| e.start <= pos && pos <= e.end)
+            .map(|e| e.entry_idx);
+        assert_eq!(index.find(pos), expected, "{pos}");
+    }
+    assert_eq!(IntervalIndex::new(Vec::new()).find(0), None);
+}
+
 /// Verify the `cached_entry_keys` slice matches what `make_variant_key`
 /// would compute for every entry.
 #[test]

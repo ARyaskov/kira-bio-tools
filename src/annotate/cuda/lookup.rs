@@ -23,7 +23,7 @@ use crate::annotate::reader::{StreamingVcfReader, VcfAnnotationReader};
 use crate::annotate::structs::ani::{AniIndex, AniPosBlock, AniPosContig};
 use crate::annotate::structs::annotate_mode::AnnotateMode;
 use crate::annotate::structs::bundle::{AnnotationBundle, FieldNumber, FieldType};
-use crate::util::{VcfFormat, chr_name_to_id, detect_format, fast_hash64};
+use crate::util::{VcfFormat, detect_format, fast_hash64};
 use std::collections::HashMap;
 
 pub struct GpuAni {
@@ -891,9 +891,7 @@ fn fast_parse_min(line: &str, ani: &AniIndex) -> Option<MinParsed> {
     }
 
     let chrom = &line[..tabs[0]];
-    let chr_id = ani
-        .contig_id(chrom)
-        .or_else(|| chr_name_to_id(chrom).map(u32::from))?;
+    let chr_id = ani.contig_id(chrom)?;
 
     let pos_bytes = &bytes[(tabs[0] + 1)..tabs[1]];
     let pos = parse_u32_bytes(pos_bytes)?;

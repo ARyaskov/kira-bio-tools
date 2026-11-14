@@ -55,41 +55,9 @@ impl ContigDict {
         Self::from_names(names).unwrap_or_default()
     }
 
-    /// O(1) lookup by chr name with bcftools-style chr-prefix normalisation.
-    ///
-    /// Tries exact match, then strip-`chr` / add-`chr`, then `M`/`MT`/`chrM`
-    /// for the mitochondrion.
     #[inline]
     pub fn id(&self, name: &str) -> Option<u32> {
-        if let Some(&id) = self.name_to_id.get(name) {
-            return Some(id);
-        }
-        if let Some(stripped) = name.strip_prefix("chr") {
-            if let Some(&id) = self.name_to_id.get(stripped) {
-                return Some(id);
-            }
-            if stripped == "M"
-                && let Some(&id) = self.name_to_id.get("MT")
-            {
-                return Some(id);
-            }
-        } else {
-            let with_prefix = format!("chr{name}");
-            if let Some(&id) = self.name_to_id.get(with_prefix.as_str()) {
-                return Some(id);
-            }
-            if name == "MT"
-                && let Some(&id) = self.name_to_id.get("chrM")
-            {
-                return Some(id);
-            }
-            if name == "M"
-                && let Some(&id) = self.name_to_id.get("chrM")
-            {
-                return Some(id);
-            }
-        }
-        None
+        self.name_to_id.get(name).copied()
     }
 
     /// O(1) reverse lookup.

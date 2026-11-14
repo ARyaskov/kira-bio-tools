@@ -57,3 +57,11 @@ fn insert_dedupes() {
 fn duplicate_in_from_names_is_rejected() {
     assert!(ContigDict::from_names(["chr1", "chr1"]).is_none());
 }
+
+#[test]
+fn contig_names_are_literal() {
+    let dict = ContigDict::from_names(["chr1", "chrM", "scaf1"]).unwrap();
+    for name in ["1", "M", "MT", "chrUnknown"] {
+        assert_eq!(dict.id(name), None, "{name}");
+    }
+}

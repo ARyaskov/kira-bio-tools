@@ -211,11 +211,10 @@ pub fn encode_record_opts<W: Write>(
             }
         }
     }
-    // htslib: rlen = max(len(REF), END - POS + 1) for symbolic alleles.
     let mut rlen = ref_a.len() as i32;
     if let Some(end) = info_end {
         let span = end - (pos as i64 + 1) + 1;
-        if span > rlen as i64 && alts.iter().any(|a| a.starts_with('<')) {
+        if span > rlen as i64 {
             rlen = span.min(i32::MAX as i64) as i32;
         }
     }

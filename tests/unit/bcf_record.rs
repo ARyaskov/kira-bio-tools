@@ -16,6 +16,18 @@ fn dict_full() -> BcfHeaderDict {
     parse_header_to_dict(&h)
 }
 
+#[test]
+fn end_extends_bcf_intervals_for_every_alt_class() {
+    let dict = dict_full();
+    for alt in ["C", ".", "<NON_REF>", "<DEL>"] {
+        let line = format!("1\t100\t.\tA\t{alt}\t.\tPASS\tEND=250");
+        let mut bytes = Vec::new();
+        encode_record(&mut bytes, &line, &dict).unwrap();
+        let (shared, _) = read_record_raw(&mut Cursor::new(bytes)).unwrap().unwrap();
+        assert_eq!(record_end0(&record_meta(&shared).unwrap()), 250, "{alt}");
+    }
+}
+
 fn roundtrip(line: &str) -> String {
     let dict = dict_full();
     let mut buf = Vec::new();
