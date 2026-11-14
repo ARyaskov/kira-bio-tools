@@ -3,7 +3,8 @@
 use bytemuck::{Pod, Zeroable};
 
 pub const KTILE_MAGIC: [u8; 8] = *b"KIRA_TIL";
-pub const KTILE_VERSION: u32 = 1;
+pub const KTILE_VERSION: u32 = 2;
+pub const KTILE_LEGACY_VERSION: u32 = 1;
 
 /// Fixed 128-byte header at file offset 0.
 #[repr(C)]
@@ -51,13 +52,22 @@ impl KtileHeader {
         if self.magic != KTILE_MAGIC {
             return Err(KtileError::BadMagic);
         }
-        if self.version != KTILE_VERSION {
+        if self.version != KTILE_VERSION && self.version != KTILE_LEGACY_VERSION {
             return Err(KtileError::UnsupportedVersion {
                 found: self.version,
                 expected: KTILE_VERSION,
             });
         }
+        if self.version == KTILE_LEGACY_VERSION && self.has_elias_fano_offsets() {
+            return Err(KtileError::Invalid {
+                section: "line_offsets",
+            });
+        }
         Ok(())
+    }
+
+    pub fn has_elias_fano_offsets(&self) -> bool {
+        (self.flags & flags::HAS_ELIAS_FANO_OFFSETS) != 0
     }
 
     pub fn has_ref_alt_columns(&self) -> bool {
@@ -72,6 +82,7 @@ impl KtileHeader {
 pub mod flags {
     pub const HAS_REF_ALT_COLUMNS: u32 = 1 << 0;
     pub const HAS_COMPRESSED_POOL: u32 = 1 << 1;
+    pub const HAS_ELIAS_FANO_OFFSETS: u32 = 1 << 2;
 }
 
 #[repr(C)]
@@ -91,6 +102,8 @@ pub enum KtileError {
     UnsupportedVersion { found: u32, expected: u32 },
     #[error("ktile file truncated: section {section} extends past file end")]
     Truncated { section: &'static str },
+    #[error("invalid ktile section: {section}")]
+    Invalid { section: &'static str },
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -1,4 +1,3 @@
-use kira_kv_engine::{IndexBuilder, IndexConfig};
 use rayon::prelude::*;
 
 use crate::kbi::index::KbiIndex;
@@ -9,8 +8,6 @@ use crate::vcf::header::ContigDict;
 
 pub struct KbiBuilder {
     entries: Vec<(u64, u64)>,
-    max_rehash: u32,
-    salt: u64,
     contigs: ContigDict,
 }
 
@@ -18,8 +15,6 @@ impl KbiBuilder {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
-            max_rehash: 16,
-            salt: 0x0C0F_FEE0_0D15_EA5E,
             contigs: ContigDict::new(),
         }
     }
@@ -31,8 +26,6 @@ impl KbiBuilder {
         }
     }
 
-    /// Former MPH slot-space multiplier. Since kira_kv_engine 0.7 the hash
-    /// output range is always minimal (one slot per key), so this is ignored.
     #[deprecated(
         since = "0.8.1",
         note = "no effect: the MPH output range is always minimal"
@@ -41,8 +34,6 @@ impl KbiBuilder {
         self
     }
 
-    /// Contig dictionary the keys' chr ids refer to; stored in the index so
-    /// queries can be made by name.
     pub fn set_contigs(&mut self, contigs: ContigDict) {
         self.contigs = contigs;
     }
@@ -69,75 +60,21 @@ impl KbiBuilder {
         if self.entries.is_empty() {
             return Err(KbiError::EmptyDataset);
         }
-
-        self.entries.par_sort_unstable_by_key(|(k, _)| *k);
-
-        // Keep the first record at each (contig, pos); later ones share the key.
-        let mut deduped = Vec::with_capacity(self.entries.len());
-        let mut last_key: Option<u64> = None;
-        let mut dup_count = 0usize;
-
-        for (key, offset) in self.entries {
-            if Some(key) == last_key {
-                dup_count += 1;
-                continue;
-            }
-            deduped.push((key, offset));
-            last_key = Some(key);
-        }
-
+        self.entries.par_sort_by_key(|(key, _)| *key);
+        let original_len = self.entries.len();
+        self.entries.dedup_by_key(|entry| entry.0);
+        let dup_count = original_len - self.entries.len();
         if dup_count > 0 {
             eprintln!(
                 "KBI: {} records share a position with an earlier record and are not point-addressable",
                 dup_count
             );
         }
-
-        let keys: Vec<u64> = deduped.iter().map(|(k, _)| *k).collect();
-        let offsets: Vec<u64> = deduped.iter().map(|(_, o)| *o).collect();
-
-        let key_bytes: Vec<[u8; 8]> = keys.iter().map(|k| k.to_le_bytes()).collect();
-
-        let mut config = IndexConfig::default();
-        config.mph_config.max_rehash = self.max_rehash;
-        config.mph_config.seed = self.salt;
-
-        let index = IndexBuilder::new()
-            .with_config(config)
-            .build_index(key_bytes)?;
-
-        // Keys stay sorted; the MPH slot of each key is recorded so point
-        // lookups can jump straight to the sorted position.
-        let n = keys.len();
-        let slots: Vec<usize> = keys
-            .par_iter()
-            .map(|&key| index.lookup_u64(key).unwrap_or(usize::MAX))
-            .collect();
-        let n_slots = slots
-            .iter()
-            .copied()
-            .filter(|&s| s != usize::MAX)
-            .max()
-            .map(|m| m + 1)
-            .unwrap_or(0);
-        let mut slot_to_idx = vec![u32::MAX; n_slots];
-        for (i, &slot) in slots.iter().enumerate() {
-            if slot == usize::MAX || slot >= n_slots {
-                return Err(KbiError::InvalidFormat(
-                    "MPH lookup failed during build".into(),
-                ));
-            }
-            slot_to_idx[slot] = i as u32;
+        if self.entries.len() > u32::MAX as usize {
+            return Err(KbiError::InvalidFormat("Too many entries".into()));
         }
-        let _ = n;
-
-        Ok(KbiIndex::from_parts(
-            index,
-            keys,
-            offsets,
-            slot_to_idx,
-            self.contigs,
-        ))
+        let (keys, offsets) = self.entries.into_iter().unzip();
+        Ok(KbiIndex::from_parts(keys, offsets, self.contigs))
     }
 }
 

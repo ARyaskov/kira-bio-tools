@@ -204,6 +204,8 @@ Commands: `query`, `cnv`.
   and per-line parse pass.  
   Subcommand: `kira-bt tile build -i/--input <input> [-o/--output <ktile>]`.
 
+Private index compatibility: current readers accept KBI v4 and v5 and KTILE v1 and v2. New KBI files use v5; large KTILE offset tables use v2 only when Elias–Fano saves space. Older binaries need rebuilt sidecars. KBI stores each sorted key once and removes the MPH slot table, trading expected O(1) point lookup for O(log N) exact lookup; region output remains O(log N + K). VCF, BCF, TBI and CSI layouts are unchanged.
+
 ### 3. Tabix, Regions and Headers
 
 - `tabix`  

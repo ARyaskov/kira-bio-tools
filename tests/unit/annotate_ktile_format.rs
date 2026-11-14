@@ -27,3 +27,20 @@ fn header_validate_accepts_current() {
     h.version = KTILE_VERSION;
     assert!(h.validate().is_ok());
 }
+
+#[test]
+fn header_validate_accepts_legacy_and_rejects_legacy_compact_offsets() {
+    let mut header = KtileHeader::zeroed();
+    header.magic = KTILE_MAGIC;
+    header.version = KTILE_LEGACY_VERSION;
+    assert!(header.validate().is_ok());
+    header.flags = flags::HAS_ELIAS_FANO_OFFSETS;
+    std::assert_matches!(
+        header.validate(),
+        Err(KtileError::Invalid {
+            section: "line_offsets"
+        })
+    );
+    header.version = KTILE_VERSION;
+    assert!(header.validate().is_ok());
+}

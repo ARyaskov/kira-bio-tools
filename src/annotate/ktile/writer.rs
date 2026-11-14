@@ -11,9 +11,11 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use flate2::{Compress, Compression, FlushCompress, Status};
+use kira_kv_engine::EliasFano;
 
 use super::format::{
-    CompressedChunkEntry, KTILE_MAGIC, KTILE_VERSION, KtileHeader, flags as ktile_flags,
+    CompressedChunkEntry, KTILE_LEGACY_VERSION, KTILE_MAGIC, KTILE_VERSION, KtileHeader,
+    flags as ktile_flags,
 };
 use crate::util::chr_name_to_id;
 use crate::vcf::UnifiedVcfReader;
@@ -214,8 +216,15 @@ pub fn write_ktile_from_vcf_with<I: AsRef<Path>, O: AsRef<Path>>(
 
     cursor = pad_with_zeros(&mut out, cursor, 8)?;
     let line_offsets_off = cursor;
-    out.write_all(bytemuck::cast_slice(&line_offsets))?;
-    cursor += (line_offsets.len() * std::mem::size_of::<u64>()) as u64;
+    let compact_offsets = encode_compact_offsets(&line_offsets);
+    if let Some(bytes) = &compact_offsets {
+        out.write_all(bytes)?;
+        cursor += bytes.len() as u64;
+        cursor = pad_with_zeros(&mut out, cursor, 4)?;
+    } else {
+        out.write_all(bytemuck::cast_slice(&line_offsets))?;
+        cursor += (line_offsets.len() * std::mem::size_of::<u64>()) as u64;
+    }
 
     let chr_ids_off = cursor;
     out.write_all(bytemuck::cast_slice(&chr_ids))?;
@@ -252,9 +261,16 @@ pub fn write_ktile_from_vcf_with<I: AsRef<Path>, O: AsRef<Path>>(
     if opts.compressed {
         flag_bits |= ktile_flags::HAS_COMPRESSED_POOL;
     }
+    if compact_offsets.is_some() {
+        flag_bits |= ktile_flags::HAS_ELIAS_FANO_OFFSETS;
+    }
     let header = KtileHeader {
         magic: KTILE_MAGIC,
-        version: KTILE_VERSION,
+        version: if compact_offsets.is_some() {
+            KTILE_VERSION
+        } else {
+            KTILE_LEGACY_VERSION
+        },
         flags: flag_bits,
         n_records: n_records as u64,
         headers_off,
@@ -291,6 +307,21 @@ pub fn write_ktile_from_vcf_with<I: AsRef<Path>, O: AsRef<Path>>(
         n_records,
         bytes_written: cursor,
     })
+}
+
+fn encode_compact_offsets(offsets: &[u64]) -> Option<Vec<u8>> {
+    if offsets.len() < 1024 {
+        return None;
+    }
+    let plain_bytes = std::mem::size_of_val(offsets);
+    let compact = EliasFano::from_sorted(offsets)?;
+    if compact.memory_usage() >= plain_bytes {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    compact.write_to(&mut bytes);
+    let padded_len = bytes.len().checked_add(3)? & !3;
+    (compact.memory_usage().checked_add(padded_len)? < plain_bytes).then_some(bytes)
 }
 
 /// Raw-deflate compresses `data` as an independent stream, writes it to

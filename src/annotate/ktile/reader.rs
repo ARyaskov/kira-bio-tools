@@ -10,6 +10,7 @@ use crate::fx::FxHashMap;
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use flate2::{Decompress, FlushDecompress, Status};
+use kira_kv_engine::EliasFano;
 use memmap2::{Mmap, MmapOptions};
 
 use super::format::{CompressedChunkEntry, KtileError, KtileHeader};
@@ -29,6 +30,7 @@ pub struct KtileReader {
     mmap: Arc<Mmap>,
     file: Arc<File>,
     header: KtileHeader,
+    compact_line_offsets: Option<EliasFano>,
     strategy: PoolStrategy,
 }
 
@@ -59,6 +61,7 @@ struct CompressedCache {
 impl Drop for CompressedCache {
     fn drop(&mut self) {
         self.request_tx.take();
+        self.prefetched = crossbeam_channel::never();
         for h in self.handles.drain(..) {
             let _ = h.join();
         }
@@ -177,6 +180,34 @@ fn pread_exact(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> 
     Ok(())
 }
 
+fn checked_section<'a>(
+    bytes: &'a [u8],
+    off: u64,
+    byte_len: u64,
+    section: &'static str,
+) -> Result<&'a [u8]> {
+    let end = off
+        .checked_add(byte_len)
+        .filter(|&end| end <= bytes.len() as u64)
+        .ok_or(KtileError::Truncated { section })?;
+    let start = usize::try_from(off).map_err(|_| KtileError::Truncated { section })?;
+    let end = usize::try_from(end).map_err(|_| KtileError::Truncated { section })?;
+    Ok(&bytes[start..end])
+}
+
+fn checked_column<'a, T: bytemuck::Pod>(
+    bytes: &'a [u8],
+    off: u64,
+    count: u64,
+    section: &'static str,
+) -> Result<&'a [T]> {
+    let byte_len = count
+        .checked_mul(std::mem::size_of::<T>() as u64)
+        .ok_or(KtileError::Truncated { section })?;
+    let section_bytes = checked_section(bytes, off, byte_len, section)?;
+    bytemuck::try_cast_slice(section_bytes).map_err(|_| KtileError::Invalid { section }.into())
+}
+
 impl KtileReader {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(path.as_ref())
@@ -192,48 +223,174 @@ impl KtileReader {
         if mmap.len() < KtileHeader::SIZE {
             return Err(KtileError::Truncated { section: "header" }.into());
         }
-        let header: KtileHeader = *bytemuck::from_bytes(&mmap[..KtileHeader::SIZE]);
+        let header: KtileHeader = bytemuck::pod_read_unaligned(&mmap[..KtileHeader::SIZE]);
         header.validate()?;
-
-        let len = mmap.len() as u64;
-        let check = |off: u64, byte_len: u64, name: &'static str| -> Result<()> {
-            if off + byte_len > len {
-                Err(KtileError::Truncated { section: name }.into())
-            } else {
-                Ok(())
+        let headers = checked_section(&mmap, header.headers_off, header.headers_len, "headers")?;
+        std::str::from_utf8(headers).context("ktile header block is not UTF-8")?;
+        let n = usize::try_from(header.n_records).map_err(|_| KtileError::Invalid {
+            section: "n_records",
+        })?;
+        let offset_count = header.n_records.checked_add(1).ok_or(KtileError::Invalid {
+            section: "line_offsets",
+        })?;
+        let compact_line_offsets = if header.has_elias_fano_offsets() {
+            let byte_len = header
+                .chr_ids_off
+                .checked_sub(header.line_offsets_off)
+                .ok_or(KtileError::Invalid {
+                    section: "line_offsets",
+                })?;
+            let bytes = checked_section(&mmap, header.line_offsets_off, byte_len, "line_offsets")?;
+            let mut cursor = 0;
+            let offsets = EliasFano::read_from(bytes, &mut cursor).ok_or(KtileError::Invalid {
+                section: "line_offsets",
+            })?;
+            if offsets.len() as u64 != offset_count
+                || bytes.len() - cursor > 3
+                || bytes[cursor..].iter().any(|&byte| byte != 0)
+            {
+                return Err(KtileError::Invalid {
+                    section: "line_offsets",
+                }
+                .into());
             }
+            Some(offsets)
+        } else {
+            None
         };
-        check(header.headers_off, header.headers_len, "headers")?;
-        std::str::from_utf8(
-            &mmap[header.headers_off as usize..(header.headers_off + header.headers_len) as usize],
-        )
-        .context("ktile header block is not UTF-8")?;
-        let n = header.n_records as usize;
-        check(
-            header.line_offsets_off,
-            ((n + 1) * std::mem::size_of::<u64>()) as u64,
-            "line_offsets",
-        )?;
-        check(
-            header.chr_ids_off,
-            (n * std::mem::size_of::<u32>()) as u64,
-            "chr_ids",
-        )?;
-        check(
-            header.positions_off,
-            (n * std::mem::size_of::<u32>()) as u64,
-            "positions",
-        )?;
-        check(header.line_pool_off, header.line_pool_len, "line_pool")?;
-        // Phase 3 columns are optional — only validate when the flag is
-        // set (writer pre-Phase 3 leaves the four fields zeroed).
-        if header.has_ref_alt_columns() {
-            let col_bytes = (n * std::mem::size_of::<u32>()) as u64;
-            check(header.off_ref_offsets, col_bytes, "ref_offsets")?;
-            check(header.off_ref_lens, col_bytes, "ref_lens")?;
-            check(header.off_alt_offsets, col_bytes, "alt_offsets")?;
-            check(header.off_alt_lens, col_bytes, "alt_lens")?;
+        let raw_line_offsets = if compact_line_offsets.is_none() {
+            Some(checked_column::<u64>(
+                &mmap,
+                header.line_offsets_off,
+                offset_count,
+                "line_offsets",
+            )?)
+        } else {
+            None
+        };
+        let offset_at = |idx: usize| match &compact_line_offsets {
+            Some(offsets) => offsets.get(idx),
+            None => raw_line_offsets.unwrap()[idx],
+        };
+        if n.checked_add(1).is_none() || offset_at(0) != 0 {
+            return Err(KtileError::Invalid {
+                section: "line_offsets",
+            }
+            .into());
         }
+        let mut previous = offset_at(0);
+        for idx in 1..=n {
+            let current = offset_at(idx);
+            if current <= previous {
+                return Err(KtileError::Invalid {
+                    section: "line_offsets",
+                }
+                .into());
+            }
+            previous = current;
+        }
+        checked_column::<u32>(&mmap, header.chr_ids_off, header.n_records, "chr_ids")?;
+        checked_column::<u32>(&mmap, header.positions_off, header.n_records, "positions")?;
+        checked_section(
+            &mmap,
+            header.line_pool_off,
+            header.line_pool_len,
+            "line_pool",
+        )?;
+        if header.has_ref_alt_columns() {
+            checked_column::<u32>(
+                &mmap,
+                header.off_ref_offsets,
+                header.n_records,
+                "ref_offsets",
+            )?;
+            checked_column::<u32>(&mmap, header.off_ref_lens, header.n_records, "ref_lens")?;
+            checked_column::<u32>(
+                &mmap,
+                header.off_alt_offsets,
+                header.n_records,
+                "alt_offsets",
+            )?;
+            checked_column::<u32>(&mmap, header.off_alt_lens, header.n_records, "alt_lens")?;
+        }
+        let chunks_vec = if header.has_compressed_pool() {
+            let chunks = checked_column::<CompressedChunkEntry>(
+                &mmap,
+                header.off_chunk_index,
+                u64::from(header.n_chunks),
+                "chunk_index",
+            )?
+            .to_vec();
+            if (n > 0 && header.lines_per_chunk == 0)
+                || (n == 0 && !chunks.is_empty())
+                || (n > 0
+                    && header.n_records.div_ceil(u64::from(header.lines_per_chunk))
+                        != u64::from(header.n_chunks))
+            {
+                return Err(KtileError::Invalid {
+                    section: "chunk_index",
+                }
+                .into());
+            }
+            let mut compressed_end = 0u64;
+            let mut uncompressed_end = 0u64;
+            for (idx, chunk) in chunks.iter().enumerate() {
+                let line_start = idx.checked_mul(header.lines_per_chunk as usize).ok_or(
+                    KtileError::Invalid {
+                        section: "chunk_index",
+                    },
+                )?;
+                let line_end = line_start
+                    .checked_add(header.lines_per_chunk as usize)
+                    .ok_or(KtileError::Invalid {
+                        section: "chunk_index",
+                    })?
+                    .min(n);
+                if chunk.compressed_off != compressed_end
+                    || chunk.uncompressed_off != uncompressed_end
+                    || chunk.compressed_size == 0
+                    || chunk.uncompressed_size == 0
+                    || offset_at(line_start) != uncompressed_end
+                {
+                    return Err(KtileError::Invalid {
+                        section: "chunk_index",
+                    }
+                    .into());
+                }
+                compressed_end = compressed_end
+                    .checked_add(u64::from(chunk.compressed_size))
+                    .filter(|&end| end <= header.line_pool_len)
+                    .ok_or(KtileError::Invalid {
+                        section: "chunk_index",
+                    })?;
+                uncompressed_end = uncompressed_end
+                    .checked_add(u64::from(chunk.uncompressed_size))
+                    .ok_or(KtileError::Invalid {
+                        section: "chunk_index",
+                    })?;
+                if offset_at(line_end) != uncompressed_end {
+                    return Err(KtileError::Invalid {
+                        section: "chunk_index",
+                    }
+                    .into());
+                }
+            }
+            if compressed_end != header.line_pool_len || uncompressed_end != offset_at(n) {
+                return Err(KtileError::Invalid {
+                    section: "chunk_index",
+                }
+                .into());
+            }
+            chunks
+        } else {
+            if offset_at(n) != header.line_pool_len {
+                return Err(KtileError::Invalid {
+                    section: "line_offsets",
+                }
+                .into());
+            }
+            Vec::new()
+        };
 
         // Choose strategy. Compressed mode is independent of the size
         // threshold — once a ktile was built compressed, we always need
@@ -245,17 +402,6 @@ impl KtileReader {
             // Load the chunk index (small — 24 B per chunk).
             let n_chunks = header.n_chunks as usize;
             if n_chunks > 0 {
-                let chunk_index_off = header.off_chunk_index as usize;
-                let chunk_index_bytes = n_chunks * std::mem::size_of::<CompressedChunkEntry>();
-                check(
-                    header.off_chunk_index,
-                    chunk_index_bytes as u64,
-                    "chunk_index",
-                )?;
-                let chunks_vec: Vec<CompressedChunkEntry> = bytemuck::cast_slice(
-                    &mmap[chunk_index_off..chunk_index_off + chunk_index_bytes],
-                )
-                .to_vec();
                 // Spawn N decompress workers sharing a single request
                 // channel. Channel capacity scales with worker count
                 // so all workers can be busy with N requests in flight
@@ -331,6 +477,7 @@ impl KtileReader {
             mmap,
             file,
             header,
+            compact_line_offsets,
             strategy,
         })
     }
@@ -356,11 +503,16 @@ impl KtileReader {
         std::str::from_utf8(&self.mmap[start..end]).unwrap_or("")
     }
 
-    fn line_offsets(&self) -> &[u64] {
-        let n = self.header.n_records as usize + 1;
-        let start = self.header.line_offsets_off as usize;
-        let end = start + n * std::mem::size_of::<u64>();
-        bytemuck::cast_slice(&self.mmap[start..end])
+    fn line_offset(&self, idx: usize) -> u64 {
+        if let Some(offsets) = &self.compact_line_offsets {
+            offsets.get(idx)
+        } else {
+            let n = self.header.n_records as usize + 1;
+            let start = self.header.line_offsets_off as usize;
+            let end = start + n * std::mem::size_of::<u64>();
+            let offsets: &[u64] = bytemuck::cast_slice(&self.mmap[start..end]);
+            offsets[idx]
+        }
     }
 
     fn chr_ids(&self) -> &[u32] {
@@ -396,9 +548,8 @@ impl KtileReader {
     /// without paying the `Vec<u8> → String → batch.bytes` chain. On
     /// a 6.5 M-record chr1 1000G this saves ~3-5 sec wall-clock.
     pub fn push_line_into_batch(&self, idx: usize, batch: &mut crate::annotate::cpu_v2::ReadBatch) {
-        let offs = self.line_offsets();
-        let pool_start = offs[idx];
-        let pool_end = offs[idx + 1];
+        let pool_start = self.line_offset(idx);
+        let pool_end = self.line_offset(idx + 1);
         match &self.strategy {
             PoolStrategy::Whole => {
                 let abs_start = (self.header.line_pool_off + pool_start) as usize;
@@ -425,9 +576,8 @@ impl KtileReader {
     /// Returns line `idx` bytes as a fresh Vec. Used internally by
     /// `line_owned`, `ref_slice`, `alt_slice`.
     fn line_bytes_to_vec(&self, idx: usize) -> Vec<u8> {
-        let offs = self.line_offsets();
-        let pool_start = offs[idx];
-        let pool_end = offs[idx + 1];
+        let pool_start = self.line_offset(idx);
+        let pool_end = self.line_offset(idx + 1);
         match &self.strategy {
             PoolStrategy::Whole => {
                 let abs_start = (self.header.line_pool_off + pool_start) as usize;
@@ -528,7 +678,7 @@ impl KtileReader {
             entry_pos = Some(cache_borrow.entries.len() - 1);
             // Re-prime the worker pool to start from where we just
             // landed (in case workers fell behind / out-of-sync).
-            cache_borrow.next_to_prefetch = chunk_idx + 1;
+            cache_borrow.next_to_prefetch = cache_borrow.next_to_prefetch.max(chunk_idx + 1);
         }
 
         // Queue up the next batch of prefetch requests, capped at
@@ -543,9 +693,8 @@ impl KtileReader {
         // Compute line-local offsets within the chunk's uncompressed
         // span. line_offsets[i] is uncompressed-pool-relative; the chunk
         // covers [chunk.uncompressed_off .. + uncompressed_size].
-        let offs = self.line_offsets();
-        let pool_start = offs[line_idx];
-        let pool_end = offs[line_idx + 1];
+        let pool_start = self.line_offset(line_idx);
+        let pool_end = self.line_offset(line_idx + 1);
         let local_start = (pool_start - chunk.uncompressed_off) as usize;
         let local_end = (pool_end - chunk.uncompressed_off) as usize;
         f(&cache_borrow.entries[entry_pos].data[local_start..local_end])
